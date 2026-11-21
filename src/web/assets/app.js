@@ -2581,11 +2581,20 @@
   }
 
   var searchState = { indexes: [], selected: '', query: '', result: null, offset: 0 };
+  var searchRequestSequence = 0;
 
   async function renderSearch() {
     var root = $('view-root');
+    if (state.currentRoute !== 'search') return;
+    var requestToken = state.token;
+    var requestSequence = ++searchRequestSequence;
+    function isCurrentSearch() {
+      return state.currentRoute === 'search' && state.token === requestToken &&
+        searchRequestSequence === requestSequence;
+    }
     try {
       var data = await Promise.all([api('/_api/v1/search'), api('/_api/v1/runtimes')]);
+      if (!isCurrentSearch()) return;
       searchState.indexes = data[0] || [];
       state.projects = data[1] || [];
       if (!searchState.indexes.some(function (item) { return item.id === searchState.selected; })) {
@@ -2597,6 +2606,7 @@
         searchState.offset = Math.max(0, Math.ceil(selected.doc_count / 100) * 100 - 100);
       }
       var docs = selected ? await api('/_api/v1/search/' + enc(selected.id) + '/docs?limit=101&offset=' + searchState.offset) : [];
+      if (!isCurrentSearch()) return;
       var hasMoreDocs = docs.length > 100;
       docs = docs.slice(0, 100);
       var writable = selected && canWriteResource(selected.project_id);
@@ -2700,7 +2710,7 @@
         });
       });
     } catch (e) {
-      root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+      if (isCurrentSearch()) root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
     }
   }
 
