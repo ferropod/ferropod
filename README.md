@@ -9,6 +9,7 @@
 # ferropod
 
 [![CI](https://github.com/ferropod/ferropod/actions/workflows/ci.yml/badge.svg)](https://github.com/ferropod/ferropod/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/ferropod/ferropod?include_prereleases&label=Release)](https://github.com/ferropod/ferropod/releases)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-orange.svg)](LICENSE)
 [![Homepage](https://img.shields.io/badge/Homepage-ferropod.github.io-1f2937.svg)](https://ferropod.github.io)
 
@@ -22,7 +23,36 @@ Single binary + single `/data` directory. Designed to run comfortably even on a 
 - **Zero-Build Admin UI & Daily Logs**: Embedded HTML/HTMX dashboard at `/_admin`, SSE live tail, and daily rotating Turso log files.
 - **Native MCP Server (M3)**: Built-in `rmcp` tools/resources so AI agents can deploy, test, inspect logs, and promote/rollback safely.
 
-## Quickstart
+## One-Click Install & Update
+
+Prebuilt binaries for Linux (`x86_64`, `aarch64`) and macOS (`arm64`, `x86_64`) are published on [GitHub Releases](https://github.com/ferropod/ferropod/releases) with `SHA256SUMS.txt` verification.
+
+```bash
+# One-click install (Linux systemd + auto master key + initial admin token, or macOS binary)
+curl -fsSL https://raw.githubusercontent.com/ferropod/ferropod/main/scripts/install.sh | sudo bash
+
+# Install with built-in Let's Encrypt HTTPS on 80/443
+curl -fsSL https://raw.githubusercontent.com/ferropod/ferropod/main/scripts/install.sh | sudo bash -s -- \
+  --bind 0.0.0.0:80 \
+  --https-bind 0.0.0.0:443 \
+  --domain panel.example.com \
+  --email ops@example.com \
+  --redirect-https
+
+# One-click update via script
+curl -fsSL https://raw.githubusercontent.com/ferropod/ferropod/main/scripts/install.sh | sudo bash -s -- --update
+
+# Or self-update directly via CLI (supports --check, --version vX.Y.Z, --force)
+ferropod update --check
+sudo ferropod update
+
+# Uninstall (keeps /var/lib/ferropod unless --purge is passed)
+curl -fsSL https://raw.githubusercontent.com/ferropod/ferropod/main/scripts/install.sh | sudo bash -s -- --uninstall
+```
+
+You can also check for updates, browse GitHub Releases, and trigger **one-click self-update & graceful restart** directly from the Admin Console at `/_admin` → **Updates** (`/_admin#/updates`).
+
+## Quickstart (Build from Source)
 
 ```bash
 # Build
