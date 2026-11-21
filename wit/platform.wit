@@ -1,0 +1,47 @@
+package ferropod:platform@0.1.0;
+
+interface kv {
+    get: func(binding: string, key: string) -> result<option<list<u8>>, string>;
+    put: func(binding: string, key: string, value: list<u8>, ttl-secs: option<u64>, ephemeral: bool) -> result<_, string>;
+    put-if-absent: func(binding: string, key: string, value: list<u8>, ttl-secs: option<u64>) -> result<bool, string>;
+    incr: func(binding: string, key: string, delta: s64, ttl-secs: option<u64>) -> result<s64, string>;
+    delete: func(binding: string, key: string) -> result<_, string>;
+    list: func(binding: string, prefix: option<string>, limit: u32) -> result<list<string>, string>;
+}
+
+interface db {
+    query: func(binding: string, sql: string, params-json: string) -> result<string, string>;
+    execute: func(binding: string, sql: string, params-json: string) -> result<u64, string>;
+}
+
+interface queue {
+    enqueue: func(
+        binding: string,
+        payload: list<u8>,
+        delay-secs: option<u64>,
+        priority: option<s32>,
+        dedup-key: option<string>
+    ) -> result<s64, string>;
+}
+
+interface bucket {
+    get: func(binding: string, key: string) -> result<option<list<u8>>, string>;
+    put: func(binding: string, key: string, body: list<u8>, content-type: option<string>) -> result<string, string>;
+    delete: func(binding: string, key: string) -> result<_, string>;
+    list: func(binding: string, prefix: option<string>, limit: u32) -> result<string, string>;
+    presign-url: func(binding: string, key: string, method: string, expires-secs: u64) -> result<string, string>;
+}
+
+interface env {
+    secret: func(key: string) -> option<string>;
+}
+
+world worker {
+    import kv;
+    import db;
+    import queue;
+    import bucket;
+    import env;
+
+    export wasi:http/incoming-handler@0.2.0;
+}

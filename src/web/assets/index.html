@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>ferropod Admin</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23ea580c'/%3E%3Cpath d='M10 9h12v4h-8v3h6v4h-6v5h-4V9z' fill='%23ffffff'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/_admin/assets/styles.css">
+</head>
+<body>
+  <section id="login-view" class="login-view">
+    <div class="login-card">
+      <div class="login-top">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">F</span>
+          <div>
+            <div class="brand-name"><span>ferro</span>pod</div>
+            <div class="muted text-xs" data-i18n="app.subtitle">Lightweight Self-Hosted PaaS</div>
+          </div>
+        </div>
+        <div class="row gap-xs">
+          <button type="button" class="btn btn-ghost btn-sm" id="login-lang-btn" data-action="toggle-lang">EN</button>
+          <button type="button" class="btn btn-ghost btn-sm" id="login-theme-btn" data-action="toggle-theme" aria-label="Theme"></button>
+        </div>
+      </div>
+
+      <h1 class="login-title" data-i18n="auth.title">Connect to Admin Console</h1>
+      <p class="login-desc" data-i18n="auth.subtitle">Enter a Bearer API token to manage projects, routes, storage, databases, and logs.</p>
+
+      <form id="login-form" class="stack gap-md">
+        <div class="field">
+          <label for="token-input" data-i18n="auth.tokenLabel">Bearer Token</label>
+          <div class="input-group">
+            <input id="token-input" type="password" autocomplete="off" spellcheck="false" data-i18n-placeholder="auth.tokenPlaceholder" placeholder="fp_...">
+            <button type="button" class="btn btn-ghost btn-sm" id="toggle-token-vis" data-i18n="auth.showToken">Show</button>
+          </div>
+        </div>
+        <div id="login-error" class="alert alert-error hidden" role="alert"></div>
+        <button type="submit" class="btn btn-primary btn-block" id="login-submit" data-i18n="auth.connect">Connect</button>
+      </form>
+
+      <div class="login-hint">
+        <div class="login-hint-title" data-i18n="auth.hintTitle">How to obtain a token</div>
+        <code>ferropod dev</code>
+        <code>ferropod token create --name admin --scope admin</code>
+      </div>
+    </div>
+  </section>
+
+  <div id="app-shell" class="app-shell hidden">
+    <div id="drawer-backdrop" class="drawer-backdrop"></div>
+
+    <aside id="sidebar" class="sidebar" aria-label="Sidebar Navigation">
+      <div class="sidebar-header">
+        <a href="#/overview" class="brand" data-nav="overview">
+          <span class="brand-mark" aria-hidden="true">F</span>
+          <span class="brand-name"><span>ferro</span>pod</span>
+        </a>
+        <button type="button" class="btn btn-ghost btn-icon mobile-only" id="close-drawer-btn" aria-label="Close">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+
+      <nav class="sidebar-nav" id="sidebar-nav">
+        <div class="nav-group-label" data-i18n="nav.groupPlatform">Platform</div>
+        <a href="#/overview" class="nav-item" data-nav="overview">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+          <span data-i18n="nav.overview">Overview</span>
+        </a>
+        <a href="#/projects" class="nav-item" data-nav="projects">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7l9-4 9 4-9 4-9-4z"/><path d="M3 12l9 4 9-4"/><path d="M3 17l9 4 9-4"/></svg>
+          <span data-i18n="nav.projects">Projects</span>
+        </a>
+        <a href="#/routes" class="nav-item" data-nav="routes">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3.6 9h16.8M3.6 15h16.8M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>
+          <span data-i18n="nav.routes">Routes</span>
+        </a>
+
+        <div class="nav-group-label" data-i18n="nav.groupData">Data &amp; Runtime</div>
+        <a href="#/kv" class="nav-item" data-nav="kv">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/><circle cx="19" cy="18" r="2"/></svg>
+          <span data-i18n="nav.kv">KV Store</span>
+        </a>
+        <a href="#/queues" class="nav-item" data-nav="queues">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="4" rx="1"/><rect x="3" y="11" width="18" height="4" rx="1"/><rect x="3" y="17" width="12" height="4" rx="1"/></svg>
+          <span data-i18n="nav.queues">Queues</span>
+        </a>
+        <a href="#/blobs" class="nav-item" data-nav="blobs">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7z"/></svg>
+          <span data-i18n="nav.blobs">Object Storage</span>
+        </a>
+        <a href="#/dbs" class="nav-item" data-nav="dbs">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v6c0 1.66 3.58 3 8 3s8-1.34 8-3V6"/><path d="M4 12v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6"/></svg>
+          <span data-i18n="nav.dbs">Databases</span>
+        </a>
+
+        <div class="nav-group-label" data-i18n="nav.groupSystem">Access &amp; Telemetry</div>
+        <a href="#/tokens" class="nav-item" data-nav="tokens" id="nav-tokens">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="15" r="4"/><path d="M11 12l8-8M16 7l3 3M14 9l2 2"/></svg>
+          <span data-i18n="nav.tokens">Tokens</span>
+        </a>
+        <a href="#/logs" class="nav-item" data-nav="logs">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 10h12M4 14h16M4 18h9"/></svg>
+          <span data-i18n="nav.logs">Logs</span>
+        </a>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="session-box">
+          <div class="session-actor" id="session-actor">-</div>
+          <span class="badge badge-neutral" id="session-scope">-</span>
+        </div>
+        <button type="button" class="btn btn-ghost btn-sm btn-block" id="disconnect-btn" data-i18n="auth.disconnect">Disconnect</button>
+      </div>
+    </aside>
+
+    <div class="main-col">
+      <header class="topbar">
+        <div class="topbar-left">
+          <button type="button" class="btn btn-ghost btn-icon tablet-down" id="open-drawer-btn" aria-label="Menu">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+          </button>
+          <h1 class="topbar-title" id="topbar-title">Overview</h1>
+        </div>
+        <div class="topbar-right">
+          <button type="button" class="btn btn-ghost btn-sm" id="refresh-btn" data-action="refresh">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+            <span class="hide-xs" data-i18n="common.refresh">Refresh</span>
+          </button>
+          <button type="button" class="btn btn-ghost btn-sm" id="topbar-lang-btn" data-action="toggle-lang">EN</button>
+          <button type="button" class="btn btn-ghost btn-icon" id="topbar-theme-btn" data-action="toggle-theme" aria-label="Theme"></button>
+        </div>
+      </header>
+
+      <main id="view-root" class="view-root"></main>
+    </div>
+
+    <nav id="mobile-nav" class="mobile-nav" aria-label="Quick Navigation">
+      <a href="#/overview" class="mobile-nav-item" data-nav="overview">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+        <span data-i18n="nav.overview">Overview</span>
+      </a>
+      <a href="#/projects" class="mobile-nav-item" data-nav="projects">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 7l9-4 9 4-9 4-9-4z"/><path d="M3 12l9 4 9-4"/><path d="M3 17l9 4 9-4"/></svg>
+        <span data-i18n="nav.projects">Projects</span>
+      </a>
+      <a href="#/routes" class="mobile-nav-item" data-nav="routes">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M3.6 9h16.8M3.6 15h16.8M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>
+        <span data-i18n="nav.routes">Routes</span>
+      </a>
+      <a href="#/logs" class="mobile-nav-item" data-nav="logs">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 6h16M4 10h12M4 14h16M4 18h9"/></svg>
+        <span data-i18n="nav.logs">Logs</span>
+      </a>
+      <button type="button" class="mobile-nav-item" id="mobile-more-btn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="6" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="18" cy="12" r="1.5"/></svg>
+        <span data-i18n="nav.more">More</span>
+      </button>
+    </nav>
+  </div>
+
+  <div id="modal-root" class="modal-root hidden" aria-hidden="true"></div>
+  <div id="toast-root" class="toast-root" aria-live="polite"></div>
+
+  <script src="/_admin/assets/i18n.js"></script>
+  <script src="/_admin/assets/app.js"></script>
+</body>
+</html>

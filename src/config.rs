@@ -1,0 +1,116 @@
+use std::net::SocketAddr;
+use std::path::PathBuf;
+
+use clap::ValueEnum;
+use serde::{Deserialize, Serialize};
+
+/// Resource sizing preset for `ferropod serve`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum Profile {
+    /// Tuned for 512 MiB RAM VPS deployments.
+    LowMem,
+    /// Standard preset for 2 GiB+ hosts.
+    #[default]
+    Standard,
+}
+
+/// Runtime configuration for the single-binary `ferropod` server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Config {
+    pub profile: Profile,
+    pub bind_addr: SocketAddr,
+    pub data_dir: PathBuf,
+    /// Master key material used to derive AES-256-GCM and HMAC-SHA256 keys.
+    pub master_key: String,
+    pub tokio_worker_threads: usize,
+    pub max_concurrency: usize,
+    pub queue_concurrency: usize,
+    pub max_open_user_dbs: usize,
+    pub max_ephemeral_kv_entries: usize,
+    pub log_channel_capacity: usize,
+    pub log_retention_days: u32,
+    pub queue_pending_retention_secs: i64,
+    pub queue_dlq_retention_secs: i64,
+    pub queue_lease_secs: i64,
+    pub blob_gc_grace_secs: i64,
+    pub maintenance_interval_secs: u64,
+    pub max_blob_upload_bytes: usize,
+}
+
+impl Config {
+    /// Create configuration defaults for the selected [`Profile`].
+    pub fn for_profile(
+        profile: Profile,
+        bind_addr: SocketAddr,
+        data_dir: PathBuf,
+        master_key: String,
+    ) -> Self {
+        match profile {
+            Profile::LowMem => Self {
+                profile,
+                bind_addr,
+                data_dir,
+                master_key,
+                tokio_worker_threads: 2,
+                max_concurrency: 32,
+                queue_concurrency: 4,
+                max_open_user_dbs: 10,
+                max_ephemeral_kv_entries: 4_096,
+                log_channel_capacity: 1_024,
+                log_retention_days: 7,
+                queue_pending_retention_secs: 7 * 24 * 3600,
+                queue_dlq_retention_secs: 7 * 24 * 3600,
+                queue_lease_secs: 60,
+                blob_gc_grace_secs: 30,
+                maintenance_interval_secs: 30,
+                max_blob_upload_bytes: 64 * 1024 * 1024,
+            },
+            Profile::Standard => Self {
+                profile,
+                bind_addr,
+                data_dir,
+                master_key,
+                tokio_worker_threads: std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(4),
+                max_concurrency: 256,
+                queue_concurrency: 16,
+                max_open_user_dbs: 64,
+                max_ephemeral_kv_entries: 32_768,
+                log_channel_capacity: 4_096,
+                log_retention_days: 7,
+                queue_pending_retention_secs: 7 * 24 * 3600,
+                queue_dlq_retention_secs: 14 * 24 * 3600,
+                queue_lease_secs: 60,
+                blob_gc_grace_secs: 30,
+                maintenance_interval_secs: 30,
+                max_blob_upload_bytes: 256 * 1024 * 1024,
+            },
+        }
+    }
+
+    pub fn core_db_path(&self) -> PathBuf {
+        self.data_dir.join("core.db")
+    }
+
+    pub fn queue_db_path(&self) -> PathBuf {
+        self.data_dir.join("queue.db")
+    }
+
+    pub fn user_dbs_dir(&self) -> PathBuf {
+        self.data_dir.join("dbs")
+    }
+
+    pub fn logs_dir(&self) -> PathBuf {
+        self.data_dir.join("logs")
+    }
+
+    pub fn blobs_dir(&self) -> PathBuf {
+        self.data_dir.join("blobs")
+    }
+
+    pub fn artifacts_dir(&self) -> PathBuf {
+        self.data_dir.join("artifacts")
+    }
+}

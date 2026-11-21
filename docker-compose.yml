@@ -1,0 +1,14 @@
+services:
+  ferropod:
+    build: .
+    container_name: ferropod
+    restart: unless-stopped
+    environment:
+      FERROPOD_PROFILE: ${FERROPOD_PROFILE:-low-mem}
+      FERROPOD_BIND: 0.0.0.0:8080
+      FERROPOD_DATA_DIR: /data
+      FERROPOD_MASTER_KEY: ${FERROPOD_MASTER_KEY:-change-this-strong-master-key}
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data

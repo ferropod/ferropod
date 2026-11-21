@@ -1,0 +1,10 @@
+/target
+/data
+/.cargo-tmp
+/.ferropod-dev
+.git
+*.db
+*.db-wal
+*.db-shm
+*.db-log
+*.cwasm
