@@ -629,11 +629,15 @@ class FpProjectBindings extends HTMLElement {
   }
 
   _optionsForType(type) {
-    if (type === 'db') return (this._resources.dbs || []).map((d) => ({ value: d.name, label: `${d.name}${d.project_id ? '' : ' (global)'}` }));
-    if (type === 'kv') return (this._resources.kvNamespaces || []).map((n) => ({ value: n.name, label: `${n.name}${n.project_id ? '' : ' (global)'}` }));
-    if (type === 'queue') return (this._resources.queues || []).map((q) => ({ value: q.name, label: `${q.name}${q.project_id ? '' : ' (global)'}` }));
-    if (type === 'bucket') return (this._resources.buckets || []).map((b) => ({ value: b.name, label: `${b.name}${b.project_id ? '' : ' (global)'}` }));
-    return [];
+    const resources = {
+      db: this._resources.dbs,
+      kv: this._resources.kvNamespaces,
+      queue: this._resources.queues,
+      bucket: this._resources.buckets
+    };
+    return (resources[type] || [])
+      .filter((resource) => this._project && resource.project_id === this._project.id)
+      .map((resource) => ({ value: resource.name, label: resource.name }));
   }
 
   _buildBindingsObj() {
