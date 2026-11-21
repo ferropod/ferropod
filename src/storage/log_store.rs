@@ -9,6 +9,7 @@ use turso::{transaction::TransactionBehavior, Database, Value as TursoValue};
 
 use crate::core::model::{FerroError, LogEntry, LogQuery, Result};
 use crate::core::traits::LogStore;
+use crate::storage::core_store::escape_like;
 use crate::storage::tx::{checkpoint_db, connect_db, map_turso_err, open_turso_db};
 
 const LOG_SCHEMA: &str = r#"
@@ -261,6 +262,16 @@ impl LogStore for DailyLogStore {
                 clauses.push(format!("ts >= ?{idx}"));
                 params.push(TursoValue::Integer(since));
                 idx += 1;
+            }
+            if let Some(raw_q) = q.q.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                for term in raw_q.split_whitespace() {
+                    let pattern = format!("%{}%", escape_like(&term.to_lowercase()));
+                    clauses.push(format!(
+                        "(LOWER(message) LIKE ?{idx} ESCAPE '\\' OR LOWER(COALESCE(meta_json, '')) LIKE ?{idx} ESCAPE '\\' OR LOWER(COALESCE(request_id, '')) LIKE ?{idx} ESCAPE '\\')"
+                    ));
+                    params.push(TursoValue::Text(pattern));
+                    idx += 1;
+                }
             }
 
             let remaining = (limit - collected.len()) as i64;

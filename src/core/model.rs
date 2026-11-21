@@ -433,6 +433,8 @@ pub struct LogQuery {
     pub limit: Option<usize>,
 }
 
+    #[serde(default)]
+    pub q: Option<String>,
 /// Byte stream type used by [`crate::core::traits::ObjectStore`].
 pub type ByteStream =
     std::pin::Pin<Box<dyn futures_util::Stream<Item = std::io::Result<Bytes>> + Send>>;
