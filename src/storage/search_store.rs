@@ -504,7 +504,7 @@ impl SearchStore for TursoSearchStore {
         let conn = connect_db(&self.db)?;
         let mut rows = conn
             .query(
-                "SELECT doc_json FROM search_docs WHERE index_id = ?1 ORDER BY updated_at DESC LIMIT 500",
+                "SELECT doc_json FROM search_docs WHERE index_id = ?1 ORDER BY updated_at DESC",
                 [index_id],
             )
             .await

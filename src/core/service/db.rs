@@ -316,7 +316,7 @@ impl PlatformService {
 
         let mut hits: Vec<DbFtsHit> = Vec::new();
         if valid_sql_ident(&idx.table) {
-            let select_sql = format!("SELECT * FROM \"{}\" LIMIT 500", idx.table);
+            let select_sql = format!("SELECT * FROM \"{}\"", idx.table);
             if let Ok(qr) = self.db.query(&meta.id, &select_sql, vec![]).await {
                 idx.rows_indexed = qr.rows.len();
                 for row_vals in qr.rows {

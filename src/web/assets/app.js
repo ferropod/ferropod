@@ -2941,6 +2941,7 @@
       panel.addEventListener('fp-log-query', async function (ev) {
         var d = ev.detail || {};
         state.historyFilters = {
+          q: d.q || '',
           source: d.source || '',
           level: d.level || '',
           project_id: d.project_id || '',
@@ -2959,6 +2960,7 @@
   async function queryHistoryLogs() {
     var hf = state.historyFilters;
     var params = [];
+    if (hf.q) params.push('q=' + enc(hf.q));
     if (hf.source) params.push('source=' + enc(hf.source));
     if (hf.level) params.push('level=' + enc(hf.level));
     if (hf.project_id) params.push('project_id=' + enc(hf.project_id));
