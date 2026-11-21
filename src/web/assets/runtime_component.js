@@ -181,18 +181,9 @@ runtimeSheet.replaceSync(`
     border-radius: var(--radius-sm);
     background: var(--surface-subtle);
   }
-  .env-row {
-    display: grid;
-    grid-template-columns: 200px minmax(180px, 1fr) auto;
-    gap: 8px;
-    align-items: center;
-    padding: 8px 10px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    background: var(--surface-subtle);
-  }
+
   @media (max-width: 760px) {
-    .binding-row, .env-row { grid-template-columns: 1fr; }
+    .binding-row { grid-template-columns: 1fr; }
   }
 
   .invoke-bar {
@@ -611,7 +602,6 @@ class FpProjectBindings extends HTMLElement {
     this._canWrite = false;
     this._token = '';
     this._rows = []; // [{ type, logical, target }]
-    this._envRows = []; // [{ key, value }]
     this._saving = false;
     this._targetEnv = 'prod';
     this._initializedForDep = null;
@@ -636,8 +626,6 @@ class FpProjectBindings extends HTMLElement {
       });
     });
     this._rows = rows;
-    const envMap = b.env || {};
-    this._envRows = Object.keys(envMap).sort().map((k) => ({ key: k, value: envMap[k] }));
   }
 
   _optionsForType(type) {
@@ -649,17 +637,18 @@ class FpProjectBindings extends HTMLElement {
   }
 
   _buildBindingsObj() {
-    const out = { kv: {}, db: {}, queue: {}, bucket: {}, env: {} };
+    const current = this._activeDeployment?.bindings || {};
+    const out = {
+      kv: {}, db: {}, queue: {}, bucket: {},
+      env: current.env || {},
+      search: current.search || {}
+    };
     this._rows.forEach((r) => {
       const k = String(r.logical || '').trim();
       const v = String(r.target || '').trim();
       if (k && v && out[r.type]) {
         out[r.type][k] = v;
       }
-    });
-    this._envRows.forEach((e) => {
-      const k = String(e.key || '').trim();
-      if (k) out.env[k] = String(e.value || '');
     });
     return out;
   }
@@ -670,9 +659,8 @@ class FpProjectBindings extends HTMLElement {
     Object.entries(bindingsObj.kv).forEach(([k, v]) => lines.push(`// kv binding "${k}" -> ${v}\nlet val = kv::get("${k}", "session:1")?;\nlet page = kv::list("${k}", Some("user:"), None, 50)?;`));
     Object.entries(bindingsObj.queue).forEach(([k, v]) => lines.push(`// queue binding "${k}" -> ${v}\nqueue::enqueue("${k}", b"{\\"task\\":1}", None)?;`));
     Object.entries(bindingsObj.bucket).forEach(([k, v]) => lines.push(`// bucket binding "${k}" -> ${v}\nlet page = bucket::list("${k}", Some("assets/"), None, 50)?;`));
-    Object.entries(bindingsObj.env).forEach(([k, v]) => lines.push(`// env "${k}" = "${v}"\nlet cfg = env::get("${k}");`));
     lines.push(`// structured host logging\nlog::emit(log::Level::Info, "handled request", None);`);
-    return lines.length ? lines.join('\n\n') : '// Add a resource binding or env var above to preview WIT host calls.';
+    return lines.join('\n\n');
   }
 
   async applyBindings() {
@@ -777,27 +765,6 @@ class FpProjectBindings extends HTMLElement {
 
         <div class="panel">
           <div class="panel-header">
-            <div>
-              <h3 class="panel-title">${esc(t('bindings.envTitle'))}</h3>
-              <div class="muted text-xs" style="margin-top:2px;">${esc(t('bindings.envSubtitle'))}</div>
-            </div>
-            ${this._canWrite ? `<button type="button" class="btn btn-sm" id="add-env-btn">+ ${esc(t('bindings.envAdd'))}</button>` : ''}
-          </div>
-          <div class="panel-body stack gap-sm">
-            ${this._envRows.length
-              ? this._envRows.map((e, idx) => `
-                  <div class="env-row" data-env-idx="${idx}">
-                    <input type="text" class="mono" data-env-field="key" value="${esc(e.key)}" placeholder="APP_ENV" ${this._canWrite ? '' : 'disabled'}>
-                    <input type="text" class="mono" data-env-field="value" value="${esc(e.value)}" placeholder="production" ${this._canWrite ? '' : 'disabled'}>
-                    ${this._canWrite ? `<button type="button" class="btn btn-danger btn-sm" data-remove-env="${idx}">${esc(t('common.delete'))}</button>` : ''}
-                  </div>
-                `).join('')
-              : `<div class="empty-state">${esc(t('bindings.envEmpty'))}</div>`}
-          </div>
-        </div>
-
-        <div class="panel">
-          <div class="panel-header">
             <h3 class="panel-title">${esc(t('bindings.previewTitle'))}</h3>
             <span class="badge badge-neutral mono">wit/platform.wit</span>
           </div>
@@ -885,30 +852,6 @@ class FpProjectBindings extends HTMLElement {
     sr.querySelectorAll('[data-go-res]').forEach((btn) => {
       btn.addEventListener('click', () => {
         emitNavigate(this, btn.getAttribute('data-go-res'));
-      });
-    });
-
-    const addEnvBtn = sr.getElementById('add-env-btn');
-    if (addEnvBtn) {
-      addEnvBtn.addEventListener('click', () => {
-        this._envRows.push({ key: '', value: '' });
-        this.render();
-      });
-    }
-
-    sr.querySelectorAll('.env-row').forEach((rowEl) => {
-      const idx = Number(rowEl.getAttribute('data-env-idx'));
-      const kInp = rowEl.querySelector('[data-env-field="key"]');
-      const vInp = rowEl.querySelector('[data-env-field="value"]');
-      if (kInp) kInp.addEventListener('input', (ev) => { this._envRows[idx].key = ev.target.value; });
-      if (vInp) vInp.addEventListener('input', (ev) => { this._envRows[idx].value = ev.target.value; });
-    });
-
-    sr.querySelectorAll('[data-remove-env]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const idx = Number(btn.getAttribute('data-remove-env'));
-        this._envRows.splice(idx, 1);
-        this.render();
       });
     });
   }

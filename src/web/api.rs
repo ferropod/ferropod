@@ -322,6 +322,10 @@ fn runtime_routes(prefix: &str) -> Router<PlatformService> {
             get(list_deployments).post(create_deployment),
         )
         .route(
+            &format!("{prefix}/{{id}}/deployments/{{deployment_id}}/env"),
+            post(create_deployment_with_env),
+        )
+        .route(
             &format!("{prefix}/{{id}}/artifacts/{{*path}}"),
             put(upload_artifact).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
         )
@@ -734,6 +738,25 @@ async fn create_deployment(
         .await
         .map_err(ApiError)?;
     Ok((StatusCode::CREATED, Json(dep)))
+}
+
+#[derive(Debug, Deserialize)]
+struct DeploymentEnvReq {
+    env: HashMap<String, String>,
+}
+
+async fn create_deployment_with_env(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Path((id, deployment_id)): Path<(String, String)>,
+    Json(req): Json<DeploymentEnvReq>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let deployment = svc
+        .create_deployment_with_env(&caller, &id, &deployment_id, req.env)
+        .await
+        .map_err(ApiError)?;
+    Ok((StatusCode::CREATED, Json(deployment)))
 }
 
 async fn upload_artifact(

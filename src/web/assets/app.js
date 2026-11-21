@@ -37,6 +37,7 @@
     currentRoute: 'overview',
     projectId: null,
     projectTab: 'deployments',
+    envDeploymentId: null,
     selectedKvNs: '',
     kvKeys: [],
     kvPrefix: '',
@@ -399,7 +400,10 @@
     if (route === 'tokens' && !isAdmin()) route = 'overview';
     state.currentRoute = route;
     var runtimeId = route === 'runtime' && parts[1] ? decodeURIComponent(parts[1]) : null;
-    if (runtimeId !== state.projectId && !state.pendingRuntimeTab) state.projectTab = 'deployments';
+    if (runtimeId !== state.projectId) {
+      state.projectTab = 'deployments';
+      state.envDeploymentId = null;
+    }
     if (state.pendingRuntimeTab) state.projectTab = state.pendingRuntimeTab;
     state.pendingRuntimeTab = null;
     state.projectId = runtimeId;
@@ -874,6 +878,7 @@
           : '<div class="empty-state">' + esc(t('projectDetail.noDeployments')) + '</div>') +
         '</div>';
     } else if (state.projectTab === 'secrets') {
+      var envHtml = renderDeploymentEnv(p, deps, writable);
       if (!writable) {
         bodyHtml = '<div class="alert alert-info">' + esc(t('projectDetail.secretsWriteRequired')) + '</div>';
       } else {
@@ -899,6 +904,7 @@
             : '<div class="empty-state">' + esc(t('projectDetail.noSecrets')) + '</div>') +
           '</div></div>';
       }
+      bodyHtml = '<div class="stack gap-md">' + envHtml + bodyHtml + '</div>';
     } else {
       var rRows = projRoutes.map(function (r) {
         return '<tr>' +
@@ -1011,6 +1017,39 @@
       });
     });
 
+    if ($('env-deployment')) {
+      $('env-deployment').addEventListener('change', function (ev) {
+        state.envDeploymentId = ev.target.value;
+        renderProjectDetail(p.id, false);
+      });
+    }
+    if ($('env-form')) {
+      $('env-form').addEventListener('submit', async function (ev) {
+        ev.preventDefault();
+        var env;
+        try {
+          env = JSON.parse($('runtime-env-json').value);
+          if (!env || Array.isArray(env) || typeof env !== 'object' ||
+              Object.values(env).some(function (value) { return typeof value !== 'string'; })) {
+            throw new Error();
+          }
+        } catch (_) {
+          toast(t('projectDetail.invalidEnvJson'), 'error');
+          return;
+        }
+        var submit = $('env-save');
+        submit.disabled = true;
+        try {
+          var saved = await api('/_api/v1/runtimes/' + enc(p.id) + '/deployments/' +
+            enc($('env-deployment').value) + '/env', { method: 'POST', json: { env: env } });
+          state.envDeploymentId = saved.id;
+          toast(t('projectDetail.envSaved'), 'success');
+          await renderProjectDetail(p.id, true);
+        } catch (e) { toast(e.message, 'error'); }
+        finally { submit.disabled = false; }
+      });
+    }
+
     if ($('secret-form')) {
       $('secret-form').addEventListener('submit', async function (ev) {
         ev.preventDefault();
@@ -1064,6 +1103,31 @@
         });
       });
     });
+  }
+
+  function renderDeploymentEnv(runtime, deployments, writable) {
+    var selected = deployments.find(function (item) { return item.id === state.envDeploymentId; }) ||
+      deployments.find(function (item) { return item.id === runtime.active_deployment_id; }) ||
+      deployments[0];
+    var content = '<div class="empty-state">' + esc(t('projectDetail.noDeployments')) + '</div>';
+    if (selected) {
+      var options = deployments.map(function (item) {
+        return '<option value="' + esc(item.id) + '"' + (item.id === selected.id ? ' selected' : '') +
+          '>' + esc(item.id + ' · ' + item.status) + '</option>';
+      }).join('');
+      var env = (selected.bindings && selected.bindings.env) || {};
+      content = '<form id="env-form" class="panel-body stack gap-sm">' +
+        '<div class="field"><label for="env-deployment">' + esc(t('projectDetail.envSource')) + '</label>' +
+        '<select id="env-deployment">' + options + '</select></div>' +
+        '<div class="field"><label for="runtime-env-json">' + esc(t('projectDetail.envValues')) + '</label>' +
+        '<textarea id="runtime-env-json" class="mono" rows="7" spellcheck="false"' +
+        (writable ? '' : ' readonly') + '>' + esc(JSON.stringify(env, null, 2)) + '</textarea></div>' +
+        (writable ? '<div><button type="submit" class="btn btn-primary" id="env-save">' +
+          esc(t('projectDetail.saveEnvVersion')) + '</button></div>' : '') + '</form>';
+    }
+    return '<div class="panel"><div class="panel-header"><div><h3 class="panel-title">' +
+      esc(t('bindings.envTitle')) + '</h3><div class="muted text-xs">' +
+      esc(t('projectDetail.envVersionHint')) + '</div></div></div>' + content + '</div>';
   }
 
   function openNewDeploymentModal(project) {

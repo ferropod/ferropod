@@ -1851,3 +1851,80 @@ async fn resources_can_share_a_group_without_sharing_access() {
     assert_eq!(status, StatusCode::OK);
     assert!(serde_json::from_slice::<Vec<String>>(&scoped_groups).unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn changing_runtime_env_creates_a_ready_version_and_keeps_secrets_separate() {
+    let h = setup_harness().await;
+    let app = build_router(h.svc.clone());
+    let token = Some(h.admin_token.as_str());
+    let runtime = h.svc.create_project(&h.admin, "settings-worker", None).await.unwrap();
+    let unrelated = h.svc.create_project(&h.admin, "unrelated-worker", None).await.unwrap();
+    let path = format!("/_api/v1/runtimes/{}", runtime.id);
+
+    let (status, body) = json_req(
+        &app,
+        Method::POST,
+        &format!("{path}/deployments"),
+        token,
+        Some(serde_json::json!({
+            "artifact_path": "shared.cwasm",
+            "bindings": { "env": { "MODE": "prod" }, "kv": { "STATE": "state" } },
+            "crons": ["0 * * * *"],
+            "target_env": "prod"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let original: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let original_id = original["id"].as_str().unwrap();
+
+    let (status, _) = json_req(
+        &app,
+        Method::POST,
+        &format!("{path}/secrets"),
+        token,
+        Some(serde_json::json!({"key": "MODE", "value": "encrypted-value"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let env = serde_json::json!({"env": {"MODE": "preview", "MULTILINE": "one\ntwo"}});
+    let (status, body) = json_req(
+        &app,
+        Method::POST,
+        &format!("{path}/deployments/{original_id}/env"),
+        token,
+        Some(env.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{}", String::from_utf8_lossy(&body));
+    let revised: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_ne!(revised["id"], original["id"]);
+    assert_eq!(revised["status"], "ready");
+    assert_eq!(revised["bindings"]["env"], env["env"]);
+    assert_eq!(revised["bindings"]["kv"], original["bindings"]["kv"]);
+    assert_eq!(revised["artifact_path"], original["artifact_path"]);
+    assert_eq!(revised["crons"], original["crons"]);
+
+    let current = h.svc.get_project(&h.admin, &runtime.id).await.unwrap();
+    assert_eq!(current.active_deployment_id.as_deref(), Some(original_id));
+    assert_eq!(
+        h.svc.list_deployments(&h.admin, &runtime.id).await.unwrap()
+            .into_iter().find(|d| d.id == original_id).unwrap().bindings.env["MODE"],
+        "prod"
+    );
+    let (status, keys) =
+        json_req(&app, Method::GET, &format!("{path}/secrets"), token, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(serde_json::from_slice::<Vec<String>>(&keys).unwrap(), ["MODE"]);
+
+    let (status, _) = json_req(
+        &app,
+        Method::POST,
+        &format!("/_api/v1/runtimes/{}/deployments/{original_id}/env", unrelated.id),
+        token,
+        Some(env),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}

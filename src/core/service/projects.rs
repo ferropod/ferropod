@@ -267,6 +267,39 @@ impl PlatformService {
         Ok(saved)
     }
 
+    pub async fn create_deployment_with_env(
+        &self,
+        caller: &Caller,
+        runtime_id: &str,
+        base_deployment_id: &str,
+        env: HashMap<String, String>,
+    ) -> Result<Deployment> {
+        let runtime = self.get_project_internal(runtime_id).await?;
+        Self::require_project_write(caller, &runtime.id)?;
+        let deployment = self
+            .projects
+            .get_deployment(base_deployment_id)
+            .await?
+            .filter(|deployment| deployment.project_id == runtime.id)
+            .ok_or_else(|| FerroError::NotFound(format!("deployment '{base_deployment_id}'")))?;
+        let mut bindings = deployment.bindings;
+        bindings.env = env;
+        self.create_deployment(
+            caller,
+            &runtime.id,
+            CreateDeploymentInput {
+                artifact_path: deployment.artifact_path,
+                assets_bucket: deployment.assets_bucket,
+                assets_prefix: deployment.assets_prefix,
+                spa_fallback: deployment.spa_fallback,
+                bindings,
+                crons: deployment.crons,
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
     pub async fn list_deployments(
         &self,
         caller: &Caller,
