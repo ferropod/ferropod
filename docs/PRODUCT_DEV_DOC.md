@@ -9,7 +9,7 @@
 
 | 维度 | 核心指标 / 约束 |
 | :--- | :--- |
-| **交付形态** | 单 Rust 二进制（`ferropod`）+ 单 `/data` 数据目录，内嵌零构建管理后台 `/_admin` |
+| **交付形态** | 单 Rust 二进制（`ferropod`）+ 单 `/data` 数据目录，内嵌零构建 Web 面板 `/_panel`（兼容 `/_admin`） |
 | **内存预算** | 空载 RSS ~30–60 MiB；`--profile low-mem` 限制并发、用户库 LRU 句柄数与写缓冲，稳定运行于 **512 MiB RAM** |
 | **存储原则** | 磁盘优先（Turso MVCC + 内容寻址本地 Blob FS），内存仅保留有界队列、热路由表与 OS Page Cache |
 | **架构模式** | **1 Core Service + 3 Thin Adapters**：所有业务逻辑、RBAC 鉴权与审计收敛于 `PlatformService`，统一向 REST/Admin、WIT Host（M2）、MCP（M3）暴露 |
@@ -62,14 +62,14 @@ flowchart TD
 | **域名路由** | `#/routes` | ✅ | ✅ | ✅ | 支持主机名映射、Prod/Preview 指向、Caddy On-Demand TLS 校验 |
 | **Secrets 密钥** | 项目详情内 | ✅ | ✅ | ✅ | AES-256-GCM 静态加密，按 `project_id` 强隔离 |
 | **KV 存储** | `#/kv` | ✅ | ✅ | ✅ | 命名空间创建/列表/删除 + 键值 CRUD + TTL + 内存临时模式 + 原子自增 |
-| **消息队列** | `#/queues` | ✅ | ✅ | ✅ | 队列创建/列表/删除 + 微批入队 + 统计 + 巡检 + DLQ 重放 + 清空；⚠️ 缺修改队列配置 |
-| **对象存储 (Blob)** | `#/blobs` | ✅ | ✅ | ✅ | 5 端点流式存储 + 公开读 + HMAC 预签名；⚠️ 缺删除空 Bucket |
+| **消息队列** | `#/queues` | ✅ | ✅ | ✅ | 队列创建/列表/修改配置/删除 + 微批入队 + 统计 + 巡检 + DLQ 重放 + 清空 |
+| **对象存储 (Blob)** | `#/blobs` | ✅ | ✅ | ✅ | 5 端点流式存储 + 公开读 + HMAC 预签名 + 删除空 Bucket |
 | **用户数据库 (Turso)** | `#/dbs` | ✅ | ✅ | ✅ | 每库独立物理文件 + 创建/列表/删除 + SQL 控制台 + Schema；🟡 FTS Tab 为 Mock |
 | **全文搜索 (SearchStore)** | `#/search` | 🗺️ | 🟡 | 🟡 | 前端原生 Web Components + Mock 引擎已支持项目隔离、中英文高亮、BM25 与分面 |
 | **访问令牌 (Tokens)** | `#/tokens` | ✅ | ✅ | ✅ | 仅 `admin` 可见；SHA-256 哈希存储，支持 `admin` / `readonly` / `project:<id>` |
 | **日志中心** | `#/logs` | ✅ | ✅ / 🟡 | ✅ | 实时 SSE 流 + 历史查询已全栈可用；历史全文索引支持 Mock FTS / 实时接口切换 |
 | **备份与快照** | `#/ops` | ✅ | ✅ | ✅ (`admin`) | 一键一致性 Turso 快照（`/data/backups/`）、列表查看、文件清单与删除 |
-| **定时任务 (Cron)** | `#/ops` | 🗺️ | 🟡 | 🟡 | 平台内置维护任务（每日快照可真实触发）+ 项目级 Cron Mock；待持久化至 `core.db` |
+| **定时任务 (Cron)** | `#/ops` | ✅ | ✅ | ✅ | 已持久化至 `core.db` (`cron_jobs`)，支持创建/启停/删除/手动触发并写入 `cron` 日志 |
 | **系统更新** | `#/update` | ✅ | ✅ | ✅ (`admin`) | 版本信息、Release 列表检查与自更新触发 |
 
 ---
