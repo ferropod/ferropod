@@ -1140,10 +1140,14 @@
   }
 
   function openNewDeploymentModal(project) {
+    var base = state.detailDeployments.find(function (d) { return d.id === project.active_deployment_id; });
     var bktOpts = '<option value="">' + esc(t('projectDetail.assetsBucketNone')) + '</option>' +
       state.buckets.map(function (b) {
-        return '<option value="' + esc(b.name) + '">' + esc(b.name) + '</option>';
+        return '<option value="' + esc(b.name) + '"' + (base && base.assets_bucket === b.name ? ' selected' : '') + '>' + esc(b.name) + '</option>';
       }).join('');
+    if (base && base.assets_bucket && !state.buckets.some(function (b) { return b.name === base.assets_bucket; })) {
+      bktOpts += '<option value="' + esc(base.assets_bucket) + '" selected>' + esc(base.assets_bucket) + '</option>';
+    }
 
     openModal({
       title: t('projectDetail.newDeployment'),
@@ -1155,6 +1159,7 @@
         '<option value="">' + esc(t('projectDetail.envReady')) + '</option></select></div>' +
         '<div class="field"><label>' + esc(t('projectDetail.assetsBucket')) + '</label><select id="dep-bucket">' + bktOpts + '</select></div>' +
         '<div class="field"><label>' + esc(t('projectDetail.assetsPrefix')) + '</label><input type="text" id="dep-prefix" placeholder="dist"></div>' +
+        '<div class="field span-2"><label for="dep-file">' + esc(t('projectDetail.artifactFile')) + '</label><input type="file" id="dep-file" accept=".wasm,.wat"><span class="muted text-xs">' + esc(t('projectDetail.artifactFileHint')) + '</span></div>' +
         '<div class="field span-2"><label>' + esc(t('projectDetail.artifactPath')) + ' (' + esc(t('common.optional')) + ')</label><input type="text" id="dep-artifact" placeholder="/data/artifacts/worker.cwasm"></div>' +
         '<div class="span-2"><label class="checkbox-row"><input type="checkbox" id="dep-spa" checked> ' + esc(t('projectDetail.spaFallback')) + '</label></div>' +
         '<div class="field span-2"><label>' + esc(t('projectDetail.crons')) + '</label><textarea id="dep-crons" placeholder="' + esc(t('projectDetail.cronsPlaceholder')) + '"></textarea></div>' +
@@ -1164,6 +1169,12 @@
         '<button type="button" class="btn" id="dep-cancel">' + esc(t('common.cancel')) + '</button>' +
         '<button type="submit" form="new-dep-form" class="btn btn-primary">' + esc(t('common.create')) + '</button>',
       onMount: function () {
+        if (base) {
+          $('dep-prefix').value = base.assets_prefix || '';
+          $('dep-spa').checked = base.spa_fallback;
+          $('dep-crons').value = (base.crons || []).join('\n');
+          $('dep-bindings').value = JSON.stringify(base.bindings || {}, null, 2);
+        }
         $('dep-cancel').addEventListener('click', closeModal);
         $('new-dep-form').addEventListener('submit', async function (ev) {
           ev.preventDefault();
@@ -1185,8 +1196,24 @@
           var bucket = $('dep-bucket').value || null;
           var prefix = $('dep-prefix').value.trim() || null;
           var artifact = $('dep-artifact').value.trim() || null;
+          var file = $('dep-file').files[0];
+          if (file && (file.size === 0 || file.size > 64 * 1024 * 1024 || !/\.(wasm|wat)$/i.test(file.name))) {
+            toast(t('projectDetail.invalidArtifactFile'), 'error');
+            return;
+          }
+          var submit = document.querySelector('button[form="new-dep-form"]');
+          submit.disabled = true;
 
           try {
+            if (file) {
+              var nonce = new Uint8Array(16);
+              crypto.getRandomValues(nonce);
+              var filename = 'upload-' + Array.from(nonce, function (byte) { return byte.toString(16).padStart(2, '0'); }).join('') + '.wasm';
+              var uploaded = await api('/_api/v1/runtimes/' + enc(project.id) + '/artifacts/' + filename, {
+                method: 'PUT', body: file, headers: { 'Content-Type': 'application/octet-stream' }
+              });
+              artifact = uploaded.artifact_path;
+            }
             await api('/_api/v1/runtimes/' + enc(project.id) + '/deployments', {
               method: 'POST',
               json: {
@@ -1203,6 +1230,7 @@
             toast(t('projectDetail.deployCreated'), 'success');
             renderProjectDetail(project.id, true);
           } catch (e) { toast(e.message, 'error'); }
+          finally { submit.disabled = false; }
         });
       }
     });
