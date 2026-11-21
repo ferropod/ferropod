@@ -399,13 +399,18 @@
   }
 
   function navigate(hash) {
-    if (window.location.hash === hash) {
-      parseHash();
-      renderCurrentRoute(true);
-    } else {
-      window.location.hash = hash;
+    if (window.location.hash !== hash) {
+      try {
+        history.pushState(null, '', hash);
+      } catch (_) {
+        window.location.hash = hash;
+      }
     }
+    parseHash();
     closeDrawer();
+    if (state.status) {
+      renderCurrentRoute(true);
+    }
   }
 
   function updateNavActive() {
@@ -535,7 +540,7 @@
   var perfModulePromise = null;
   function ensurePerfComponent() {
     if (!perfModulePromise) {
-      perfModulePromise = import('/_admin/assets/perf_component.js').catch(function (err) {
+      perfModulePromise = import('/_panel/assets/perf_component.js').catch(function (err) {
         perfModulePromise = null;
         throw err;
       });
@@ -546,8 +551,8 @@
   var searchBundlePromise = null;
   function ensureSearchBundle() {
     if (!searchBundlePromise) {
-      searchBundlePromise = import('/_admin/assets/search_mock.js')
-        .then(function () { return import('/_admin/assets/search_components.js'); })
+      searchBundlePromise = import('/_panel/assets/search_mock.js')
+        .then(function () { return import('/_panel/assets/search_components.js'); })
         .catch(function (err) {
           searchBundlePromise = null;
           throw err;
@@ -559,7 +564,7 @@
   var opsModulePromise = null;
   function ensureOpsComponent() {
     if (!opsModulePromise) {
-      opsModulePromise = import('/_admin/assets/ops_component.js').catch(function (err) {
+      opsModulePromise = import('/_panel/assets/ops_component.js').catch(function (err) {
         opsModulePromise = null;
         throw err;
       });
@@ -570,7 +575,7 @@
   var updateModulePromise = null;
   function ensureUpdateComponent() {
     if (!updateModulePromise) {
-      updateModulePromise = import('/_admin/assets/update_component.js').catch(function (err) {
+      updateModulePromise = import('/_panel/assets/update_component.js').catch(function (err) {
         updateModulePromise = null;
         throw err;
       });
@@ -1595,6 +1600,7 @@
         (canWriteQ
           ? '<div class="row">' +
             '<button type="button" class="btn btn-primary btn-sm" id="q-enqueue-btn">' + esc(t('queues.enqueue')) + '</button>' +
+            '<button type="button" class="btn btn-sm" id="q-edit-btn">' + esc(t('queues.editConfig')) + '</button>' +
             (st.dead > 0 ? '<button type="button" class="btn btn-sm" id="q-replay-all-btn">' + esc(t('queues.replayAll')) + '</button>' : '') +
             '<button type="button" class="btn btn-danger btn-sm" id="q-purge-btn">' + esc(t('queues.purge')) + '</button>' +
             '<button type="button" class="btn btn-danger btn-sm" id="q-delete-btn">' + esc(t('queues.deleteQueue')) + '</button>' +
@@ -1636,6 +1642,7 @@
       });
     }
     if ($('q-enqueue-btn')) $('q-enqueue-btn').addEventListener('click', function () { openEnqueueModal(qCfg.name); });
+    if ($('q-edit-btn')) $('q-edit-btn').addEventListener('click', function () { openEditQueueModal(qCfg); });
     if ($('q-replay-all-btn')) {
       $('q-replay-all-btn').addEventListener('click', async function () {
         try {
@@ -1686,6 +1693,49 @@
           renderQueues(false);
         } catch (e) { toast(e.message, 'error'); }
       });
+    });
+  }
+
+  function openEditQueueModal(qCfg) {
+    openModal({
+      title: t('queues.editConfig') + ' · ' + qCfg.name,
+      body:
+        '<form id="edit-queue-form" class="stack gap-md">' +
+        '<div class="grid-2">' +
+        '<div class="field"><label>' + esc(t('queues.maxConcurrency')) + '</label><input type="number" id="eq-conc" min="1" value="' + esc(qCfg.max_concurrency) + '"></div>' +
+        '<div class="field"><label>' + esc(t('queues.rateLimit')) + '</label><input type="number" id="eq-rate" min="0" value="' + esc(qCfg.rate_limit_per_sec || '') + '" placeholder="unlimited"></div>' +
+        '</div>' +
+        '<div class="grid-2">' +
+        '<div class="field"><label>' + esc(t('queues.batchSize')) + '</label><input type="number" id="eq-batch" min="1" value="' + esc(qCfg.batch_size) + '"></div>' +
+        '<div class="field"><label>' + esc(t('queues.maxAttempts')) + '</label><input type="number" id="eq-att" min="1" value="' + esc(qCfg.max_attempts) + '"></div>' +
+        '</div>' +
+        '</form>',
+      footer:
+        '<button type="button" class="btn" id="eq-cancel">' + esc(t('common.cancel')) + '</button>' +
+        '<button type="submit" form="edit-queue-form" class="btn btn-primary">' + esc(t('common.save')) + '</button>',
+      onMount: function () {
+        $('eq-cancel').addEventListener('click', closeModal);
+        $('edit-queue-form').addEventListener('submit', async function (ev) {
+          ev.preventDefault();
+          var rateRaw = $('eq-rate').value.trim();
+          var body = {
+            max_concurrency: Number($('eq-conc').value) || 4,
+            batch_size: Number($('eq-batch').value) || 20,
+            max_attempts: Number($('eq-att').value) || 5
+          };
+          if (rateRaw === '' || Number(rateRaw) <= 0) {
+            body.clear_rate_limit = true;
+          } else {
+            body.rate_limit_per_sec = Number(rateRaw);
+          }
+          try {
+            await api('/_api/v1/queues/' + enc(qCfg.name), { method: 'PATCH', json: body });
+            closeModal();
+            toast(t('queues.updated'), 'success');
+            renderQueues(true);
+          } catch (e) { toast(e.message, 'error'); }
+        });
+      }
     });
   }
 
@@ -1857,6 +1907,7 @@
         '<input type="search" id="blob-prefix-input" style="width:180px;" value="' + esc(state.blobPrefix) + '" placeholder="' + esc(t('blobs.prefixPlaceholder')) + '">' +
         '<button type="button" class="btn btn-sm" id="blob-filter-btn">' + esc(t('common.filter')) + '</button>' +
         (isAdmin() ? '<button type="button" class="btn btn-sm" id="blob-toggle-pub">' + esc(t('blobs.togglePublic')) + '</button>' : '') +
+        (canWriteBkt ? '<button type="button" class="btn btn-danger btn-sm" id="blob-del-bkt-btn">' + esc(t('blobs.deleteBucket')) + '</button>' : '') +
         '</div></div></div>' +
         (canWriteBkt
           ? '<div class="panel-body stack gap-sm">' +
@@ -1911,6 +1962,20 @@
           toast(t('blobs.bucketUpdated'), 'success');
           renderBlobs(true);
         } catch (e) { toast(e.message, 'error'); }
+      });
+    }
+    if ($('blob-del-bkt-btn') && bCfg) {
+      $('blob-del-bkt-btn').addEventListener('click', function () {
+        var bName = bCfg.name;
+        confirmAction(t('blobs.deleteBucketConfirm', { name: bName }), async function () {
+          try {
+            await api('/_api/v1/buckets/' + enc(bName), { method: 'DELETE' });
+            state.selectedBucket = '';
+            state.blobObjects = [];
+            toast(t('blobs.bucketDeleted'), 'success');
+            renderBlobs(true);
+          } catch (e) { toast(e.message, 'error'); }
+        });
       });
     }
     if ($('blob-dropzone')) {
@@ -2823,17 +2888,14 @@
       }
     });
 
-    document.querySelectorAll('a[data-nav]').forEach(function (link) {
-      link.addEventListener('click', function (ev) {
-        var href = link.getAttribute('href');
-        if (href && href.indexOf('#/') === 0) {
-          ev.preventDefault();
-          navigate(href);
-        }
-      });
+    document.addEventListener('click', function (ev) {
+      var link = ev.target && ev.target.closest ? ev.target.closest('a[href^="#/"]') : null;
+      if (!link || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey || ev.button !== 0) return;
+      ev.preventDefault();
+      navigate(link.getAttribute('href'));
     });
 
-    window.addEventListener('hashchange', function () {
+    function onBrowserRouteChange() {
       if (!state.status) {
         var tok = state.token || readStoredToken();
         if (tok) {
@@ -2844,7 +2906,10 @@
       parseHash();
       closeDrawer();
       renderCurrentRoute(true);
-    });
+    }
+
+    window.addEventListener('popstate', onBrowserRouteChange);
+    window.addEventListener('hashchange', onBrowserRouteChange);
 
     $('toggle-token-vis').addEventListener('click', function () {
       var inp = $('token-input');
@@ -2862,6 +2927,8 @@
     if (savedToken) {
       $('token-input').value = savedToken;
       connectWithToken(savedToken, true);
+    } else {
+      $('login-view').classList.remove('hidden');
     }
   }
 

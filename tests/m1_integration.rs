@@ -1440,7 +1440,7 @@ async fn admin_ui_assets_and_enriched_status() {
 
     let app = build_router(h.svc.clone());
 
-    for path in ["/_admin", "/_admin/"] {
+    for path in ["/_panel", "/_panel/", "/_admin", "/_admin/"] {
         let resp = app
             .clone()
             .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
@@ -1466,15 +1466,16 @@ async fn admin_ui_assets_and_enriched_status() {
             resp.into_body().collect().await.unwrap().to_bytes().to_vec(),
         )
         .unwrap();
-        assert!(body.contains("/_admin/assets/styles.css"));
-        assert!(body.contains("/_admin/assets/i18n.js"));
-        assert!(body.contains("/_admin/assets/app.js"));
+        assert!(body.contains("/_panel/assets/styles.css"));
+        assert!(body.contains("/_panel/assets/i18n.js"));
+        assert!(body.contains("/_panel/assets/app.js"));
     }
 
     for (asset, expected_ct) in [
+        ("/_panel/assets/styles.css", "text/css"),
+        ("/_panel/assets/i18n.js", "application/javascript"),
+        ("/_panel/assets/app.js", "application/javascript"),
         ("/_admin/assets/styles.css", "text/css"),
-        ("/_admin/assets/i18n.js", "application/javascript"),
-        ("/_admin/assets/app.js", "application/javascript"),
     ] {
         let resp = app
             .clone()

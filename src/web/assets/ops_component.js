@@ -226,20 +226,14 @@ function emitToast(el, message, kind = 'info') {
   }));
 }
 
-// Persistent in-memory mock store for Scheduled Tasks (Cron) until M2 Cron Dispatcher API lands
+// Built-in platform maintenance tasks (driven by tokio intervals in src/dispatcher/maintenance.rs)
 const nowMs = Date.now();
-const cronStore = {
-  systemTasks: [
-    { id: 'sys_kv_ttl', name: 'KV TTL Batch Cleanup', schedule: '*/1 * * * *', target: 'internal:kv_ttl_gc', enabled: true, last_run: nowMs - 42000, last_status: 'ok' },
-    { id: 'sys_blob_gc', name: 'Orphan Blob Async GC', schedule: '*/5 * * * *', target: 'internal:blob_gc', enabled: true, last_run: nowMs - 180000, last_status: 'ok' },
-    { id: 'sys_queue_lease', name: 'Queue Lease Reaper & DLQ', schedule: '*/1 * * * *', target: 'internal:queue_reaper', enabled: true, last_run: nowMs - 30000, last_status: 'ok' },
-    { id: 'sys_daily_backup', name: 'Daily Auto Snapshot', schedule: '0 3 * * *', target: 'internal:auto_snapshot', enabled: true, last_run: nowMs - 3600000 * 6, last_status: 'ok' }
-  ],
-  projectTasks: [
-    { id: 'cron_sync_search', name: 'Search Index Compaction', project_id: null, schedule: '0 */6 * * *', target: 'POST /_internal/cron/compact', enabled: true, last_run: nowMs - 7200000, last_status: 'ok' },
-    { id: 'cron_digest', name: 'Daily Analytics Digest', project_id: null, schedule: '0 8 * * *', target: 'POST /_internal/cron/digest', enabled: true, last_run: nowMs - 3600000 * 10, last_status: 'ok' }
-  ]
-};
+const systemTasks = [
+  { id: 'sys_kv_ttl', name: 'KV TTL Batch Cleanup', schedule: '*/1 * * * *', target: 'internal:kv_ttl_gc', enabled: true, last_run: nowMs - 42000, last_status: 'ok' },
+  { id: 'sys_blob_gc', name: 'Orphan Blob Async GC', schedule: '*/5 * * * *', target: 'internal:blob_gc', enabled: true, last_run: nowMs - 180000, last_status: 'ok' },
+  { id: 'sys_queue_lease', name: 'Queue Lease Reaper & DLQ', schedule: '*/1 * * * *', target: 'internal:queue_reaper', enabled: true, last_run: nowMs - 30000, last_status: 'ok' },
+  { id: 'sys_daily_backup', name: 'Daily Auto Snapshot', schedule: '0 3 * * *', target: 'internal:auto_snapshot', enabled: true, last_run: nowMs - 3600000 * 6, last_status: 'ok' }
+];
 
 class FpOpsCenter extends HTMLElement {
   constructor() {
@@ -254,12 +248,16 @@ class FpOpsCenter extends HTMLElement {
     this._loadingBackups = false;
     this._creatingBackup = false;
     this._backupErr = '';
+    this._crons = [];
+    this._loadingCrons = false;
+    this._cronErr = '';
   }
 
   set token(val) {
     this._token = String(val || '');
-    if (this.isConnected && this._tab === 'backups' && this._isAdmin()) {
-      this.loadBackups();
+    if (this.isConnected) {
+      if (this._tab === 'backups' && this._isAdmin()) this.loadBackups();
+      if (this._tab === 'cron') this.loadCrons();
     }
   }
 
@@ -301,6 +299,86 @@ class FpOpsCenter extends HTMLElement {
     this.render();
     if (this._isAdmin()) {
       this.loadBackups();
+    }
+    this.loadCrons();
+  }
+
+  async loadCrons() {
+    this._loadingCrons = true;
+    this._cronErr = '';
+    this.render();
+    try {
+      const res = await fetch('/_api/v1/crons', { headers: this._authHeaders() });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      this._crons = (await res.json()) || [];
+    } catch (err) {
+      this._cronErr = err.message || 'Failed to load cron jobs';
+    } finally {
+      this._loadingCrons = false;
+      this.render();
+    }
+  }
+
+  async createCron(payload) {
+    const { t } = getI18n();
+    try {
+      const res = await fetch('/_api/v1/crons', {
+        method: 'POST',
+        headers: this._authHeaders(true),
+        body: JSON.stringify(payload)
+      });
+      if (!res.ok) {
+        const txt = await res.text();
+        throw new Error(txt || `HTTP ${res.status}`);
+      }
+      emitToast(this, t('ops.cronCreated'), 'success');
+      await this.loadCrons();
+    } catch (err) {
+      emitToast(this, err.message, 'error');
+    }
+  }
+
+  async toggleCron(job) {
+    try {
+      const res = await fetch('/_api/v1/crons/' + encodeURIComponent(job.id), {
+        method: 'PATCH',
+        headers: this._authHeaders(true),
+        body: JSON.stringify({ enabled: !job.enabled })
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await this.loadCrons();
+    } catch (err) {
+      emitToast(this, err.message, 'error');
+    }
+  }
+
+  async runCron(job) {
+    const { t } = getI18n();
+    try {
+      const res = await fetch('/_api/v1/crons/' + encodeURIComponent(job.id) + '/run', {
+        method: 'POST',
+        headers: this._authHeaders()
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      emitToast(this, t('ops.cronTriggered', { name: job.name }), 'success');
+      await this.loadCrons();
+    } catch (err) {
+      emitToast(this, err.message, 'error');
+    }
+  }
+
+  async deleteCron(id) {
+    const { t } = getI18n();
+    try {
+      const res = await fetch('/_api/v1/crons/' + encodeURIComponent(id), {
+        method: 'DELETE',
+        headers: this._authHeaders()
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      emitToast(this, t('ops.cronDeleted'), 'success');
+      await this.loadCrons();
+    } catch (err) {
+      emitToast(this, err.message, 'error');
     }
   }
 
@@ -425,7 +503,7 @@ rclone sync ./data/backups remote:ferropod-backups</pre>
         </div>
       `;
     } else {
-      const visibleProjectTasks = cronStore.projectTasks.filter((c) => !scopePid || c.project_id === scopePid);
+      const visibleProjectTasks = this._crons;
       bodyHtml = `
         <div class="stack gap-md">
           ${isAdmin ? `
@@ -448,7 +526,7 @@ rclone sync ./data/backups remote:ferropod-backups</pre>
                     </tr>
                   </thead>
                   <tbody>
-                    ${cronStore.systemTasks.map((c) => `
+                    ${systemTasks.map((c) => `
                       <tr>
                         <td class="text-strong">${esc(c.name)}</td>
                         <td class="mono text-xs"><span class="badge badge-neutral">${esc(c.schedule)}</span></td>
@@ -467,11 +545,15 @@ rclone sync ./data/backups remote:ferropod-backups</pre>
             <div class="panel-header">
               <h3 class="panel-title">
                 <span>${esc(t('ops.projectCrons'))}</span>
-                <span class="badge badge-warn">${esc(t('search.mockBadge'))}</span>
+                <span class="badge badge-success">core.db</span>
               </h3>
-              ${canWriteCron ? `<button type="button" class="btn btn-primary btn-sm" id="new-cron-btn">${esc(t('ops.newCron'))}</button>` : ''}
+              <div class="row gap-xs">
+                <button type="button" class="btn btn-sm" id="reload-crons-btn">${esc(t('common.refresh'))}</button>
+                ${canWriteCron ? `<button type="button" class="btn btn-primary btn-sm" id="new-cron-btn">${esc(t('ops.newCron'))}</button>` : ''}
+              </div>
             </div>
-            ${visibleProjectTasks.length ? `
+            ${this._cronErr ? `<div class="panel-body"><div class="badge badge-warn">${esc(this._cronErr)}</div></div>` : ''}
+            ${this._loadingCrons ? `<div class="empty-state">${esc(t('common.loading'))}</div>` : (visibleProjectTasks.length ? `
               <div class="table-wrap">
                 <table class="data-table">
                   <thead>
@@ -494,7 +576,7 @@ rclone sync ./data/backups remote:ferropod-backups</pre>
                         <td class="text-xs">${c.project_id ? `<span class="badge badge-accent">${esc(this._projectName(c.project_id))}</span>` : `<span class="muted">${esc(t('common.allProjects'))}</span>`}</td>
                         <td class="mono text-xs"><span class="badge badge-neutral">${esc(c.schedule)}</span></td>
                         <td class="mono text-xs muted">${esc(c.target)}</td>
-                        <td class="text-xs muted">${c.last_run ? esc(formatTime(c.last_run)) : '-'}</td>
+                        <td class="text-xs muted">${c.last_run_at ? esc(formatTime(c.last_run_at)) : '-'}</td>
                         ${canWriteCron ? `
                           <td class="row gap-xs">
                             <button type="button" class="btn btn-sm" data-run-cron="${esc(c.id)}">${esc(t('ops.runNow'))}</button>
@@ -507,7 +589,7 @@ rclone sync ./data/backups remote:ferropod-backups</pre>
                   </tbody>
                 </table>
               </div>
-            ` : `<div class="empty-state">${esc(t('ops.noCrons'))}</div>`}
+            ` : `<div class="empty-state">${esc(t('ops.noCrons'))}</div>`)}
           </div>
         </div>
       `;
@@ -649,32 +731,30 @@ rclone sync ./data/backups remote:ferropod-backups</pre>
       });
     });
 
+    const reloadCronsBtn = root.getElementById('reload-crons-btn');
+    if (reloadCronsBtn) reloadCronsBtn.addEventListener('click', () => this.loadCrons());
+
     const newCronForm = root.getElementById('new-cron-form');
     if (newCronForm) {
       newCronForm.addEventListener('submit', (ev) => {
         ev.preventDefault();
         const projEl = root.getElementById('cr-project');
         const pid = this._scopeProjectId() || (projEl ? (projEl.value || null) : null);
-        cronStore.projectTasks.unshift({
-          id: 'cron_' + String(Date.now()).slice(-6),
+        const payload = {
           name: root.getElementById('cr-name').value.trim(),
           project_id: pid,
           schedule: root.getElementById('cr-schedule').value.trim(),
-          target: root.getElementById('cr-target').value.trim(),
-          enabled: true,
-          last_run: null,
-          last_status: 'pending'
-        });
+          target: root.getElementById('cr-target').value.trim()
+        };
         root.getElementById('new-cron-dialog').close();
-        emitToast(this, t('ops.cronCreated'), 'success');
-        this.render();
+        this.createCron(payload);
       });
     }
 
     root.querySelectorAll('[data-run-sys]').forEach((btn) => {
       btn.addEventListener('click', async () => {
         const id = btn.getAttribute('data-run-sys');
-        const item = cronStore.systemTasks.find((c) => c.id === id);
+        const item = systemTasks.find((c) => c.id === id);
         if (!item) return;
         item.last_run = Date.now();
         item.last_status = 'ok';
@@ -689,33 +769,21 @@ rclone sync ./data/backups remote:ferropod-backups</pre>
 
     root.querySelectorAll('[data-run-cron]').forEach((btn) => {
       btn.addEventListener('click', () => {
-        const item = cronStore.projectTasks.find((c) => c.id === btn.getAttribute('data-run-cron'));
-        if (!item) return;
-        item.last_run = Date.now();
-        item.last_status = 'ok';
-        emitToast(this, t('ops.cronTriggered', { name: item.name }), 'success');
-        this.render();
+        const item = this._crons.find((c) => c.id === btn.getAttribute('data-run-cron'));
+        if (item) this.runCron(item);
       });
     });
 
     root.querySelectorAll('[data-toggle-cron]').forEach((btn) => {
       btn.addEventListener('click', () => {
-        const item = cronStore.projectTasks.find((c) => c.id === btn.getAttribute('data-toggle-cron'));
-        if (!item) return;
-        item.enabled = !item.enabled;
-        this.render();
+        const item = this._crons.find((c) => c.id === btn.getAttribute('data-toggle-cron'));
+        if (item) this.toggleCron(item);
       });
     });
 
     root.querySelectorAll('[data-del-cron]').forEach((btn) => {
       btn.addEventListener('click', () => {
-        const id = btn.getAttribute('data-del-cron');
-        const idx = cronStore.projectTasks.findIndex((c) => c.id === id);
-        if (idx !== -1) {
-          cronStore.projectTasks.splice(idx, 1);
-          emitToast(this, t('ops.cronDeleted'), 'success');
-          this.render();
-        }
+        this.deleteCron(btn.getAttribute('data-del-cron'));
       });
     });
   }
