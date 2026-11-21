@@ -10,6 +10,8 @@ perfSheet.replaceSync(`
     color: var(--text);
     font-family: var(--font-sans);
     font-size: 14px;
+    touch-action: manipulation;
+    max-width: 100%;
   }
   .mono { font-family: var(--font-mono); }
   .muted { color: var(--muted); }
@@ -83,7 +85,14 @@ perfSheet.replaceSync(`
     .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   }
   @media (max-width: 560px) {
-    .grid { grid-template-columns: 1fr; }
+    .panel-header { padding: 12px 14px; }
+    .grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      padding: 12px;
+    }
+    .metric-card { padding: 10px 12px; }
+    .metric-value { font-size: 16px; }
   }
 
   .metric-card {

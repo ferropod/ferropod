@@ -13,7 +13,6 @@ pub mod api;
 const ADMIN_HTML: &str = include_str!("assets/index.html");
 const ADMIN_CSS: &str = include_str!("assets/styles.css");
 const ADMIN_I18N: &str = include_str!("assets/i18n.js");
-const ADMIN_SEARCH_MOCK: &str = include_str!("assets/search_mock.js");
 const ADMIN_SEARCH_COMPONENTS: &str = include_str!("assets/search_components.js");
 const ADMIN_PERF_COMPONENT: &str = include_str!("assets/perf_component.js");
 const ADMIN_OPS_COMPONENT: &str = include_str!("assets/ops_component.js");
@@ -28,7 +27,6 @@ fn asset_etags() -> &'static HashMap<&'static str, String> {
             ("index.html", ADMIN_HTML),
             ("styles.css", ADMIN_CSS),
             ("i18n.js", ADMIN_I18N),
-            ("search_mock.js", ADMIN_SEARCH_MOCK),
             ("search_components.js", ADMIN_SEARCH_COMPONENTS),
             ("perf_component.js", ADMIN_PERF_COMPONENT),
             ("ops_component.js", ADMIN_OPS_COMPONENT),
@@ -106,11 +104,6 @@ pub async fn admin_asset(Path(file): Path<String>, headers: HeaderMap) -> Respon
             "i18n.js",
             "application/javascript; charset=utf-8",
             ADMIN_I18N,
-        ),
-        "search_mock.js" => (
-            "search_mock.js",
-            "application/javascript; charset=utf-8",
-            ADMIN_SEARCH_MOCK,
         ),
         "search_components.js" => (
             "search_components.js",

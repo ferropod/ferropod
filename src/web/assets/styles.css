@@ -67,6 +67,11 @@ html, body {
   font-size: 14px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
+  touch-action: manipulation;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  overflow-x: clip;
+  overscroll-behavior-x: none;
 }
 
 a {
@@ -239,6 +244,15 @@ input:focus, select:focus, textarea:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
+input[type="file"] {
+  width: 100%;
+  max-width: 100%;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px dashed var(--border-strong);
+  background: var(--surface-subtle);
+  font-size: 13px;
+}
 textarea {
   min-height: 92px;
   resize: vertical;
@@ -278,11 +292,11 @@ textarea {
 
 /* Login View */
 .login-view {
-  min-height: 100vh;
+  min-height: 100dvh;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 20px;
+  padding: calc(20px + env(safe-area-inset-top)) 16px calc(20px + env(safe-area-inset-bottom));
 }
 .login-card {
   width: 100%;
@@ -346,7 +360,9 @@ textarea {
   flex-direction: column;
   position: sticky;
   top: 0;
-  height: 100vh;
+  height: 100dvh;
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
   z-index: 40;
 }
 .sidebar-header {
@@ -679,6 +695,7 @@ textarea {
 .table-wrap {
   width: 100%;
   overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
 }
 .data-table {
   width: 100%;
@@ -922,12 +939,57 @@ textarea {
 }
 
 @media (max-width: 639px) {
+  .login-card {
+    padding: 20px;
+    border-radius: 14px;
+  }
   .topbar {
-    padding: 0 14px;
+    height: calc(56px + env(safe-area-inset-top));
+    padding: env(safe-area-inset-top) 12px 0;
   }
   .view-root {
-    padding: 14px 14px calc(76px + env(safe-area-inset-bottom));
-    gap: 14px;
+    padding: 12px 12px calc(76px + env(safe-area-inset-bottom));
+    gap: 12px;
+  }
+  .page-head {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+  .page-head > .btn {
+    width: 100%;
+  }
+  .stats-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+  .stat-card {
+    padding: 12px 14px;
+  }
+  .stat-value {
+    font-size: 20px;
+  }
+  .panel-header {
+    padding: 12px 14px;
+  }
+  .panel-body {
+    padding: 14px;
+  }
+  .toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .toolbar > .row,
+  .toolbar-filters {
+    width: 100%;
+  }
+  .toolbar input[type="search"],
+  .toolbar input[type="text"],
+  .toolbar select {
+    width: 100% !important;
+    max-width: none !important;
+    min-width: 0 !important;
+    flex: 1 1 140px;
   }
   .hide-xs {
     display: none;
@@ -942,6 +1004,7 @@ textarea {
   input[type="password"],
   input[type="number"],
   input[type="search"],
+  input[type="file"],
   select,
   textarea {
     min-height: 42px;
@@ -957,7 +1020,7 @@ textarea {
   /* Bottom navigation bar */
   .mobile-nav {
     display: grid;
-    grid-template-columns: repeat(5, 1fr);
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     position: fixed;
     left: 0;
     right: 0;
@@ -965,6 +1028,7 @@ textarea {
     z-index: 30;
     background: var(--surface);
     border-top: 1px solid var(--border);
+    box-shadow: 0 -2px 10px rgba(15, 23, 42, 0.06);
     padding: 4px 4px calc(4px + env(safe-area-inset-bottom));
   }
   .mobile-nav-item {
@@ -974,6 +1038,7 @@ textarea {
     justify-content: center;
     gap: 2px;
     min-height: 50px;
+    min-width: 0;
     border: none;
     background: transparent;
     color: var(--muted);
@@ -981,6 +1046,12 @@ textarea {
     font-weight: 500;
     cursor: pointer;
     padding: 4px 2px;
+  }
+  .mobile-nav-item span {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .mobile-nav-item svg {
     width: 19px;
@@ -998,9 +1069,15 @@ textarea {
   }
   .modal-card {
     max-width: 100%;
-    max-height: 90vh;
+    max-height: 92dvh;
     border-radius: 16px 16px 0 0;
     padding-bottom: env(safe-area-inset-bottom);
+  }
+  .modal-body {
+    padding: 14px;
+  }
+  .modal-foot {
+    padding: 12px 14px calc(12px + env(safe-area-inset-bottom));
   }
   .toast-root {
     left: 12px;
@@ -1033,8 +1110,13 @@ textarea {
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
+    flex-wrap: wrap;
     gap: 12px;
     text-align: right;
+  }
+  .data-table.stack-mobile td .code-block {
+    width: 100%;
+    text-align: left;
   }
   .data-table.stack-mobile td::before {
     content: attr(data-label);
@@ -1054,6 +1136,7 @@ textarea {
 }
 
 /* Full-Text Search highlight in Light DOM (e.g. Live Tail logs) */
+mark,
 mark.fts-hl {
   background: color-mix(in srgb, var(--accent) 24%, transparent);
   color: var(--text);

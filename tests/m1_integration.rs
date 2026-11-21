@@ -1,15 +1,20 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use axum::body::Body;
+use axum::extract::Request as AxumRequest;
 use axum::http::{header, Method, Request, StatusCode};
+use axum::routing::any;
+use axum::{Json, Router};
 use bytes::Bytes;
 use chrono::Utc;
 use http_body_util::BodyExt;
 use tempfile::TempDir;
+use tokio::net::TcpListener;
 use tower::ServiceExt;
 
-use ferropod::config::{Config, Profile};
+use ferropod::config::{Config, LocalApiConfig, Profile};
 use ferropod::core::model::{
     Bindings, BlobAuth, Caller, EnqueueOpts, JobStatus, LogEntry, LogQuery, QueueConfig, SqlValue,
     TargetEnv, TokenScope,
@@ -1531,6 +1536,8 @@ async fn admin_ui_assets_and_enriched_status() {
         assert!(body.contains("/_panel/assets/styles.css"));
         assert!(body.contains("/_panel/assets/i18n.js"));
         assert!(body.contains("/_panel/assets/app.js"));
+        assert!(body.contains("user-scalable=no"));
+        assert!(body.contains("maximum-scale=1.0"));
     }
 
     for (asset, expected_ct) in [
@@ -1559,6 +1566,19 @@ async fn admin_ui_assets_and_enriched_status() {
                 .unwrap(),
             "no-cache"
         );
+        if asset == "/_panel/assets/styles.css" {
+            let css = String::from_utf8(
+                resp.into_body()
+                    .collect()
+                    .await
+                    .unwrap()
+                    .to_bytes()
+                    .to_vec(),
+            )
+            .unwrap();
+            assert!(css.contains("repeat(4, minmax(0, 1fr))"));
+            assert!(css.contains("touch-action: manipulation"));
+        }
     }
 
     let missing = app
@@ -2222,4 +2242,656 @@ async fn database_search_scans_beyond_five_hundred_rows() {
     assert_eq!(result["rows"].as_array().unwrap().len(), 1);
     assert_eq!(result["rows"][0]["row"]["id"], 504);
     assert_eq!(result["index"]["rows_indexed"], 505);
+}
+
+async fn setup_harness_with(mutate_cfg: impl FnOnce(&mut Config)) -> TestHarness {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = Config::for_profile(
+        Profile::LowMem,
+        "127.0.0.1:0".parse().unwrap(),
+        tmp.path().to_path_buf(),
+        "integration-test-master-key-32bytes".to_string(),
+    );
+    cfg.blob_gc_grace_secs = 0;
+    mutate_cfg(&mut cfg);
+
+    let core = Arc::new(TursoCoreStore::open(&cfg.core_db_path()).await.unwrap());
+    let kv = Arc::new(
+        TursoKvStore::open(&cfg.kv_db_path(), cfg.max_ephemeral_kv_entries)
+            .await
+            .unwrap(),
+    );
+    let queue = Arc::new(TursoQueueStore::open(&cfg.queue_db_path()).await.unwrap());
+    let user_dbs =
+        Arc::new(TursoUserDbManager::new(cfg.user_dbs_dir(), cfg.max_open_user_dbs).unwrap());
+    let blobs =
+        Arc::new(FsBlobStore::new(cfg.blobs_dir(), core.clone(), cfg.blob_gc_grace_secs).unwrap());
+    let logs = Arc::new(
+        DailyLogStore::open(cfg.logs_dir(), cfg.log_channel_capacity)
+            .await
+            .unwrap(),
+    );
+
+    let svc = PlatformService::new(
+        cfg,
+        PlatformDeps {
+            projects: core.clone(),
+            secrets: core.clone(),
+            tokens: core.clone(),
+            registry: core.clone(),
+            kv: kv.clone(),
+            queue: queue.clone(),
+            objects: blobs.clone(),
+            db: user_dbs.clone(),
+            logs: logs.clone(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let admin = Caller::system("test");
+    let (_meta, admin_token) = svc
+        .create_token(&admin, "test-admin", TokenScope::Admin, None)
+        .await
+        .unwrap();
+
+    TestHarness {
+        _tmp: tmp,
+        svc,
+        kv,
+        queue,
+        user_dbs,
+        blobs,
+        logs,
+        admin,
+        admin_token,
+    }
+}
+
+#[tokio::test]
+async fn local_api_forwarding_security_and_http2_authority() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = listener.local_addr().unwrap();
+    let hit_count = Arc::new(AtomicUsize::new(0));
+    let hit_count_srv = hit_count.clone();
+    let upstream_app = Router::new().fallback(any(move |req: AxumRequest| {
+        let hits = hit_count_srv.clone();
+        async move {
+            hits.fetch_add(1, Ordering::SeqCst);
+            let method = req.method().to_string();
+            let path_query = req
+                .uri()
+                .path_and_query()
+                .map(|pq| pq.as_str().to_string())
+                .unwrap_or_default();
+            let hdr = |name: &str| {
+                req.headers()
+                    .get(name)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string)
+            };
+            Json(serde_json::json!({
+                "method": method,
+                "path_query": path_query,
+                "host": hdr("host"),
+                "authorization": hdr("authorization"),
+                "cookie": hdr("cookie"),
+                "x_request_id": hdr("x-request-id"),
+                "x_forwarded_for": hdr("x-forwarded-for"),
+                "x_custom_hop": hdr("x-custom-hop"),
+            }))
+        }
+    }));
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, upstream_app).await;
+    });
+
+    // Config validation unit assertions
+    for reserved in [
+        "/_api",
+        "/_api/v1",
+        "/_blob",
+        "/_panel",
+        "/_internal",
+        "/_healthz",
+        "/",
+    ] {
+        assert!(
+            LocalApiConfig::validated(
+                "site.example.test",
+                Some(reserved),
+                upstream_addr,
+                &["127.0.0.1:8080".parse().unwrap()],
+            )
+            .is_err(),
+            "expected reserved prefix {reserved} to be rejected"
+        );
+    }
+    assert!(LocalApiConfig::validated(
+        "site.example.test:8080",
+        Some("/api"),
+        upstream_addr,
+        &["127.0.0.1:8080".parse().unwrap()],
+    )
+    .is_err());
+    assert!(LocalApiConfig::validated(
+        "site.example.test",
+        Some("/api"),
+        "127.0.0.1:443".parse().unwrap(),
+        &[
+            "127.0.0.1:8080".parse().unwrap(),
+            "0.0.0.0:443".parse().unwrap(),
+        ],
+    )
+    .is_err());
+
+    let ipv6_cfg = LocalApiConfig::validated(
+        "[::1]",
+        Some("/api/v1/"),
+        upstream_addr,
+        &["127.0.0.1:8080".parse().unwrap()],
+    )
+    .unwrap();
+    assert_eq!(ipv6_cfg.host, "[::1]");
+    assert_eq!(ipv6_cfg.prefix, "/api/v1");
+
+    let valid_cfg = LocalApiConfig::validated(
+        "API.Example.TEST.",
+        Some("/api"),
+        upstream_addr,
+        &["127.0.0.1:8080".parse().unwrap()],
+    )
+    .unwrap();
+    assert_eq!(valid_cfg.host, "api.example.test");
+
+    let h = setup_harness_with(|cfg| {
+        cfg.local_api = Some(valid_cfg);
+        cfg.max_blob_upload_bytes = 64;
+    })
+    .await;
+    let proj = h
+        .svc
+        .create_project(&h.admin, "local-api-site", None)
+        .await
+        .unwrap();
+    h.svc
+        .create_deployment(
+            &h.admin,
+            &proj.id,
+            CreateDeploymentInput {
+                spa_fallback: true,
+                target_env: Some(TargetEnv::Prod),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    h.svc
+        .upsert_route(&h.admin, "api.example.test", &proj.id, TargetEnv::Prod)
+        .await
+        .unwrap();
+    let app = build_router(h.svc.clone());
+
+    // 1. Query string %2F works while protected headers cannot be stripped via Connection
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/items?next=%2Fdashboard")
+                .header(header::HOST, "API.EXAMPLE.TEST:8080")
+                .header(header::AUTHORIZATION, "Bearer user-secret")
+                .header(header::COOKIE, "sid=abc")
+                .header("x-request-id", "req-keep-1")
+                .header("x-forwarded-for", "1.2.3.4")
+                .header("x-custom-hop", "drop-me")
+                .header(
+                    header::CONNECTION,
+                    "x-custom-hop, host, authorization, cookie, x-request-id",
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let echo: serde_json::Value =
+        serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(echo["path_query"], "/api/items?next=%2Fdashboard");
+    assert_eq!(echo["host"], "API.EXAMPLE.TEST:8080");
+    assert_eq!(echo["authorization"], "Bearer user-secret");
+    assert_eq!(echo["cookie"], "sid=abc");
+    assert_eq!(echo["x_request_id"], "req-keep-1");
+    assert!(echo["x_forwarded_for"].is_null());
+    assert!(echo["x_custom_hop"].is_null());
+    assert_eq!(hit_count.load(Ordering::SeqCst), 1);
+
+    // 2. HTTP/2-style request (no Host header, authority on URI) routes & synthesizes Host
+    let h2_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("https://api.example.test:8443/api/ping")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(h2_resp.status(), StatusCode::OK);
+    let h2_echo: serde_json::Value =
+        serde_json::from_slice(&h2_resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(h2_echo["host"], "api.example.test:8443");
+    assert_eq!(h2_echo["path_query"], "/api/ping");
+    assert_eq!(hit_count.load(Ordering::SeqCst), 2);
+
+    // 3. Traversal/smuggling paths rejected with 400 and never forwarded
+    for bad_path in [
+        "/api/../_internal/cron",
+        "/api/%2e%2e/secret",
+        "/api/foo%2fbar",
+        "/api/foo%5cbar",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(bad_path)
+                    .header(header::HOST, "api.example.test")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "path {bad_path} should fail with 400"
+        );
+    }
+
+    // 4. CONNECT and Upgrade rejected with 405
+    let connect_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::CONNECT)
+                .uri("/api/tunnel")
+                .header(header::HOST, "api.example.test")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(connect_resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+    let upgrade_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/ws")
+                .header(header::HOST, "api.example.test")
+                .header(header::UPGRADE, "websocket")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(upgrade_resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+    // 5. Oversized request body via Content-Length AND streaming chunked body return 413
+    let cl_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/upload")
+                .header(header::HOST, "api.example.test")
+                .header(header::CONTENT_LENGTH, "128")
+                .body(Body::from(vec![b'x'; 128]))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(cl_resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+    let stream = futures_util::stream::iter(vec![
+        Ok::<_, std::io::Error>(Bytes::from(vec![b'a'; 40])),
+        Ok::<_, std::io::Error>(Bytes::from(vec![b'b'; 40])),
+    ]);
+    let stream_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/upload-stream")
+                .header(header::HOST, "api.example.test")
+                .body(Body::from_stream(stream))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stream_resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(hit_count.load(Ordering::SeqCst), 2);
+
+    // 6. Bracketed IPv6 host normalization + :authority lookup
+    let h_v6 = setup_harness_with(|cfg| {
+        cfg.local_api = Some(ipv6_cfg);
+    })
+    .await;
+    let proj_v6 = h_v6
+        .svc
+        .create_project(&h_v6.admin, "v6-site", None)
+        .await
+        .unwrap();
+    h_v6.svc
+        .create_deployment(
+            &h_v6.admin,
+            &proj_v6.id,
+            CreateDeploymentInput {
+                target_env: Some(TargetEnv::Prod),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    h_v6.svc
+        .upsert_route(&h_v6.admin, "[::1]", &proj_v6.id, TargetEnv::Prod)
+        .await
+        .unwrap();
+    let app_v6 = build_router(h_v6.svc.clone());
+    let v6_resp = app_v6
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/ok")
+                .header(header::HOST, "[::1]:8080")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(v6_resp.status(), StatusCode::OK);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn admin_cannot_bind_another_apps_private_bucket_as_assets() {
+    let h = setup_harness().await;
+    let app_a = h.svc.create_project(&h.admin, "app-a", None).await.unwrap();
+    let app_b = h.svc.create_project(&h.admin, "app-b", None).await.unwrap();
+    h.svc
+        .create_bucket(&h.admin, "a-private", Some(&app_a.id), false)
+        .await
+        .unwrap();
+    h.svc
+        .create_bucket(&h.admin, "shared-global", None, false)
+        .await
+        .unwrap();
+
+    // Admin cannot bind App A's bucket onto App B
+    let err = h
+        .svc
+        .create_deployment(
+            &h.admin,
+            &app_b.id,
+            CreateDeploymentInput {
+                assets_bucket: Some("a-private".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ferropod::core::model::FerroError::Forbidden(_)
+    ));
+
+    // Admin can bind App A's bucket onto App A and global bucket onto App B
+    h.svc
+        .create_deployment(
+            &h.admin,
+            &app_a.id,
+            CreateDeploymentInput {
+                assets_bucket: Some("a-private".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    h.svc
+        .create_deployment(
+            &h.admin,
+            &app_b.id,
+            CreateDeploymentInput {
+                assets_bucket: Some("shared-global".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn database_fts_ignores_unindexed_title_column() {
+    let h = setup_harness().await;
+    let app = build_router(h.svc.clone());
+    let token = Some(h.admin_token.as_str());
+    let (status, body) = json_req(
+        &app,
+        Method::POST,
+        "/_api/v1/dbs",
+        token,
+        Some(serde_json::json!({"name": "fts-column-scope"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let db: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let path = format!("/_api/v1/dbs/{}", db["id"].as_str().unwrap());
+
+    let (status, _) = json_req(
+        &app,
+        Method::POST,
+        &format!("{path}/execute"),
+        token,
+        Some(serde_json::json!({
+            "statements": [
+                {"sql": "CREATE TABLE docs (id INTEGER PRIMARY KEY, title TEXT, body TEXT)", "params": []},
+                {"sql": "INSERT INTO docs (id, title, body) VALUES (1, 'confidential_title_secret', 'public body text')", "params": []}
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _) = json_req(
+        &app,
+        Method::POST,
+        &format!("{path}/fts"),
+        token,
+        Some(serde_json::json!({"name": "body_only", "table": "docs", "columns": ["body"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, secret_res) = json_req(
+        &app,
+        Method::POST,
+        &format!("{path}/fts/body_only/query"),
+        token,
+        Some(serde_json::json!({"query": "confidential_title_secret"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let secret_json: serde_json::Value = serde_json::from_slice(&secret_res).unwrap();
+    assert_eq!(secret_json["rows"].as_array().unwrap().len(), 0);
+
+    let (status, body_res) = json_req(
+        &app,
+        Method::POST,
+        &format!("{path}/fts/body_only/query"),
+        token,
+        Some(serde_json::json!({"query": "public"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let body_json: serde_json::Value = serde_json::from_slice(&body_res).unwrap();
+    assert_eq!(body_json["rows"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn search_docs_default_paginated_and_updated_desc_sort() {
+    let h = setup_harness().await;
+    let app = build_router(h.svc.clone());
+    let token = Some(h.admin_token.as_str());
+
+    let (status, created) = json_req(
+        &app,
+        Method::POST,
+        "/_api/v1/search",
+        token,
+        Some(serde_json::json!({"name": "paginated-idx"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let idx: serde_json::Value = serde_json::from_slice(&created).unwrap();
+    let path = format!("/_api/v1/search/{}", idx["id"].as_str().unwrap());
+
+    for i in 0..120 {
+        if i >= 115 {
+            tokio::time::sleep(std::time::Duration::from_millis(3)).await;
+        }
+        let (status, _) = json_req(
+            &app,
+            Method::POST,
+            &format!("{path}/docs"),
+            token,
+            Some(serde_json::json!({"id": format!("d-{i:03}"), "body": "common-keyword"})),
+        )
+        .await;
+        assert!(status.is_success());
+    }
+
+    // Unparameterized GET /docs is capped at 100 by default
+    let (status, default_docs) =
+        json_req(&app, Method::GET, &format!("{path}/docs"), token, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let default_arr: Vec<serde_json::Value> = serde_json::from_slice(&default_docs).unwrap();
+    assert_eq!(default_arr.len(), 100);
+
+    // updated_desc returns newest 5 matches in descending updated_at order
+    let (status, res_bytes) = json_req(
+        &app,
+        Method::POST,
+        &format!("{path}/query"),
+        token,
+        Some(serde_json::json!({"query": "common-keyword", "sort": "updated_desc", "limit": 5})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let res: serde_json::Value = serde_json::from_slice(&res_bytes).unwrap();
+    assert_eq!(res["total"], 120);
+    let hits = res["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 5);
+    assert_eq!(hits[0]["doc"]["id"], "d-119");
+    assert_eq!(hits[1]["doc"]["id"], "d-118");
+}
+
+#[tokio::test]
+async fn search_mock_asset_removed() {
+    let h = setup_harness().await;
+    let app = build_router(h.svc.clone());
+
+    let mock_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/_panel/assets/search_mock.js")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(mock_resp.status(), StatusCode::NOT_FOUND);
+
+    let comp_resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/_panel/assets/search_components.js")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(comp_resp.status(), StatusCode::OK);
+    let js = String::from_utf8(
+        comp_resp
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(!js.contains("FerroSearchMock"));
+}
+
+#[tokio::test]
+async fn cron_schedule_validation_rejects_invalid_expressions() {
+    let h = setup_harness().await;
+    let proj = h
+        .svc
+        .create_project(&h.admin, "cron-val-app", None)
+        .await
+        .unwrap();
+
+    for bad in [
+        "",
+        "* * *",
+        "99 * * * *",
+        "@every 0s",
+        "@every 999999999999999999h",
+        "not-a-cron",
+    ] {
+        let err = h
+            .svc
+            .create_cron_job(&h.admin, "bad-cron", Some(&proj.id), bad, "/_internal/cron")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ferropod::core::model::FerroError::InvalidArgument(_)),
+            "expected InvalidArgument for '{bad}', got {err:?}"
+        );
+    }
+
+    let valid = h
+        .svc
+        .create_cron_job(
+            &h.admin,
+            "good-cron",
+            Some(&proj.id),
+            "@daily",
+            "/_internal/cron",
+        )
+        .await
+        .unwrap();
+
+    let upd_err = h
+        .svc
+        .update_cron_job(&h.admin, &valid.id, None, Some("60 * * * *"), None)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        upd_err,
+        ferropod::core::model::FerroError::InvalidArgument(_)
+    ));
+
+    let updated = h
+        .svc
+        .update_cron_job(&h.admin, &valid.id, None, Some("@every 30s"), None)
+        .await
+        .unwrap();
+    assert_eq!(updated.schedule, "@every 30s");
 }

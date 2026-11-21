@@ -67,11 +67,28 @@
       level: '',
       project_id: '',
       request_id: '',
-      windowSecs: '3600',
+      windowSecs: '86400',
       limit: '100'
     },
     routeSearch: ''
   };
+
+  var viewRequestSeq = 0;
+  var dbFtsRequestSeq = 0;
+  var searchQuerySeq = 0;
+
+  function beginViewRender(expectedRoute, extraCheck) {
+    var seq = ++viewRequestSeq;
+    var reqToken = state.token;
+    return function () {
+      return (
+        state.token === reqToken &&
+        viewRequestSeq === seq &&
+        state.currentRoute === expectedRoute &&
+        (!extraCheck || extraCheck())
+      );
+    };
+  }
 
   function $(id) {
     return document.getElementById(id);
@@ -410,6 +427,7 @@
   }
 
   function navigate(hash) {
+    viewRequestSeq++;
     if (window.location.hash !== hash) {
       try {
         history.pushState(null, '', hash);
@@ -595,12 +613,10 @@
   var searchBundlePromise = null;
   function ensureSearchBundle() {
     if (!searchBundlePromise) {
-      searchBundlePromise = import('/_panel/assets/search_mock.js')
-        .then(function () { return import('/_panel/assets/search_components.js'); })
-        .catch(function (err) {
-          searchBundlePromise = null;
-          throw err;
-        });
+      searchBundlePromise = import('/_panel/assets/search_components.js').catch(function (err) {
+        searchBundlePromise = null;
+        throw err;
+      });
     }
     return searchBundlePromise;
   }
@@ -642,6 +658,7 @@
 
   async function renderOverview(fetchData) {
     var root = $('view-root');
+    var isCurrent = beginViewRender('overview');
     if (fetchData) {
       root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
       try {
@@ -651,6 +668,7 @@
           api('/_api/v1/runtimes'),
           api('/_api/v1/routes')
         ]);
+        if (!isCurrent()) return;
         state.status = results[0];
         state.healthOk = results[1] && results[1].status === 'ok';
         state.projects = results[2] || [];
@@ -658,10 +676,11 @@
         $('session-actor').textContent = state.status.actor || '-';
         $('session-scope').textContent = state.status.scope || '-';
       } catch (e) {
-        root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+        if (isCurrent()) root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
         return;
       }
     }
+    if (!isCurrent()) return;
     var st = state.status || {};
     var healthBadge = state.healthOk !== false
       ? '<span class="badge badge-success"><span class="dot"></span>' + esc(t('overview.healthy')) + '</span>'
@@ -780,16 +799,11 @@
     });
   }
 
-  var detailRequestSequence = 0;
-
   async function renderProjectDetail(id, fetchData) {
     var root = $('view-root');
-    var requestToken = state.token;
-    var requestSequence = ++detailRequestSequence;
-    function isCurrentDetail() {
-      return state.currentRoute === 'runtime' && state.projectId === id &&
-        state.token === requestToken && detailRequestSequence === requestSequence;
-    }
+    var isCurrentDetail = beginViewRender('runtime', function () {
+      return state.projectId === id;
+    });
     if (fetchData) {
       root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
       try {
@@ -1140,12 +1154,17 @@
   }
 
   function openNewDeploymentModal(project) {
-    var base = state.detailDeployments.find(function (d) { return d.id === project.active_deployment_id; });
+    var base =
+      state.detailDeployments.find(function (d) { return d.id === project.active_deployment_id; }) ||
+      state.detailDeployments.find(function (d) { return d.id === project.preview_deployment_id; });
+    var availableBuckets = state.buckets.filter(function (b) {
+      return !b.project_id || b.project_id === project.id;
+    });
     var bktOpts = '<option value="">' + esc(t('projectDetail.assetsBucketNone')) + '</option>' +
-      state.buckets.map(function (b) {
+      availableBuckets.map(function (b) {
         return '<option value="' + esc(b.name) + '"' + (base && base.assets_bucket === b.name ? ' selected' : '') + '>' + esc(b.name) + '</option>';
       }).join('');
-    if (base && base.assets_bucket && !state.buckets.some(function (b) { return b.name === base.assets_bucket; })) {
+    if (base && base.assets_bucket && !availableBuckets.some(function (b) { return b.name === base.assets_bucket; })) {
       bktOpts += '<option value="' + esc(base.assets_bucket) + '" selected>' + esc(base.assets_bucket) + '</option>';
     }
 
@@ -1160,7 +1179,7 @@
         '<div class="field"><label>' + esc(t('projectDetail.assetsBucket')) + '</label><select id="dep-bucket">' + bktOpts + '</select></div>' +
         '<div class="field"><label>' + esc(t('projectDetail.assetsPrefix')) + '</label><input type="text" id="dep-prefix" placeholder="dist"></div>' +
         '<div class="field span-2"><label for="dep-file">' + esc(t('projectDetail.artifactFile')) + '</label><input type="file" id="dep-file" accept=".wasm,.wat"><span class="muted text-xs">' + esc(t('projectDetail.artifactFileHint')) + '</span></div>' +
-        '<div class="field span-2"><label>' + esc(t('projectDetail.artifactPath')) + ' (' + esc(t('common.optional')) + ')</label><input type="text" id="dep-artifact" placeholder="/data/artifacts/worker.cwasm"></div>' +
+        '<div class="field span-2"><label>' + esc(t('projectDetail.artifactPath')) + ' (' + esc(t('common.optional')) + ')</label><input type="text" id="dep-artifact" placeholder="worker.wasm"></div>' +
         '<div class="span-2"><label class="checkbox-row"><input type="checkbox" id="dep-spa" checked> ' + esc(t('projectDetail.spaFallback')) + '</label></div>' +
         '<div class="field span-2"><label>' + esc(t('projectDetail.crons')) + '</label><textarea id="dep-crons" placeholder="' + esc(t('projectDetail.cronsPlaceholder')) + '"></textarea></div>' +
         '<div class="field span-2"><label>' + esc(t('projectDetail.bindings')) + '</label><textarea id="dep-bindings" class="mono" placeholder="' + esc(t('projectDetail.bindingsPlaceholder')) + '"></textarea></div>' +
@@ -1171,6 +1190,7 @@
       onMount: function () {
         if (base) {
           $('dep-prefix').value = base.assets_prefix || '';
+          $('dep-artifact').value = base.artifact_path || '';
           $('dep-spa').checked = base.spa_fallback;
           $('dep-crons').value = (base.crons || []).join('\n');
           $('dep-bindings').value = JSON.stringify(base.bindings || {}, null, 2);
@@ -1213,6 +1233,8 @@
                 method: 'PUT', body: file, headers: { 'Content-Type': 'application/octet-stream' }
               });
               artifact = uploaded.artifact_path;
+              $('dep-file').value = '';
+              $('dep-artifact').value = artifact;
             }
             await api('/_api/v1/runtimes/' + enc(project.id) + '/deployments', {
               method: 'POST',
@@ -1240,17 +1262,20 @@
 
   async function renderRoutes(fetchData) {
     var root = $('view-root');
+    var isCurrent = beginViewRender('routes');
     if (fetchData) {
       root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
       try {
         var res = await Promise.all([api('/_api/v1/routes'), api('/_api/v1/runtimes')]);
+        if (!isCurrent()) return;
         state.routes = res[0] || [];
         state.projects = res[1] || [];
       } catch (e) {
-        root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+        if (isCurrent()) root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
         return;
       }
     }
+    if (!isCurrent()) return;
 
     var q = state.routeSearch.trim().toLowerCase();
     var filtered = state.routes.filter(function (r) {
@@ -1363,10 +1388,12 @@
 
   async function renderKv(fetchData) {
     var root = $('view-root');
+    var isCurrent = beginViewRender('kv');
     if (fetchData) {
       root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
       try {
         var res = await Promise.all([api('/_api/v1/kv'), api('/_api/v1/runtimes')]);
+        if (!isCurrent()) return;
         state.kvNamespaces = res[0] || [];
         state.projects = res[1] || [];
         if (!state.selectedKvNs && state.kvNamespaces.length) {
@@ -1374,12 +1401,14 @@
         }
         if (state.selectedKvNs) {
           await loadKvKeys();
+          if (!isCurrent()) return;
         }
       } catch (e) {
-        root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+        if (isCurrent()) root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
         return;
       }
     }
+    if (!isCurrent()) return;
 
     var nsMeta = state.kvNamespaces.find(function (n) { return n.name === state.selectedKvNs; });
     var canWriteNs = !isReadonly() && (isAdmin() || (nsMeta && canWriteResource(nsMeta.project_id)));
@@ -1654,12 +1683,13 @@
 
   async function renderQueues(fetchData) {
     var root = $('view-root');
+    var isCurrent = beginViewRender('queues');
     if (state.currentRoute !== 'queues') return;
     if (fetchData) {
       root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
       try {
         var res = await Promise.all([api('/_api/v1/queues'), api('/_api/v1/runtimes')]);
-        if (state.currentRoute !== 'queues') return;
+        if (!isCurrent()) return;
         state.queues = res[0] || [];
         state.projects = res[1] || [];
         if (!state.selectedQueue && state.queues.length) {
@@ -1667,13 +1697,14 @@
         }
         if (state.selectedQueue) {
           await loadSelectedQueue();
+          if (!isCurrent()) return;
         }
       } catch (e) {
-        if (state.currentRoute === 'queues') root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+        if (isCurrent()) root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
         return;
       }
     }
-    if (state.currentRoute !== 'queues') return;
+    if (!isCurrent()) return;
 
     var qCfg = state.queues.find(function (q) { return q.name === state.selectedQueue; });
     var canWriteQ = qCfg && canWriteResource(qCfg.project_id);
@@ -1978,10 +2009,12 @@
 
   async function renderBlobs(fetchData) {
     var root = $('view-root');
+    var isCurrent = beginViewRender('blobs');
     if (fetchData) {
       root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
       try {
         var res = await Promise.all([api('/_api/v1/buckets'), api('/_api/v1/runtimes')]);
+        if (!isCurrent()) return;
         state.buckets = res[0] || [];
         state.projects = res[1] || [];
         if (!state.selectedBucket && state.buckets.length) {
@@ -1989,12 +2022,14 @@
         }
         if (state.selectedBucket) {
           await loadBucketObjects();
+          if (!isCurrent()) return;
         }
       } catch (e) {
-        root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+        if (isCurrent()) root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
         return;
       }
     }
+    if (!isCurrent()) return;
 
     var bCfg = state.buckets.find(function (b) { return b.name === state.selectedBucket; });
     var canWriteBkt = bCfg && canWriteResource(bCfg.project_id);
@@ -2288,10 +2323,12 @@
 
   async function renderDbs(fetchData) {
     var root = $('view-root');
+    var isCurrent = beginViewRender('dbs');
     if (fetchData) {
       root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
       try {
         var res = await Promise.all([api('/_api/v1/dbs'), api('/_api/v1/runtimes')]);
+        if (!isCurrent()) return;
         state.dbs = res[0] || [];
         state.projects = res[1] || [];
         if (!state.selectedDbId && state.dbs.length) {
@@ -2299,12 +2336,14 @@
         }
         if (state.selectedDbId && state.dbTab === 'schema') {
           await loadDbSchema();
+          if (!isCurrent()) return;
         }
       } catch (e) {
-        root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+        if (isCurrent()) root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
         return;
       }
     }
+    if (!isCurrent()) return;
 
     var dbMeta = state.dbs.find(function (d) { return d.id === state.selectedDbId; });
     var canWriteDb = dbMeta && canWriteResource(dbMeta.project_id);
@@ -2467,10 +2506,22 @@
 
   async function renderDbFts(db, canWrite) {
     var panel = $('db-fts-panel');
+    var reqToken = state.token;
+    var ftsSeq = ++dbFtsRequestSeq;
+    function isCurrentFts() {
+      return (
+        panel &&
+        panel.isConnected &&
+        state.token === reqToken &&
+        state.currentRoute === 'dbs' &&
+        state.selectedDbId === db.id &&
+        dbFtsRequestSeq === ftsSeq
+      );
+    }
     var path = '/_api/v1/dbs/' + enc(db.id) + '/fts';
     try {
       var indexes = await api(path);
-      if (!panel.isConnected) return;
+      if (!isCurrentFts()) return;
       panel.innerHTML = '<div class="panel-header"><h3 class="panel-title">' + esc(t('dbs.tabFts')) + '</h3></div>' +
         '<div class="panel-body stack gap-md"><p class="muted text-xs">' + esc(t('dbs.ftsSubtitle')) + '</p>' +
         (canWrite ? '<form id="fts-create-form" class="stack gap-sm">' +
@@ -2494,7 +2545,7 @@
             name: $('fts-name').value.trim(), table: $('fts-table').value.trim(),
             columns: $('fts-columns').value.split(',').map(function (value) { return value.trim(); }).filter(Boolean)
           } });
-          renderDbFts(db, canWrite);
+          if (isCurrentFts()) renderDbFts(db, canWrite);
         } catch (e) { toast(e.message, 'error'); }
       });
       panel.querySelectorAll('[data-fts-query]').forEach(function (form) {
@@ -2504,6 +2555,7 @@
             var result = await api(path + '/' + enc(form.getAttribute('data-fts-query')) + '/query', {
               method: 'POST', json: { query: form.elements.query.value }
             });
+            if (!isCurrentFts() || !form.isConnected) return;
             var output = form.nextElementSibling;
             output.textContent = JSON.stringify(result.rows, null, 2);
             output.classList.remove('hidden');
@@ -2515,13 +2567,13 @@
           confirmAction(t('common.confirmDeleteTitle'), async function () {
             try {
               await api(path + '/' + enc(button.getAttribute('data-fts-delete')), { method: 'DELETE' });
-              renderDbFts(db, canWrite);
+              if (isCurrentFts()) renderDbFts(db, canWrite);
             } catch (e) { toast(e.message, 'error'); }
           });
         });
       });
     } catch (e) {
-      if (panel.isConnected) panel.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+      if (isCurrentFts()) panel.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
     }
   }
 
@@ -2609,17 +2661,11 @@
   }
 
   var searchState = { indexes: [], selected: '', query: '', result: null, offset: 0 };
-  var searchRequestSequence = 0;
 
   async function renderSearch() {
     var root = $('view-root');
     if (state.currentRoute !== 'search') return;
-    var requestToken = state.token;
-    var requestSequence = ++searchRequestSequence;
-    function isCurrentSearch() {
-      return state.currentRoute === 'search' && state.token === requestToken &&
-        searchRequestSequence === requestSequence;
-    }
+    var isCurrentSearch = beginViewRender('search');
     try {
       var data = await Promise.all([api('/_api/v1/search'), api('/_api/v1/runtimes')]);
       if (!isCurrentSearch()) return;
@@ -2628,6 +2674,7 @@
       if (!searchState.indexes.some(function (item) { return item.id === searchState.selected; })) {
         searchState.selected = searchState.indexes.length ? searchState.indexes[0].id : '';
         searchState.result = null;
+        searchState.offset = 0;
       }
       var selected = searchState.indexes.find(function (item) { return item.id === searchState.selected; });
       if (selected && searchState.offset >= selected.doc_count) {
@@ -2699,19 +2746,34 @@
       });
       if ($('real-search-form')) $('real-search-form').addEventListener('submit', async function (event) {
         event.preventDefault();
+        var targetIndexId = selected.id;
+        var reqToken = state.token;
+        var qSeq = ++searchQuerySeq;
         searchState.query = $('real-search-query').value;
         try {
-          searchState.result = await api('/_api/v1/search/' + enc(selected.id) + '/query', {
+          var result = await api('/_api/v1/search/' + enc(targetIndexId) + '/query', {
             method: 'POST', json: { query: searchState.query }
           });
+          if (
+            state.currentRoute !== 'search' ||
+            state.token !== reqToken ||
+            searchState.selected !== targetIndexId ||
+            searchQuerySeq !== qSeq
+          ) {
+            return;
+          }
+          searchState.result = result;
           renderSearch();
         } catch (e) { toast(e.message, 'error'); }
       });
       if ($('real-search-doc-form')) $('real-search-doc-form').addEventListener('submit', async function (event) {
         event.preventDefault();
+        var targetIndexId = selected.id;
+        var reqToken = state.token;
         try {
           var doc = JSON.parse($('real-search-doc').value);
-          await api('/_api/v1/search/' + enc(selected.id) + '/docs', { method: 'POST', json: doc });
+          await api('/_api/v1/search/' + enc(targetIndexId) + '/docs', { method: 'POST', json: doc });
+          if (state.currentRoute !== 'search' || state.token !== reqToken || searchState.selected !== targetIndexId) return;
           searchState.result = null;
           searchState.offset = 0;
           renderSearch();
@@ -2719,9 +2781,13 @@
       });
       root.querySelectorAll('[data-search-doc-delete]').forEach(function (button) {
         button.addEventListener('click', function () {
+          var targetIndexId = selected.id;
+          var docId = button.getAttribute('data-search-doc-delete');
+          var reqToken = state.token;
           confirmAction(t('common.confirmDeleteTitle'), async function () {
             try {
-              await api('/_api/v1/search/' + enc(selected.id) + '/docs/' + enc(button.getAttribute('data-search-doc-delete')), { method: 'DELETE' });
+              await api('/_api/v1/search/' + enc(targetIndexId) + '/docs/' + enc(docId), { method: 'DELETE' });
+              if (state.currentRoute !== 'search' || state.token !== reqToken || searchState.selected !== targetIndexId) return;
               searchState.result = null;
               renderSearch();
             } catch (e) { toast(e.message, 'error'); }
@@ -2729,10 +2795,15 @@
         });
       });
       if ($('search-delete-index')) $('search-delete-index').addEventListener('click', function () {
+        var targetIndexId = selected.id;
+        var reqToken = state.token;
         confirmAction(t('search.deleteIndexConfirm', { name: selected.name }), async function () {
           try {
-            await api('/_api/v1/search/' + enc(selected.id), { method: 'DELETE' });
+            await api('/_api/v1/search/' + enc(targetIndexId), { method: 'DELETE' });
+            if (state.currentRoute !== 'search' || state.token !== reqToken) return;
             searchState.selected = '';
+            searchState.offset = 0;
+            searchState.result = null;
             renderSearch();
           } catch (e) { toast(e.message, 'error'); }
         });
@@ -2744,16 +2815,20 @@
 
   async function renderRuntime() {
     var root = $('view-root');
+    var isCurrent = beginViewRender('runtime');
     root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
     try {
       await ensureRuntimeComponent();
+      if (!isCurrent()) return;
       var res = await Promise.all([api('/_api/v1/runtimes'), api('/_api/v1/routes')]);
+      if (!isCurrent()) return;
       state.projects = res[0] || [];
       state.routes = res[1] || [];
     } catch (e) {
-      root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+      if (isCurrent()) root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
       return;
     }
+    if (!isCurrent()) return;
     root.innerHTML = '';
     var rp = document.createElement('fp-runtime-panel');
     rp.token = state.token || readStoredToken();
@@ -2767,18 +2842,23 @@
 
   async function renderOps(fetchData) {
     var root = $('view-root');
+    var isCurrent = beginViewRender('ops');
     root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
     try {
       await ensureOpsComponent();
+      if (!isCurrent()) return;
       if (fetchData && !state.projects.length) {
         try {
-          state.projects = (await api('/_api/v1/runtimes')) || [];
+          var projs = (await api('/_api/v1/runtimes')) || [];
+          if (!isCurrent()) return;
+          state.projects = projs;
         } catch (_) {}
       }
     } catch (e) {
-      root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+      if (isCurrent()) root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
       return;
     }
+    if (!isCurrent()) return;
     root.innerHTML = '';
     var ops = document.createElement('fp-ops-center');
     ops.token = state.token || readStoredToken();
@@ -2789,13 +2869,16 @@
 
   async function renderUpdates() {
     var root = $('view-root');
+    var isCurrent = beginViewRender('updates');
     root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
     try {
       await ensureUpdateComponent();
+      if (!isCurrent()) return;
     } catch (e) {
-      root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+      if (isCurrent()) root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
       return;
     }
+    if (!isCurrent()) return;
     root.innerHTML = '';
     var upd = document.createElement('fp-system-updates');
     upd.token = state.token || readStoredToken();
@@ -2807,17 +2890,20 @@
 
   async function renderTokens(fetchData) {
     var root = $('view-root');
+    var isCurrent = beginViewRender('tokens');
     if (fetchData) {
       root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
       try {
         var res = await Promise.all([api('/_api/v1/tokens'), api('/_api/v1/runtimes')]);
+        if (!isCurrent()) return;
         state.tokens = res[0] || [];
         state.projects = res[1] || [];
       } catch (e) {
-        root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+        if (isCurrent()) root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
         return;
       }
     }
+    if (!isCurrent()) return;
 
     var rows = state.tokens.map(function (tok) {
       var scopeStr = typeof tok.scope === 'string'
@@ -2979,12 +3065,26 @@
     return '<span class="badge badge-info">' + esc(level || 'info') + '</span>';
   }
 
+  function highlightText(text, query) {
+    var str = String(text === null || text === undefined ? '' : text);
+    var terms = String(query || '').trim().split(/\s+/).filter(Boolean);
+    if (!terms.length) return esc(str);
+    var escaped = terms
+      .slice()
+      .sort(function (a, b) { return b.length - a.length; })
+      .map(function (term) { return term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); });
+    var re = new RegExp('(' + escaped.join('|') + ')', 'gi');
+    return str.split(re).map(function (part, idx) {
+      return idx % 2 === 1 ? '<mark class="fts-hl">' + esc(part) + '</mark>' : esc(part);
+    }).join('');
+  }
+
   function buildLogRowsHtml(entries, emptyText, highlightQuery) {
     if (!entries || !entries.length) {
       return '<div class="empty-state">' + esc(emptyText) + '</div>';
     }
-    var hl = highlightQuery && window.FerroSearchMock
-      ? function (s) { return window.FerroSearchMock.highlightText(s, highlightQuery); }
+    var hl = highlightQuery
+      ? function (s) { return highlightText(s, highlightQuery); }
       : esc;
     return entries.map(function (e) {
       var metaHtml = e.meta_json
@@ -3028,17 +3128,25 @@
 
   async function renderLogs(fetchData) {
     var root = $('view-root');
+    var reqToken = state.token;
+    var isCurrent = beginViewRender('logs');
     if (fetchData && !state.projects.length) {
       try {
-        state.projects = (await api('/_api/v1/runtimes')) || [];
+        var projs = (await api('/_api/v1/runtimes')) || [];
+        if (!isCurrent()) return;
+        state.projects = projs;
       } catch (_) {}
     }
     if (fetchData && state.logsTab === 'history') {
       await ensureSearchBundle();
+      if (!isCurrent()) return;
       await queryHistoryLogs();
+      if (!isCurrent()) return;
     } else if (state.logsTab === 'history') {
       await ensureSearchBundle();
+      if (!isCurrent()) return;
     }
+    if (!isCurrent()) return;
 
     var tabsHtml =
       '<div class="tabs">' +
@@ -3090,7 +3198,9 @@
         if (state.logsTab === 'history') {
           try { await queryHistoryLogs(); } catch (e) { toast(e.message, 'error'); }
         }
-        renderLogs(false);
+        if (state.currentRoute === 'logs' && state.token === reqToken) {
+          renderLogs(false);
+        }
       });
     });
 
@@ -3138,6 +3248,7 @@
       var panel = $('log-fts-panel');
       panel.projects = state.projects;
       panel.scope = getScope();
+      panel.filters = Object.assign({}, state.historyFilters);
       panel.liveEntries = state.historyLogs;
       panel.addEventListener('fp-log-query', async function (ev) {
         var d = ev.detail || {};
@@ -3152,7 +3263,9 @@
         };
         try {
           await queryHistoryLogs();
-          panel.liveEntries = state.historyLogs;
+          if (panel.isConnected && state.currentRoute === 'logs' && state.token === reqToken) {
+            panel.liveEntries = state.historyLogs;
+          }
         } catch (e) { toast(e.message, 'error'); }
       });
     }
@@ -3201,6 +3314,16 @@
         closeDrawer();
       }
     });
+
+    ['gesturestart', 'gesturechange', 'gestureend'].forEach(function (evt) {
+      document.addEventListener(evt, function (ev) { ev.preventDefault(); }, { passive: false });
+    });
+    document.addEventListener('touchstart', function (ev) {
+      if (ev.touches && ev.touches.length > 1) ev.preventDefault();
+    }, { passive: false });
+    document.addEventListener('touchmove', function (ev) {
+      if (ev.touches && ev.touches.length > 1) ev.preventDefault();
+    }, { passive: false });
 
     document.addEventListener('fp-toast', function (ev) {
       if (ev.detail && ev.detail.message) {

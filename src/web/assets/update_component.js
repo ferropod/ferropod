@@ -10,6 +10,8 @@ updateSheet.replaceSync(`
     font-family: var(--font-sans);
     font-size: 14px;
     line-height: 1.5;
+    touch-action: manipulation;
+    max-width: 100%;
   }
   button, input { font: inherit; color: inherit; }
   code, pre, .mono { font-family: var(--font-mono); }
@@ -90,8 +92,8 @@ updateSheet.replaceSync(`
     border-color: color-mix(in srgb, var(--success, #16a34a) 35%, var(--border));
   }
   .banner-warn {
-    background: color-mix(in srgb, var(--warning, #d97706) 8%, var(--surface));
-    border-color: color-mix(in srgb, var(--warning, #d97706) 35%, var(--border));
+    background: color-mix(in srgb, var(--warn, #d97706) 8%, var(--surface));
+    border-color: color-mix(in srgb, var(--warn, #d97706) 35%, var(--border));
   }
   .banner-error {
     background: var(--danger-soft, rgba(220, 38, 38, 0.08));
@@ -144,9 +146,9 @@ updateSheet.replaceSync(`
     color: var(--success, #16a34a);
   }
   .badge-warn {
-    background: color-mix(in srgb, var(--warning, #d97706) 14%, transparent);
-    border-color: color-mix(in srgb, var(--warning, #d97706) 35%, transparent);
-    color: var(--warning, #d97706);
+    background: color-mix(in srgb, var(--warn, #d97706) 14%, transparent);
+    border-color: color-mix(in srgb, var(--warn, #d97706) 35%, transparent);
+    color: var(--warn, #d97706);
   }
 
   .cmd-list { display: flex; flex-direction: column; gap: 10px; }
@@ -210,6 +212,12 @@ updateSheet.replaceSync(`
     animation: fp-spin 0.7s linear infinite;
   }
   @keyframes fp-spin { to { transform: rotate(360deg); } }
+  @media (max-width: 639px) {
+    .panel-header, .panel-body { padding: 12px 14px; }
+    .info-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .btn { min-height: 38px; }
+    .banner > div { min-width: 0 !important; width: 100%; }
+  }
 `);
 
 function esc(val) {

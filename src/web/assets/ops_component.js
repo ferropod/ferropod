@@ -10,6 +10,8 @@ opsSheet.replaceSync(`
     font-family: var(--font-sans);
     font-size: 14px;
     line-height: 1.5;
+    touch-action: manipulation;
+    max-width: 100%;
   }
   button, input, select { font: inherit; color: inherit; }
   code, pre, .mono { font-family: var(--font-mono); }
@@ -114,9 +116,10 @@ opsSheet.replaceSync(`
   .badge-accent { background: var(--accent-soft); color: var(--accent); }
   .badge-success { background: var(--success-soft); color: var(--success); }
   .badge-warn { background: var(--warn-soft); color: var(--warn); }
+  .badge-danger { background: var(--danger-soft); color: var(--danger); }
   .badge-info { background: var(--info-soft); color: var(--info); }
 
-  .table-wrap { width: 100%; overflow-x: auto; }
+  .table-wrap { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
   table.data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
   table.data-table th {
     text-align: left;
@@ -190,7 +193,7 @@ opsSheet.replaceSync(`
     justify-content: space-between;
   }
   .dialog-title { margin: 0; font-size: 15px; font-weight: 600; }
-  .dialog-body { padding: 16px; }
+  .dialog-body { padding: 16px; overflow-y: auto; max-height: 66vh; }
   .dialog-foot {
     padding: 12px 16px;
     border-top: 1px solid var(--border);
@@ -198,6 +201,13 @@ opsSheet.replaceSync(`
     justify-content: flex-end;
     gap: 8px;
     background: var(--surface-subtle);
+  }
+  @media (max-width: 639px) {
+    .panel-header, .panel-body { padding: 12px 14px; }
+    input[type="text"], select { font-size: 16px; min-height: 42px; }
+    .btn { min-height: 38px; }
+    .btn-sm { min-height: 34px; }
+    dialog.fp-dialog { width: calc(100vw - 16px); max-height: 90dvh; }
   }
 `);
 
@@ -580,7 +590,10 @@ rclone sync ./data/backups remote:ferropod-backups</pre>
                         <td class="text-xs">${c.project_id ? `<span class="badge badge-accent">${esc(this._projectName(c.project_id))}</span>` : `<span class="muted">${esc(t('common.allProjects'))}</span>`}</td>
                         <td class="mono text-xs"><span class="badge badge-neutral">${esc(c.schedule)}</span></td>
                         <td class="mono text-xs muted">${esc(c.target)}</td>
-                        <td class="text-xs muted">${c.last_run_at ? esc(formatTime(c.last_run_at)) : '-'}</td>
+                        <td class="text-xs muted">
+                          ${c.last_status ? `<span class="badge ${c.last_status === 'ok' ? 'badge-success' : 'badge-danger'}">${esc(c.last_status)}</span>` : ''}
+                          ${c.last_run_at ? `<span>${esc(formatTime(c.last_run_at))}</span>` : (!c.last_status ? '-' : '')}
+                        </td>
                         ${canWriteCron ? `
                           <td class="row gap-xs">
                             <button type="button" class="btn btn-sm" data-run-cron="${esc(c.id)}">${esc(t('ops.runNow'))}</button>
@@ -641,10 +654,10 @@ rclone sync ./data/backups remote:ferropod-backups</pre>
             </div>
             <div class="field">
               <label for="cr-project">${esc(t('common.project'))}</label>
-              <select id="cr-project" ${scopePid ? 'disabled' : ''}>
+              <select id="cr-project" required ${scopePid ? 'disabled' : ''}>
                 ${scopePid
                   ? `<option value="${esc(scopePid)}" selected>${esc(this._projectName(scopePid))}</option>`
-                  : `<option value="">${esc(t('common.allProjects'))}</option>` +
+                  : `<option value="" disabled selected>${esc(t('tokens.selectProject'))}</option>` +
                     this._projects.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('')
                 }
               </select>
@@ -661,7 +674,7 @@ rclone sync ./data/backups remote:ferropod-backups</pre>
             </div>
             <div class="field">
               <label for="cr-target">${esc(t('ops.target'))}</label>
-              <input type="text" id="cr-target" class="mono" required value="POST /_internal/cron">
+              <input type="text" id="cr-target" class="mono" required value="/_internal/cron">
             </div>
           </div>
           <div class="dialog-foot">
@@ -744,6 +757,10 @@ rclone sync ./data/backups remote:ferropod-backups</pre>
         ev.preventDefault();
         const projEl = root.getElementById('cr-project');
         const pid = this._scopeProjectId() || (projEl ? (projEl.value || null) : null);
+        if (!pid) {
+          emitToast(this, t('tokens.selectProject'), 'error');
+          return;
+        }
         const payload = {
           name: root.getElementById('cr-name').value.trim(),
           project_id: pid,

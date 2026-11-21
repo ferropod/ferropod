@@ -11,6 +11,8 @@ runtimeSheet.replaceSync(`
     font-family: var(--font-sans);
     font-size: 14px;
     line-height: 1.5;
+    touch-action: manipulation;
+    max-width: 100%;
   }
   a { color: inherit; text-decoration: none; }
   button, input, select, textarea { font: inherit; color: inherit; }
@@ -125,7 +127,7 @@ runtimeSheet.replaceSync(`
   .badge-info { background: var(--info-soft); color: var(--info); }
   .badge-danger { background: var(--danger-soft); color: var(--danger); }
 
-  .table-wrap { width: 100%; overflow-x: auto; }
+  .table-wrap { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
   table.data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
   table.data-table th {
     text-align: left;
@@ -240,6 +242,16 @@ runtimeSheet.replaceSync(`
   }
   .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
   @media (max-width: 560px) { .grid-2 { grid-template-columns: 1fr; } }
+  @media (max-width: 639px) {
+    .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .panel-header, .panel-body { padding: 12px 14px; }
+    input[type="text"], select, textarea { font-size: 16px; min-height: 42px; }
+    .btn { min-height: 38px; }
+    .btn-sm { min-height: 34px; }
+    .invoke-bar { flex-direction: column; align-items: stretch; }
+    .invoke-bar select, .invoke-bar input[type="text"], .invoke-bar .btn { width: 100%; flex: 0 0 auto; }
+    dialog.fp-dialog { width: calc(100vw - 16px); max-height: 90dvh; }
+  }
   .hidden { display: none !important; }
 `);
 
