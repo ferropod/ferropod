@@ -26,17 +26,11 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-22.04
+            os: ubuntu-latest
             cross: false
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
             cross: false
-          - target: aarch64-apple-darwin
-            os: macos-14
-            cross: false
-          - target: x86_64-apple-darwin
-            os: macos-14
-            cross: true
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

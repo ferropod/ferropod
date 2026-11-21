@@ -1329,11 +1329,10 @@ async fn queue_create(
     Json(req): Json<CreateQueueReq>,
 ) -> Result<impl IntoResponse, ApiError> {
     let caller = authenticate_caller(&svc, &headers, None).await?;
-    let max_pending_jobs = req.max_pending_jobs.filter(|v| *v > 0).or(if req.ephemeral {
-        Some(10_000)
-    } else {
-        None
-    });
+    let max_pending_jobs = req
+        .max_pending_jobs
+        .filter(|v| *v > 0)
+        .or(if req.ephemeral { Some(10_000) } else { None });
     let cfg = QueueConfig {
         group: req.group,
         name: req.name,

@@ -331,9 +331,7 @@ impl QueueStore for TursoQueueStore {
         })
         .await?;
         if let Ok(mut guard) = self.mem.lock() {
-            guard
-                .configs
-                .insert(name_for_mem, (eph, max_pend, def_att));
+            guard.configs.insert(name_for_mem, (eph, max_pend, def_att));
         }
         Ok(())
     }
@@ -391,9 +389,7 @@ impl QueueStore for TursoQueueStore {
             ));
         }
         if let Ok(mut guard) = self.mem.lock() {
-            guard
-                .configs
-                .insert(name_for_mem, (eph, max_pend, def_att));
+            guard.configs.insert(name_for_mem, (eph, max_pend, def_att));
         }
         Ok(())
     }

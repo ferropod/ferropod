@@ -3625,7 +3625,10 @@ async fn extended_creation_options_mandatory_kv_ttl_and_patch_endpoints() {
     )
     .await;
     assert_eq!(st_enq_dup, StatusCode::ACCEPTED);
-    assert_eq!(parse_json(enq_dup_bytes)["job_id"].as_i64().unwrap(), job1_id);
+    assert_eq!(
+        parse_json(enq_dup_bytes)["job_id"].as_i64().unwrap(),
+        job1_id
+    );
 
     let (st_enq2, _) = json_req(
         &app,
@@ -3648,8 +3651,14 @@ async fn extended_creation_options_mandatory_kv_ttl_and_patch_endpoints() {
     .await;
     assert_eq!(st_enq3, StatusCode::TOO_MANY_REQUESTS);
 
-    let (st_qstats, qstats_bytes) =
-        json_req(&app, Method::GET, "/_api/v1/queues/mem-events/stats", tok, None).await;
+    let (st_qstats, qstats_bytes) = json_req(
+        &app,
+        Method::GET,
+        "/_api/v1/queues/mem-events/stats",
+        tok,
+        None,
+    )
+    .await;
     assert_eq!(st_qstats, StatusCode::OK);
     assert_eq!(parse_json(qstats_bytes)["pending"], 2);
 }
