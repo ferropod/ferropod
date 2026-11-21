@@ -158,4 +158,19 @@ impl RegistryStore for TursoCoreStore {
         }
         Ok(out)
     }
+
+    async fn delete_kv_namespace(&self, name: &str) -> Result<()> {
+        let name_s = name.to_string();
+        with_retry(|| {
+            let db = self.db.clone();
+            let name_s = name_s.clone();
+            async move {
+                let conn = db.connect()?;
+                conn.execute("DELETE FROM kv_namespaces WHERE name = ?1", [name_s])
+                    .await
+            }
+        })
+        .await?;
+        Ok(())
+    }
 }

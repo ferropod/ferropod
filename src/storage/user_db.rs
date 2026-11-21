@@ -333,6 +333,25 @@ impl DbManager for TursoUserDbManager {
         Ok(())
     }
 
+    async fn delete_db(&self, db_id: &str) -> Result<()> {
+        let path = self.db_file_path(db_id)?;
+        {
+            let mut guard = self.cache.lock().await;
+            guard.remove(db_id);
+        }
+        let sidecars = [
+            path.clone(),
+            PathBuf::from(format!("{}-wal", path.display())),
+            PathBuf::from(format!("{}-shm", path.display())),
+        ];
+        for p in sidecars {
+            if p.exists() {
+                let _ = tokio::fs::remove_file(&p).await;
+            }
+        }
+        Ok(())
+    }
+
     async fn query(&self, db_id: &str, sql: &str, params: Vec<SqlValue>) -> Result<QueryResult> {
         validate_read_only_sql(sql)?;
         let (db, ddl_lock) = self.get_or_open(db_id).await?;

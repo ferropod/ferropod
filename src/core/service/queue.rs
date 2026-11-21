@@ -90,6 +90,18 @@ impl PlatformService {
         }
     }
 
+    pub async fn queue_delete(&self, caller: &Caller, queue: &str) -> Result<()> {
+        let cfg = self.require_queue_write(caller, queue).await?;
+        self.queue.delete_queue(queue).await?;
+        self.audit(
+            cfg.project_id.as_deref(),
+            &caller.actor,
+            "queue.delete",
+            serde_json::json!({ "name": queue }),
+        );
+        Ok(())
+    }
+
     pub async fn queue_enqueue(
         &self,
         caller: &Caller,

@@ -70,6 +70,28 @@ impl PlatformService {
         }
     }
 
+    pub async fn delete_kv_namespace(&self, caller: &Caller, name: &str) -> Result<()> {
+        let meta = self
+            .registry
+            .get_kv_namespace(name)
+            .await?
+            .ok_or_else(|| FerroError::NotFound(format!("kv namespace '{name}'")))?;
+        Self::require_resource_write(
+            caller,
+            meta.project_id.as_deref(),
+            &format!("kv namespace '{name}'"),
+        )?;
+        self.kv.delete_namespace(name).await?;
+        self.registry.delete_kv_namespace(name).await?;
+        self.audit(
+            meta.project_id.as_deref(),
+            &caller.actor,
+            "kv.namespace.delete",
+            serde_json::json!({ "name": name }),
+        );
+        Ok(())
+    }
+
     pub async fn kv_get(&self, caller: &Caller, ns: &str, key: &str) -> Result<Option<KvValue>> {
         self.resolve_kv_namespace_for_read(caller, ns).await?;
         self.kv.get(ns, key).await

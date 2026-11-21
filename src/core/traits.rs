@@ -86,6 +86,7 @@ pub trait RegistryStore: Send + Sync {
     ) -> Result<KvNamespaceMeta>;
     async fn get_kv_namespace(&self, name: &str) -> Result<Option<KvNamespaceMeta>>;
     async fn list_kv_namespaces(&self) -> Result<Vec<KvNamespaceMeta>>;
+    async fn delete_kv_namespace(&self, name: &str) -> Result<()>;
 }
 
 #[async_trait]
@@ -140,6 +141,7 @@ pub trait KvStore: Send + Sync {
     ) -> Result<bool>;
     async fn incr(&self, ns: &str, key: &str, delta: i64, ttl_secs: Option<u64>) -> Result<i64>;
     async fn delete(&self, ns: &str, key: &str) -> Result<()>;
+    async fn delete_namespace(&self, ns: &str) -> Result<()>;
     async fn list(&self, ns: &str, prefix: Option<&str>, limit: usize) -> Result<Vec<KvKeyMeta>>;
     async fn cleanup_expired_batch(&self, batch_limit: usize) -> Result<u64>;
 }
@@ -149,6 +151,7 @@ pub trait QueueStore: Send + Sync {
     async fn create_queue(&self, cfg: QueueConfig) -> Result<()>;
     async fn get_queue(&self, name: &str) -> Result<Option<QueueConfig>>;
     async fn list_queues(&self) -> Result<Vec<QueueConfig>>;
+    async fn delete_queue(&self, name: &str) -> Result<()>;
     async fn enqueue(&self, queue: &str, payload: Bytes, opts: EnqueueOpts) -> Result<i64>;
     async fn claim_batch(&self, queue: &str, limit: usize, lease_secs: i64) -> Result<Vec<Job>>;
     async fn ack_batch(&self, job_ids: &[i64]) -> Result<()>;
@@ -209,6 +212,7 @@ pub trait ObjectStore: Send + Sync {
 #[async_trait]
 pub trait DbManager: Send + Sync {
     async fn create_db(&self, db_id: &str) -> Result<()>;
+    async fn delete_db(&self, db_id: &str) -> Result<()>;
     async fn query(&self, db_id: &str, sql: &str, params: Vec<SqlValue>) -> Result<QueryResult>;
     async fn execute_batch(
         &self,

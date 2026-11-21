@@ -326,6 +326,25 @@ impl KvStore for TursoCoreStore {
         Ok(())
     }
 
+    async fn delete_namespace(&self, ns: &str) -> Result<()> {
+        {
+            let mut map = self.ephemeral_kv.write().await;
+            map.retain(|(n, _), _| n != ns);
+        }
+        let ns_s = ns.to_string();
+        with_retry(|| {
+            let db = self.db.clone();
+            let ns_s = ns_s.clone();
+            async move {
+                let conn = db.connect()?;
+                conn.execute("DELETE FROM kv_entries WHERE namespace = ?1", [ns_s])
+                    .await
+            }
+        })
+        .await?;
+        Ok(())
+    }
+
     async fn list(&self, ns: &str, prefix: Option<&str>, limit: usize) -> Result<Vec<KvKeyMeta>> {
         let now = Utc::now().timestamp();
         let conn = connect_db(&self.db)?;

@@ -560,6 +560,23 @@ impl QueueStore for TursoQueueStore {
         .await
     }
 
+    async fn delete_queue(&self, name: &str) -> Result<()> {
+        let q = name.to_string();
+        with_retry(|| {
+            let db = self.db.clone();
+            let q = q.clone();
+            async move {
+                let conn = db.connect()?;
+                conn.execute("DELETE FROM jobs WHERE queue = ?1", [q.clone()])
+                    .await?;
+                conn.execute("DELETE FROM queues WHERE name = ?1", [q])
+                    .await
+            }
+        })
+        .await?;
+        Ok(())
+    }
+
     async fn cleanup_expired_batch(
         &self,
         pending_max_age_secs: i64,

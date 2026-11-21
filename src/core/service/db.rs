@@ -69,6 +69,24 @@ impl PlatformService {
         }
     }
 
+    pub async fn delete_user_db(&self, caller: &Caller, id_or_name: &str) -> Result<()> {
+        let meta = self.resolve_user_db(id_or_name).await?;
+        Self::require_resource_write(
+            caller,
+            meta.project_id.as_deref(),
+            &format!("database '{}'", meta.name),
+        )?;
+        self.db.delete_db(&meta.id).await?;
+        self.registry.delete_user_db(&meta.id).await?;
+        self.audit(
+            meta.project_id.as_deref(),
+            &caller.actor,
+            "db.delete",
+            serde_json::json!({ "id": meta.id, "name": meta.name }),
+        );
+        Ok(())
+    }
+
     pub async fn schema_user_db(&self, caller: &Caller, id_or_name: &str) -> Result<String> {
         let meta = self.resolve_user_db(id_or_name).await?;
         Self::require_resource_read(
