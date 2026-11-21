@@ -352,6 +352,9 @@ impl PlatformService {
             )));
         }
 
+        if dep.artifact_path.is_some() {
+            self.runtime.preload_deployment(&dep).await?;
+        }
         self.projects
             .set_active_deployment(&proj.id, &dep.id)
             .await?;
@@ -398,6 +401,9 @@ impl PlatformService {
                 })?,
         };
 
+        if dep.artifact_path.is_some() {
+            self.runtime.preload_deployment(&dep).await?;
+        }
         self.projects
             .set_active_deployment(&proj.id, &dep.id)
             .await?;
