@@ -15,18 +15,22 @@ use hyper::body::Frame;
 use tokio::sync::{Mutex, Semaphore};
 use uuid::Uuid;
 use wasmtime::component::{Component, HasSelf, Linker};
-use wasmtime::{Config as WasmConfig, Engine, OptLevel, Precompiled, Store, StoreLimits, StoreLimitsBuilder, Trap};
+use wasmtime::{
+    Config as WasmConfig, Engine, OptLevel, Precompiled, Store, StoreLimits, StoreLimitsBuilder,
+    Trap,
+};
 use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxView, WasiView};
 use wasmtime_wasi_http::p2::bindings::http::types::Scheme;
 use wasmtime_wasi_http::p2::bindings::ProxyPre;
-use wasmtime_wasi_http::{RequestOptions, WasiBody, WasiHttpCtx, WasiHttpCtxView, WasiHttpHooks, WasiHttpView};
+use wasmtime_wasi_http::{
+    RequestOptions, WasiBody, WasiHttpCtx, WasiHttpCtxView, WasiHttpHooks, WasiHttpView,
+};
 
 use crate::config::Config;
 use crate::core::model::{
-    BlobAuth, ByteStream, Caller, Deployment, EnqueueOpts, FerroError, Job, JobOutcome,
-    LogEntry, RequestCtx, Result, SearchQueryInput, SqlValue, WorkerHttpRequest,
-    WorkerHttpResponse,
+    BlobAuth, ByteStream, Caller, Deployment, EnqueueOpts, FerroError, Job, JobOutcome, LogEntry,
+    RequestCtx, Result, SearchQueryInput, SqlValue, WorkerHttpRequest, WorkerHttpResponse,
 };
 use crate::core::service::PlatformService;
 use crate::core::traits::WorkerRuntime;
@@ -121,8 +125,9 @@ impl WasmtimeRuntime {
         wasm_cfg.cranelift_opt_level(OptLevel::SpeedAndSize);
         wasm_cfg.parallel_compilation(config.wasm_compile_concurrency > 1);
 
-        let engine = Engine::new(&wasm_cfg)
-            .map_err(|e| FerroError::Internal(anyhow!("failed to initialize wasmtime engine: {e:#}")))?;
+        let engine = Engine::new(&wasm_cfg).map_err(|e| {
+            FerroError::Internal(anyhow!("failed to initialize wasmtime engine: {e:#}"))
+        })?;
 
         let mut linker = Linker::new(&engine);
         wasmtime_wasi::p2::add_to_linker_async(&mut linker)
@@ -130,7 +135,9 @@ impl WasmtimeRuntime {
         wasmtime_wasi_http::p2::add_only_http_to_linker_async(&mut linker)
             .map_err(|e| FerroError::Internal(anyhow!("failed to link wasi http: {e:#}")))?;
         host_wit::HostImports::add_to_linker::<HostState, HasSelf<HostState>>(&mut linker, |s| s)
-            .map_err(|e| FerroError::Internal(anyhow!("failed to link ferropod host imports: {e:#}")))?;
+            .map_err(|e| {
+            FerroError::Internal(anyhow!("failed to link ferropod host imports: {e:#}"))
+        })?;
 
         let stop_epoch = Arc::new(AtomicBool::new(false));
         let epoch_engine = engine.clone();
@@ -240,7 +247,11 @@ impl WasmtimeRuntime {
                 .await
                 .map_err(|e| FerroError::Internal(anyhow!("create artifact dir: {e}")))?;
         }
-        let tmp = PathBuf::from(format!("{}.tmp.{}", dest.display(), Uuid::new_v4().simple()));
+        let tmp = PathBuf::from(format!(
+            "{}.tmp.{}",
+            dest.display(),
+            Uuid::new_v4().simple()
+        ));
         tokio::fs::write(&tmp, bytes)
             .await
             .map_err(|e| FerroError::Internal(anyhow!("write temp artifact: {e}")))?;
@@ -316,7 +327,8 @@ impl WasmtimeRuntime {
             }
         };
 
-        self.insert_cached(cwasm_rel.clone(), component.clone()).await;
+        self.insert_cached(cwasm_rel.clone(), component.clone())
+            .await;
         Ok((cwasm_rel, precompiled, component))
     }
 
@@ -333,7 +345,8 @@ impl WasmtimeRuntime {
         })?;
         let clean_rel = Self::sanitize_rel_path(raw_path)?;
         if let Some(comp) = self.get_cached(&clean_rel).await {
-            self.insert_cached(deployment.id.clone(), comp.clone()).await;
+            self.insert_cached(deployment.id.clone(), comp.clone())
+                .await;
             return Ok(comp);
         }
 
@@ -396,10 +409,7 @@ impl WasmtimeRuntime {
             .memories(8)
             .build();
 
-        let caller = Caller::project(
-            format!("worker:{}", ctx.project_id),
-            ctx.project_id.clone(),
-        );
+        let caller = Caller::project(format!("worker:{}", ctx.project_id), ctx.project_id.clone());
         let state = HostState {
             wasi: wasi_builder.build(),
             http: WasiHttpCtx::new(),
@@ -619,7 +629,10 @@ impl WorkerRuntime for WasmtimeRuntime {
     }
 
     async fn compile_and_load(&self, deployment: &Deployment, artifact: Bytes) -> Result<()> {
-        let raw_rel = deployment.artifact_path.as_deref().unwrap_or("worker.cwasm");
+        let raw_rel = deployment
+            .artifact_path
+            .as_deref()
+            .unwrap_or("worker.cwasm");
         let (_, _, comp) = self
             .compile_or_store_artifact(&deployment.project_id, raw_rel, artifact)
             .await?;

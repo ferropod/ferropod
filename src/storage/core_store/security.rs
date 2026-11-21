@@ -147,7 +147,9 @@ impl TokenStore for TursoCoreStore {
                         TursoValue::Text(name_s),
                         TursoValue::Text(hash_s),
                         TursoValue::Text(scope_s),
-                        expires_at.map(TursoValue::Integer).unwrap_or(TursoValue::Null),
+                        expires_at
+                            .map(TursoValue::Integer)
+                            .unwrap_or(TursoValue::Null),
                         TursoValue::Integer(now),
                     ],
                 )

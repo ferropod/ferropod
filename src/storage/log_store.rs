@@ -170,12 +170,18 @@ async fn flush_entries(
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 vec![
                     TursoValue::Integer(e.ts),
-                    e.project_id.map(TursoValue::Text).unwrap_or(TursoValue::Null),
-                    e.request_id.map(TursoValue::Text).unwrap_or(TursoValue::Null),
+                    e.project_id
+                        .map(TursoValue::Text)
+                        .unwrap_or(TursoValue::Null),
+                    e.request_id
+                        .map(TursoValue::Text)
+                        .unwrap_or(TursoValue::Null),
                     TursoValue::Text(e.source),
                     TursoValue::Text(e.level),
                     TursoValue::Text(e.message),
-                    e.meta_json.map(TursoValue::Text).unwrap_or(TursoValue::Null),
+                    e.meta_json
+                        .map(TursoValue::Text)
+                        .unwrap_or(TursoValue::Null),
                 ],
             )
             .await;

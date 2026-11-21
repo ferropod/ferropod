@@ -68,10 +68,8 @@ fn serve_embedded(
             if let Ok(val) = HeaderValue::from_str(etag) {
                 resp.headers_mut().insert(header::ETAG, val);
             }
-            resp.headers_mut().insert(
-                header::CACHE_CONTROL,
-                HeaderValue::from_static("no-cache"),
-            );
+            resp.headers_mut()
+                .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
             return resp;
         }
     }
@@ -93,13 +91,22 @@ fn serve_embedded(
 }
 
 pub async fn admin_index(headers: HeaderMap) -> Response {
-    serve_embedded(&headers, "index.html", "text/html; charset=utf-8", ADMIN_HTML)
+    serve_embedded(
+        &headers,
+        "index.html",
+        "text/html; charset=utf-8",
+        ADMIN_HTML,
+    )
 }
 
 pub async fn admin_asset(Path(file): Path<String>, headers: HeaderMap) -> Response {
     let (key, content_type, body) = match file.as_str() {
         "styles.css" => ("styles.css", "text/css; charset=utf-8", ADMIN_CSS),
-        "i18n.js" => ("i18n.js", "application/javascript; charset=utf-8", ADMIN_I18N),
+        "i18n.js" => (
+            "i18n.js",
+            "application/javascript; charset=utf-8",
+            ADMIN_I18N,
+        ),
         "search_mock.js" => (
             "search_mock.js",
             "application/javascript; charset=utf-8",

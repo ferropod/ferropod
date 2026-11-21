@@ -18,8 +18,8 @@ use ferropod::core::service::{CreateDeploymentInput, PlatformDeps, PlatformServi
 use ferropod::core::traits::{DbManager, KvStore, LogStore, ObjectStore, QueueStore};
 use ferropod::gateway::router::build_router;
 use ferropod::storage::{
-    blob_fs::FsBlobStore, core_store::TursoCoreStore, kv_store::TursoKvStore, log_store::DailyLogStore,
-    queue_store::TursoQueueStore, user_db::TursoUserDbManager,
+    blob_fs::FsBlobStore, core_store::TursoCoreStore, kv_store::TursoKvStore,
+    log_store::DailyLogStore, queue_store::TursoQueueStore, user_db::TursoUserDbManager,
 };
 
 struct TestHarness {
@@ -51,12 +51,10 @@ async fn setup_harness() -> TestHarness {
             .unwrap(),
     );
     let queue = Arc::new(TursoQueueStore::open(&cfg.queue_db_path()).await.unwrap());
-    let user_dbs = Arc::new(
-        TursoUserDbManager::new(cfg.user_dbs_dir(), cfg.max_open_user_dbs).unwrap(),
-    );
-    let blobs = Arc::new(
-        FsBlobStore::new(cfg.blobs_dir(), core.clone(), cfg.blob_gc_grace_secs).unwrap(),
-    );
+    let user_dbs =
+        Arc::new(TursoUserDbManager::new(cfg.user_dbs_dir(), cfg.max_open_user_dbs).unwrap());
+    let blobs =
+        Arc::new(FsBlobStore::new(cfg.blobs_dir(), core.clone(), cfg.blob_gc_grace_secs).unwrap());
     let logs = Arc::new(
         DailyLogStore::open(cfg.logs_dir(), cfg.log_channel_capacity)
             .await
@@ -503,7 +501,10 @@ async fn blob_api_static_site_secrets_tls_and_logs() {
         .create_project(&h.admin, "demo-web", None)
         .await
         .unwrap();
-    h.svc.create_kv_namespace(&h.admin, "demo:cache", Some(&proj.id)).await.unwrap();
+    h.svc
+        .create_kv_namespace(&h.admin, "demo:cache", Some(&proj.id))
+        .await
+        .unwrap();
     let mut kv_map = HashMap::new();
     kv_map.insert("CACHE".into(), "demo:cache".into());
     let dep_preview = h
@@ -683,12 +684,22 @@ async fn multi_project_rbac_and_isolation() {
 
     let (_, tok_a) = h
         .svc
-        .create_token(&h.admin, "token-a", TokenScope::Project(proj_a.id.clone()), None)
+        .create_token(
+            &h.admin,
+            "token-a",
+            TokenScope::Project(proj_a.id.clone()),
+            None,
+        )
         .await
         .unwrap();
     let (_, tok_b) = h
         .svc
-        .create_token(&h.admin, "token-b", TokenScope::Project(proj_b.id.clone()), None)
+        .create_token(
+            &h.admin,
+            "token-b",
+            TokenScope::Project(proj_b.id.clone()),
+            None,
+        )
         .await
         .unwrap();
     let (_, tok_ro) = h
@@ -777,13 +788,11 @@ async fn multi_project_rbac_and_isolation() {
             &db_a,
             vec![
                 (
-                    "CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT NOT NULL)".into(),
+                    "CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT NOT NULL)"
+                        .into(),
                     vec![],
                 ),
-                (
-                    "INSERT INTO items (v) VALUES ('alpha')".into(),
-                    vec![],
-                ),
+                ("INSERT INTO items (v) VALUES ('alpha')".into(), vec![]),
             ],
         )
         .await
@@ -942,7 +951,14 @@ async fn multi_project_rbac_and_isolation() {
         assert_eq!(st, StatusCode::FORBIDDEN);
     }
 
-    let (st, _) = json_req(&app, Method::GET, "/_api/v1/kv/ns_a/foo", Some(&tok_ro), None).await;
+    let (st, _) = json_req(
+        &app,
+        Method::GET,
+        "/_api/v1/kv/ns_a/foo",
+        Some(&tok_ro),
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
     let (st, _) = json_req(
         &app,
@@ -1076,7 +1092,14 @@ async fn multi_project_rbac_and_isolation() {
     assert_eq!(resp.status(), StatusCode::CREATED);
 
     // tok_b cannot read or list private bkt-a
-    let (st, _) = json_req(&app, Method::GET, "/_blob/bkt-a/secret.txt", Some(&tok_b), None).await;
+    let (st, _) = json_req(
+        &app,
+        Method::GET,
+        "/_blob/bkt-a/secret.txt",
+        Some(&tok_b),
+        None,
+    )
+    .await;
     assert_eq!(st, StatusCode::FORBIDDEN);
     let (st, _) = json_req(&app, Method::GET, "/_blob/bkt-a", Some(&tok_b), None).await;
     assert_eq!(st, StatusCode::FORBIDDEN);
@@ -1135,7 +1158,11 @@ async fn multi_project_rbac_and_isolation() {
             Some(serde_json::json!({ "sql": bad_sql })),
         )
         .await;
-        assert_eq!(st, StatusCode::BAD_REQUEST, "SQL should be rejected: {bad_sql}");
+        assert_eq!(
+            st,
+            StatusCode::BAD_REQUEST,
+            "SQL should be rejected: {bad_sql}"
+        );
     }
 
     // Legitimate SELECT + REPLACE() scalar function succeeds and data is untouched
@@ -1152,9 +1179,7 @@ async fn multi_project_rbac_and_isolation() {
     assert_eq!(qres["rows"][0][0], "AlphA");
 
     // 8. Logs query & live subscription isolation
-    let mut sub_a = h
-        .svc
-        .subscribe_logs(&Caller::project("tok_a", &proj_a.id));
+    let mut sub_a = h.svc.subscribe_logs(&Caller::project("tok_a", &proj_a.id));
     h.svc.emit_log(LogEntry {
         id: None,
         ts: Utc::now().timestamp_millis(),
@@ -1203,7 +1228,9 @@ async fn multi_project_rbac_and_isolation() {
     let (st, body) = json_req(&app, Method::GET, "/_api/v1/logs", Some(&tok_a), None).await;
     assert_eq!(st, StatusCode::OK);
     let entries: Vec<LogEntry> = serde_json::from_slice(&body).unwrap();
-    assert!(entries.iter().all(|e| e.project_id.as_deref() == Some(proj_a.id.as_str())));
+    assert!(entries
+        .iter()
+        .all(|e| e.project_id.as_deref() == Some(proj_a.id.as_str())));
     assert!(entries.iter().any(|e| e.message == "visible a log"));
 }
 
@@ -1266,9 +1293,14 @@ async fn atomicity_kv_edge_cases_and_route_concurrency() {
         let pid = proj.id.clone();
         route_futs.push(tokio::spawn(async move {
             let caller = Caller::system("concurrent");
-            svc.upsert_route(&caller, &format!("host-{i}.local"), &pid, TargetEnv::Preview)
-                .await
-                .unwrap();
+            svc.upsert_route(
+                &caller,
+                &format!("host-{i}.local"),
+                &pid,
+                TargetEnv::Preview,
+            )
+            .await
+            .unwrap();
         }));
     }
     for f in route_futs {
@@ -1276,7 +1308,10 @@ async fn atomicity_kv_edge_cases_and_route_concurrency() {
     }
     for i in 0..10 {
         assert!(
-            h.svc.lookup_route(&format!("host-{i}.local")).await.is_some(),
+            h.svc
+                .lookup_route(&format!("host-{i}.local"))
+                .await
+                .is_some(),
             "missing host-{i}.local after concurrent refresh_routes"
         );
     }
@@ -1435,7 +1470,12 @@ async fn admin_ui_assets_and_enriched_status() {
         .unwrap();
     let (_, proj_token) = h
         .svc
-        .create_token(&h.admin, "ui-proj", TokenScope::Project(proj.id.clone()), None)
+        .create_token(
+            &h.admin,
+            "ui-proj",
+            TokenScope::Project(proj.id.clone()),
+            None,
+        )
         .await
         .unwrap();
     h.svc
@@ -1480,7 +1520,12 @@ async fn admin_ui_assets_and_enriched_status() {
             "no-cache"
         );
         let body = String::from_utf8(
-            resp.into_body().collect().await.unwrap().to_bytes().to_vec(),
+            resp.into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
         )
         .unwrap();
         assert!(body.contains("/_panel/assets/styles.css"));
@@ -1587,7 +1632,11 @@ async fn test_native_tls_resolution_and_http_redirect() {
         acme_email: Some("ops@example.com".into()),
         ..Default::default()
     };
-    let resolved = resolve_tls(&cfg, vec!["app.example.com".into(), "panel.example.com".into()]).unwrap();
+    let resolved = resolve_tls(
+        &cfg,
+        vec!["app.example.com".into(), "panel.example.com".into()],
+    )
+    .unwrap();
     assert_eq!(
         resolved,
         ResolvedTls::Acme {
@@ -1742,14 +1791,19 @@ async fn test_manual_https_end_to_end_with_http_redirect() {
     // 1. Verify HTTP redirects to HTTPS with custom port
     http_stream
         .write_all(
-            format!("GET /_panel HTTP/1.1\r\nHost: localhost:{http_port}\r\nConnection: close\r\n\r\n")
-                .as_bytes(),
+            format!(
+                "GET /_panel HTTP/1.1\r\nHost: localhost:{http_port}\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
         )
         .await
         .unwrap();
     let mut http_resp = String::new();
     http_stream.read_to_string(&mut http_resp).await.unwrap();
-    assert!(http_resp.starts_with("HTTP/1.1 308"), "unexpected HTTP response: {http_resp}");
+    assert!(
+        http_resp.starts_with("HTTP/1.1 308"),
+        "unexpected HTTP response: {http_resp}"
+    );
     assert!(
         http_resp.contains(&format!("location: https://localhost:{https_port}/_panel")),
         "missing redirect location: {http_resp}"
@@ -1776,8 +1830,14 @@ async fn test_manual_https_end_to_end_with_http_redirect() {
         .unwrap();
     let mut https_resp = String::new();
     tls_stream.read_to_string(&mut https_resp).await.unwrap();
-    assert!(https_resp.starts_with("HTTP/1.1 200"), "unexpected HTTPS response: {https_resp}");
-    assert!(https_resp.contains(r#"{"status":"ok"}"#), "unexpected body: {https_resp}");
+    assert!(
+        https_resp.starts_with("HTTP/1.1 200"),
+        "unexpected HTTPS response: {https_resp}"
+    );
+    assert!(
+        https_resp.contains(r#"{"status":"ok"}"#),
+        "unexpected body: {https_resp}"
+    );
 
     let _ = tx.send(());
     server_task.await.unwrap().unwrap();
@@ -1797,12 +1857,27 @@ async fn resources_can_share_a_group_without_sharing_access() {
         Some(serde_json::json!({"name": "grouped-worker", "group": " 分析 "})),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED, "{}", String::from_utf8_lossy(&runtime));
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "{}",
+        String::from_utf8_lossy(&runtime)
+    );
     let runtime: serde_json::Value = serde_json::from_slice(&runtime).unwrap();
     let id = runtime["id"].as_str().unwrap();
     assert_eq!(runtime["group"], "分析");
-    let (_, legacy) = json_req(&app, Method::GET, &format!("/_api/v1/projects/{id}"), admin, None).await;
-    assert_eq!(serde_json::from_slice::<serde_json::Value>(&legacy).unwrap(), runtime);
+    let (_, legacy) = json_req(
+        &app,
+        Method::GET,
+        &format!("/_api/v1/projects/{id}"),
+        admin,
+        None,
+    )
+    .await;
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&legacy).unwrap(),
+        runtime
+    );
 
     for (kind, names) in [
         ("runtimes", ["second-worker", "third-worker"]),
@@ -1821,26 +1896,40 @@ async fn resources_can_share_a_group_without_sharing_access() {
                 Some(serde_json::json!({"name": name, "group": "分析"})),
             )
             .await;
-            assert_eq!(status, StatusCode::CREATED, "{path}: {}", String::from_utf8_lossy(&body));
+            assert_eq!(
+                status,
+                StatusCode::CREATED,
+                "{path}: {}",
+                String::from_utf8_lossy(&body)
+            );
         }
         let (status, body) = json_req(&app, Method::GET, &path, admin, None).await;
         assert_eq!(status, StatusCode::OK);
         let resources: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
         for name in names {
-            assert!(resources.iter().any(|r| r["name"] == name && r["group"] == "分析"));
+            assert!(resources
+                .iter()
+                .any(|r| r["name"] == name && r["group"] == "分析"));
         }
     }
 
-    let (_, admin_groups) = json_req(&app, Method::GET, "/_api/v1/resource-groups", admin, None).await;
-    assert_eq!(serde_json::from_slice::<Vec<String>>(&admin_groups).unwrap(), ["分析"]);
+    let (_, admin_groups) =
+        json_req(&app, Method::GET, "/_api/v1/resource-groups", admin, None).await;
+    assert_eq!(
+        serde_json::from_slice::<Vec<String>>(&admin_groups).unwrap(),
+        ["分析"]
+    );
 
-    let other = h.svc.create_project(&h.admin, "ungrouped-worker", None).await.unwrap();
-    let (_, scoped_token) = h.svc.create_token(
-        &h.admin,
-        "group-scope",
-        TokenScope::Project(other.id),
-        None,
-    ).await.unwrap();
+    let other = h
+        .svc
+        .create_project(&h.admin, "ungrouped-worker", None)
+        .await
+        .unwrap();
+    let (_, scoped_token) = h
+        .svc
+        .create_token(&h.admin, "group-scope", TokenScope::Project(other.id), None)
+        .await
+        .unwrap();
     let (status, scoped_groups) = json_req(
         &app,
         Method::GET,
@@ -1850,7 +1939,9 @@ async fn resources_can_share_a_group_without_sharing_access() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(serde_json::from_slice::<Vec<String>>(&scoped_groups).unwrap().is_empty());
+    assert!(serde_json::from_slice::<Vec<String>>(&scoped_groups)
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
@@ -1858,11 +1949,22 @@ async fn changing_runtime_env_creates_a_ready_version_and_keeps_secrets_separate
     let h = setup_harness().await;
     let app = build_router(h.svc.clone());
     let token = Some(h.admin_token.as_str());
-    let runtime = h.svc.create_project(&h.admin, "settings-worker", None).await.unwrap();
-    let unrelated = h.svc.create_project(&h.admin, "unrelated-worker", None).await.unwrap();
+    let runtime = h
+        .svc
+        .create_project(&h.admin, "settings-worker", None)
+        .await
+        .unwrap();
+    let unrelated = h
+        .svc
+        .create_project(&h.admin, "unrelated-worker", None)
+        .await
+        .unwrap();
     let path = format!("/_api/v1/runtimes/{}", runtime.id);
 
-    h.svc.create_kv_namespace(&h.admin, "state", Some(&runtime.id)).await.unwrap();
+    h.svc
+        .create_kv_namespace(&h.admin, "state", Some(&runtime.id))
+        .await
+        .unwrap();
     let (status, body) = json_req(
         &app,
         Method::POST,
@@ -1898,7 +2000,12 @@ async fn changing_runtime_env_creates_a_ready_version_and_keeps_secrets_separate
         Some(env.clone()),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED, "{}", String::from_utf8_lossy(&body));
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
     let revised: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_ne!(revised["id"], original["id"]);
     assert_eq!(revised["status"], "ready");
@@ -1910,19 +2017,31 @@ async fn changing_runtime_env_creates_a_ready_version_and_keeps_secrets_separate
     let current = h.svc.get_project(&h.admin, &runtime.id).await.unwrap();
     assert_eq!(current.active_deployment_id.as_deref(), Some(original_id));
     assert_eq!(
-        h.svc.list_deployments(&h.admin, &runtime.id).await.unwrap()
-            .into_iter().find(|d| d.id == original_id).unwrap().bindings.env["MODE"],
+        h.svc
+            .list_deployments(&h.admin, &runtime.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|d| d.id == original_id)
+            .unwrap()
+            .bindings
+            .env["MODE"],
         "prod"
     );
-    let (status, keys) =
-        json_req(&app, Method::GET, &format!("{path}/secrets"), token, None).await;
+    let (status, keys) = json_req(&app, Method::GET, &format!("{path}/secrets"), token, None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(serde_json::from_slice::<Vec<String>>(&keys).unwrap(), ["MODE"]);
+    assert_eq!(
+        serde_json::from_slice::<Vec<String>>(&keys).unwrap(),
+        ["MODE"]
+    );
 
     let (status, _) = json_req(
         &app,
         Method::POST,
-        &format!("/_api/v1/runtimes/{}/deployments/{original_id}/env", unrelated.id),
+        &format!(
+            "/_api/v1/runtimes/{}/deployments/{original_id}/env",
+            unrelated.id
+        ),
         token,
         Some(env),
     )
@@ -1934,15 +2053,53 @@ async fn changing_runtime_env_creates_a_ready_version_and_keeps_secrets_separate
 async fn scoped_queue_creation_cannot_replace_another_project_queue() {
     let h = setup_harness().await;
     let app = build_router(h.svc.clone());
-    let a = h.svc.create_project(&h.admin, "queue-owner-a", None).await.unwrap();
-    let b = h.svc.create_project(&h.admin, "queue-owner-b", None).await.unwrap();
-    let (_, token_a) = h.svc.create_token(&h.admin, "queue-a", TokenScope::Project(a.id.clone()), None).await.unwrap();
-    let (_, token_b) = h.svc.create_token(&h.admin, "queue-b", TokenScope::Project(b.id.clone()), None).await.unwrap();
+    let a = h
+        .svc
+        .create_project(&h.admin, "queue-owner-a", None)
+        .await
+        .unwrap();
+    let b = h
+        .svc
+        .create_project(&h.admin, "queue-owner-b", None)
+        .await
+        .unwrap();
+    let (_, token_a) = h
+        .svc
+        .create_token(&h.admin, "queue-a", TokenScope::Project(a.id.clone()), None)
+        .await
+        .unwrap();
+    let (_, token_b) = h
+        .svc
+        .create_token(&h.admin, "queue-b", TokenScope::Project(b.id.clone()), None)
+        .await
+        .unwrap();
     let payload = serde_json::json!({"name": "shared-name"});
-    let (status, _) = json_req(&app, Method::POST, "/_api/v1/queues", Some(&token_a), Some(payload.clone())).await;
+    let (status, _) = json_req(
+        &app,
+        Method::POST,
+        "/_api/v1/queues",
+        Some(&token_a),
+        Some(payload.clone()),
+    )
+    .await;
     assert_eq!(status, StatusCode::CREATED);
-    let (status, _) = json_req(&app, Method::POST, "/_api/v1/queues", Some(&token_b), Some(payload)).await;
+    let (status, _) = json_req(
+        &app,
+        Method::POST,
+        "/_api/v1/queues",
+        Some(&token_b),
+        Some(payload),
+    )
+    .await;
     assert_eq!(status, StatusCode::CONFLICT);
     let queues = h.svc.queue_list(&h.admin).await.unwrap();
-    assert_eq!(queues.iter().find(|q| q.name == "shared-name").unwrap().project_id.as_deref(), Some(a.id.as_str()));
+    assert_eq!(
+        queues
+            .iter()
+            .find(|q| q.name == "shared-name")
+            .unwrap()
+            .project_id
+            .as_deref(),
+        Some(a.id.as_str())
+    );
 }

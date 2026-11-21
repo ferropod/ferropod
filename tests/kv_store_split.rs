@@ -24,8 +24,12 @@ async fn table_exists(db: &turso::Database, name: &str) -> bool {
 #[tokio::test]
 async fn core_db_no_longer_hosts_kv_entries() {
     let tmp = tempfile::tempdir().unwrap();
-    let core = TursoCoreStore::open(&tmp.path().join("core.db")).await.unwrap();
-    let kv = TursoKvStore::open(&tmp.path().join("kv.db"), 128).await.unwrap();
+    let core = TursoCoreStore::open(&tmp.path().join("core.db"))
+        .await
+        .unwrap();
+    let kv = TursoKvStore::open(&tmp.path().join("kv.db"), 128)
+        .await
+        .unwrap();
 
     kv.put("ns", "k", Bytes::from_static(b"v"), None, None, false)
         .await
@@ -38,7 +42,9 @@ async fn core_db_no_longer_hosts_kv_entries() {
 #[tokio::test]
 async fn legacy_core_kv_rows_are_migrated_once_and_table_dropped() {
     let tmp = tempfile::tempdir().unwrap();
-    let core = TursoCoreStore::open(&tmp.path().join("core.db")).await.unwrap();
+    let core = TursoCoreStore::open(&tmp.path().join("core.db"))
+        .await
+        .unwrap();
 
     // Simulate a pre-split data directory: KV rows stored inside core.db.
     {
@@ -75,7 +81,9 @@ async fn legacy_core_kv_rows_are_migrated_once_and_table_dropped() {
         }
     }
 
-    let kv = TursoKvStore::open(&tmp.path().join("kv.db"), 128).await.unwrap();
+    let kv = TursoKvStore::open(&tmp.path().join("kv.db"), 128)
+        .await
+        .unwrap();
     let moved = kv.migrate_from_legacy_core(core.database()).await.unwrap();
     assert_eq!(moved, 1_203);
     assert!(!table_exists(core.database(), "kv_entries").await);
@@ -85,13 +93,18 @@ async fn legacy_core_kv_rows_are_migrated_once_and_table_dropped() {
     assert_eq!(got.metadata.as_deref(), Some("m"));
 
     // Idempotent: second run is a no-op.
-    assert_eq!(kv.migrate_from_legacy_core(core.database()).await.unwrap(), 0);
+    assert_eq!(
+        kv.migrate_from_legacy_core(core.database()).await.unwrap(),
+        0
+    );
 }
 
 #[tokio::test]
 async fn kv_snapshot_produces_kv_db_file() {
     let tmp = tempfile::tempdir().unwrap();
-    let kv = TursoKvStore::open(&tmp.path().join("kv.db"), 128).await.unwrap();
+    let kv = TursoKvStore::open(&tmp.path().join("kv.db"), 128)
+        .await
+        .unwrap();
     kv.put("ns", "k", Bytes::from_static(b"v"), None, None, false)
         .await
         .unwrap();

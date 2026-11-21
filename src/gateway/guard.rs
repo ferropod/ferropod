@@ -51,9 +51,18 @@ impl IntoResponse for ApiError {
 }
 
 /// Extract bearer token from `Authorization` header (or optional `?token=` query param).
-pub fn extract_bearer_token(req_headers: &axum::http::HeaderMap, query_token: Option<&str>) -> Option<String> {
-    if let Some(auth) = req_headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()) {
-        if let Some(tok) = auth.strip_prefix("Bearer ").or_else(|| auth.strip_prefix("bearer ")) {
+pub fn extract_bearer_token(
+    req_headers: &axum::http::HeaderMap,
+    query_token: Option<&str>,
+) -> Option<String> {
+    if let Some(auth) = req_headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+    {
+        if let Some(tok) = auth
+            .strip_prefix("Bearer ")
+            .or_else(|| auth.strip_prefix("bearer "))
+        {
             let t = tok.trim();
             if !t.is_empty() {
                 return Some(t.to_string());

@@ -7,8 +7,8 @@ use crate::core::model::{
     ApiToken, BucketMeta, ByteRange, ByteStream, CronJob, DbFtsIndexMeta, Deployment, EnqueueOpts,
     Job, JobOutcome, JobStatus, KvKeyMeta, KvNamespaceMeta, KvValue, LogEntry, LogQuery,
     ObjectMeta, Project, QueryResult, QueueConfig, QueueStats, RequestCtx, Result, Route,
-    RouteEntry, SearchFieldSchema, SearchIndexMeta, SearchQueryInput, SearchQueryResult,
-    SqlValue, TargetEnv, TokenScope, UserDbMeta, WorkerHttpRequest, WorkerHttpResponse,
+    RouteEntry, SearchFieldSchema, SearchIndexMeta, SearchQueryInput, SearchQueryResult, SqlValue,
+    TargetEnv, TokenScope, UserDbMeta, WorkerHttpRequest, WorkerHttpResponse,
 };
 
 #[async_trait]
@@ -128,12 +128,8 @@ pub trait BlobMetaStore: Send + Sync {
     async fn delete_bucket(&self, name: &str) -> Result<()>;
     async fn upsert_object_meta(&self, meta: ObjectMeta, gc_grace_secs: i64) -> Result<()>;
     async fn get_object_meta(&self, bucket: &str, key: &str) -> Result<Option<ObjectMeta>>;
-    async fn delete_object_meta(
-        &self,
-        bucket: &str,
-        key: &str,
-        gc_grace_secs: i64,
-    ) -> Result<bool>;
+    async fn delete_object_meta(&self, bucket: &str, key: &str, gc_grace_secs: i64)
+        -> Result<bool>;
     async fn list_objects_meta(
         &self,
         bucket: &str,
@@ -205,7 +201,12 @@ pub trait QueueStore: Send + Sync {
     async fn enqueue(&self, queue: &str, payload: Bytes, opts: EnqueueOpts) -> Result<i64>;
     async fn claim_batch(&self, queue: &str, limit: usize, lease_secs: i64) -> Result<Vec<Job>>;
     async fn ack_batch(&self, job_ids: &[i64]) -> Result<()>;
-    async fn nack(&self, job_id: i64, retry_after_secs: u64, err: &str) -> Result<Option<JobStatus>>;
+    async fn nack(
+        &self,
+        job_id: i64,
+        retry_after_secs: u64,
+        err: &str,
+    ) -> Result<Option<JobStatus>>;
     async fn mark_dead(&self, job_id: i64, err: &str) -> Result<()>;
     async fn reap_expired(&self) -> Result<u64>;
     async fn inspect(&self, queue: &str, status: JobStatus, limit: usize) -> Result<Vec<Job>>;
@@ -258,7 +259,12 @@ pub trait ObjectStore: Send + Sync {
         range: Option<ByteRange>,
     ) -> Result<Option<(ObjectMeta, ByteStream, u64, Option<(u64, u64)>)>>;
     async fn delete(&self, bucket: &str, key: &str) -> Result<bool>;
-    async fn list(&self, bucket: &str, prefix: Option<&str>, limit: usize) -> Result<Vec<ObjectMeta>>;
+    async fn list(
+        &self,
+        bucket: &str,
+        prefix: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ObjectMeta>>;
     async fn list_page(
         &self,
         bucket: &str,
@@ -274,11 +280,7 @@ pub trait DbManager: Send + Sync {
     async fn create_db(&self, db_id: &str) -> Result<()>;
     async fn delete_db(&self, db_id: &str) -> Result<()>;
     async fn query(&self, db_id: &str, sql: &str, params: Vec<SqlValue>) -> Result<QueryResult>;
-    async fn execute_batch(
-        &self,
-        db_id: &str,
-        stmts: Vec<(String, Vec<SqlValue>)>,
-    ) -> Result<u64>;
+    async fn execute_batch(&self, db_id: &str, stmts: Vec<(String, Vec<SqlValue>)>) -> Result<u64>;
     async fn schema(&self, db_id: &str) -> Result<String>;
     async fn snapshot_to(&self, db_id: &str, dest_path: &Path) -> Result<()>;
     async fn checkpoint_all(&self) -> Result<()>;
@@ -330,17 +332,10 @@ pub trait SearchStore: Send + Sync {
     async fn delete_index(&self, id: &str) -> Result<()>;
     async fn commit_index(&self, id: &str) -> Result<SearchIndexMeta>;
     async fn list_docs(&self, index_id: &str) -> Result<Vec<serde_json::Value>>;
-    async fn upsert_doc(
-        &self,
-        index_id: &str,
-        doc: serde_json::Value,
-    ) -> Result<serde_json::Value>;
+    async fn upsert_doc(&self, index_id: &str, doc: serde_json::Value)
+        -> Result<serde_json::Value>;
     async fn delete_doc(&self, index_id: &str, doc_id: &str) -> Result<bool>;
-    async fn search(
-        &self,
-        index_id: &str,
-        input: SearchQueryInput,
-    ) -> Result<SearchQueryResult>;
+    async fn search(&self, index_id: &str, input: SearchQueryInput) -> Result<SearchQueryResult>;
 
     async fn checkpoint(&self) -> Result<()> {
         Ok(())

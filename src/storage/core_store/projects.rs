@@ -7,9 +7,7 @@ use chrono::Utc;
 use turso::{transaction::TransactionBehavior, Value as TursoValue};
 use uuid::Uuid;
 
-use crate::core::model::{
-    Deployment, FerroError, Project, Result, Route, RouteEntry, TargetEnv,
-};
+use crate::core::model::{Deployment, FerroError, Project, Result, Route, RouteEntry, TargetEnv};
 use crate::core::traits::ProjectStore;
 use crate::storage::tx::{
     checkpoint_db, connect_db, copy_db_with_sidecars, map_turso_err, with_retry,
@@ -105,13 +103,20 @@ impl ProjectStore for TursoCoreStore {
                 let tx = conn
                     .transaction_with_behavior(TransactionBehavior::Concurrent)
                     .await?;
-                tx.execute("DELETE FROM production_history WHERE project_id = ?1", [id_s.as_str()]).await?;
+                tx.execute(
+                    "DELETE FROM production_history WHERE project_id = ?1",
+                    [id_s.as_str()],
+                )
+                .await?;
                 tx.execute("DELETE FROM routes WHERE project_id = ?1", [id_s.as_str()])
                     .await?;
                 tx.execute("DELETE FROM secrets WHERE project_id = ?1", [id_s.as_str()])
                     .await?;
-                tx.execute("DELETE FROM deployments WHERE project_id = ?1", [id_s.as_str()])
-                    .await?;
+                tx.execute(
+                    "DELETE FROM deployments WHERE project_id = ?1",
+                    [id_s.as_str()],
+                )
+                .await?;
                 tx.execute("DELETE FROM projects WHERE id = ?1", [id_s.as_str()])
                     .await?;
                 tx.commit().await
@@ -260,15 +265,18 @@ impl ProjectStore for TursoCoreStore {
 
     async fn previous_production_deployment(&self, project_id: &str) -> Result<Option<Deployment>> {
         let conn = connect_db(&self.db)?;
-        let mut rows = conn.query(
-            "SELECT d.id, d.project_id, d.artifact_path, d.assets_bucket, d.assets_prefix,
+        let mut rows = conn
+            .query(
+                "SELECT d.id, d.project_id, d.artifact_path, d.assets_bucket, d.assets_prefix,
                     d.spa_fallback, d.bindings_json, d.crons_json, d.status, d.created_at
              FROM production_history h JOIN deployments d ON d.id = h.deployment_id
              JOIN projects p ON p.id = h.project_id
              WHERE h.project_id = ?1 AND h.deployment_id != p.active_deployment_id
              ORDER BY h.id DESC LIMIT 1",
-            [project_id],
-        ).await.map_err(map_turso_err)?;
+                [project_id],
+            )
+            .await
+            .map_err(map_turso_err)?;
         match rows.next().await.map_err(map_turso_err)? {
             Some(row) => Ok(Some(row_to_deployment(&row)?)),
             None => Ok(None),
@@ -468,7 +476,10 @@ impl ProjectStore for TursoCoreStore {
     async fn list_routes(&self) -> Result<Vec<Route>> {
         let conn = connect_db(&self.db)?;
         let mut rows = conn
-            .query("SELECT host, project_id, target_env FROM routes ORDER BY host ASC", ())
+            .query(
+                "SELECT host, project_id, target_env FROM routes ORDER BY host ASC",
+                (),
+            )
             .await
             .map_err(map_turso_err)?;
         let mut out = Vec::new();
@@ -510,7 +521,10 @@ impl ProjectStore for TursoCoreStore {
         let mut routes: Vec<Route> = Vec::new();
         {
             let mut rows = tx
-                .query("SELECT host, project_id, target_env FROM routes ORDER BY host ASC", ())
+                .query(
+                    "SELECT host, project_id, target_env FROM routes ORDER BY host ASC",
+                    (),
+                )
                 .await
                 .map_err(map_turso_err)?;
             while let Some(row) = rows.next().await.map_err(map_turso_err)? {
@@ -545,8 +559,7 @@ impl ProjectStore for TursoCoreStore {
                  FROM deployments WHERE id IN ({})",
                 placeholders.join(", ")
             );
-            let params: Vec<TursoValue> =
-                chunk.iter().cloned().map(TursoValue::Text).collect();
+            let params: Vec<TursoValue> = chunk.iter().cloned().map(TursoValue::Text).collect();
             let mut rows = tx.query(&sql, params).await.map_err(map_turso_err)?;
             while let Some(row) = rows.next().await.map_err(map_turso_err)? {
                 let dep = row_to_deployment(&row)?;

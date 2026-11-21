@@ -45,7 +45,9 @@ impl Crypto {
     /// Decrypt an AES-256-GCM secret value.
     pub fn decrypt_secret(&self, nonce_bytes: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
         if nonce_bytes.len() != 12 {
-            return Err(FerroError::Internal(anyhow!("invalid aes-gcm nonce length")));
+            return Err(FerroError::Internal(anyhow!(
+                "invalid aes-gcm nonce length"
+            )));
         }
         let cipher = Aes256Gcm::new_from_slice(&self.key_bytes)
             .map_err(|e| FerroError::Internal(anyhow!("aes key init failed: {e}")))?;
@@ -71,8 +73,8 @@ impl Crypto {
 
     /// Sign a presigned Blob URL operation (`get` or `put`).
     pub fn sign_blob_op(&self, op: &str, bucket: &str, key: &str, expires_at: i64) -> String {
-        let mut mac = <HmacSha256 as Mac>::new_from_slice(&self.key_bytes)
-            .expect("HMAC accepts 32-byte key");
+        let mut mac =
+            <HmacSha256 as Mac>::new_from_slice(&self.key_bytes).expect("HMAC accepts 32-byte key");
         mac.update(format!("{op}:{bucket}:{key}:{expires_at}").as_bytes());
         hex::encode(mac.finalize().into_bytes())
     }
@@ -93,8 +95,8 @@ impl Crypto {
         let sig_bytes = hex::decode(sig_hex)
             .context("invalid presign signature encoding")
             .map_err(|e| FerroError::Unauthorized(e.to_string()))?;
-        let mut mac = <HmacSha256 as Mac>::new_from_slice(&self.key_bytes)
-            .expect("HMAC accepts 32-byte key");
+        let mut mac =
+            <HmacSha256 as Mac>::new_from_slice(&self.key_bytes).expect("HMAC accepts 32-byte key");
         mac.update(format!("{op}:{bucket}:{key}:{expires_at}").as_bytes());
         mac.verify_slice(&sig_bytes)
             .map_err(|_| FerroError::Unauthorized("invalid presign signature".into()))
@@ -122,13 +124,34 @@ mod tests {
         let crypto = Crypto::from_master_key("presign-master");
         let sig = crypto.sign_blob_op("put", "assets", "logo.png", 1_700_000_100);
         assert!(crypto
-            .verify_blob_op("put", "assets", "logo.png", 1_700_000_100, &sig, 1_700_000_000)
+            .verify_blob_op(
+                "put",
+                "assets",
+                "logo.png",
+                1_700_000_100,
+                &sig,
+                1_700_000_000
+            )
             .is_ok());
         assert!(crypto
-            .verify_blob_op("get", "assets", "logo.png", 1_700_000_100, &sig, 1_700_000_000)
+            .verify_blob_op(
+                "get",
+                "assets",
+                "logo.png",
+                1_700_000_100,
+                &sig,
+                1_700_000_000
+            )
             .is_err());
         assert!(crypto
-            .verify_blob_op("put", "assets", "logo.png", 1_700_000_100, &sig, 1_700_000_101)
+            .verify_blob_op(
+                "put",
+                "assets",
+                "logo.png",
+                1_700_000_100,
+                &sig,
+                1_700_000_101
+            )
             .is_err());
     }
 }

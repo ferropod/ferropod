@@ -77,7 +77,9 @@ async fn setup_m2_harness(mutate_cfg: impl FnOnce(&mut Config)) -> M2Harness {
     cfg.blob_gc_grace_secs = 0;
     mutate_cfg(&mut cfg);
 
-    tokio::fs::create_dir_all(cfg.artifacts_dir()).await.unwrap();
+    tokio::fs::create_dir_all(cfg.artifacts_dir())
+        .await
+        .unwrap();
 
     let core = Arc::new(TursoCoreStore::open(&cfg.core_db_path()).await.unwrap());
     let kv = Arc::new(
@@ -86,12 +88,10 @@ async fn setup_m2_harness(mutate_cfg: impl FnOnce(&mut Config)) -> M2Harness {
             .unwrap(),
     );
     let queue = Arc::new(TursoQueueStore::open(&cfg.queue_db_path()).await.unwrap());
-    let user_dbs = Arc::new(
-        TursoUserDbManager::new(cfg.user_dbs_dir(), cfg.max_open_user_dbs).unwrap(),
-    );
-    let blobs = Arc::new(
-        FsBlobStore::new(cfg.blobs_dir(), core.clone(), cfg.blob_gc_grace_secs).unwrap(),
-    );
+    let user_dbs =
+        Arc::new(TursoUserDbManager::new(cfg.user_dbs_dir(), cfg.max_open_user_dbs).unwrap());
+    let blobs =
+        Arc::new(FsBlobStore::new(cfg.blobs_dir(), core.clone(), cfg.blob_gc_grace_secs).unwrap());
     let logs = Arc::new(
         DailyLogStore::open(cfg.logs_dir(), cfg.log_channel_capacity)
             .await
@@ -203,16 +203,18 @@ async fn http_worker_and_all_wit_v2_host_bindings() {
     // Upload raw wasm artifact via REST API -> AOT compiled to .cwasm
     let upload_req = Request::builder()
         .method(Method::PUT)
-        .uri(format!("/_api/v1/projects/{}/artifacts/worker.wasm", proj.id))
+        .uri(format!(
+            "/_api/v1/projects/{}/artifacts/worker.wasm",
+            proj.id
+        ))
         .header(header::AUTHORIZATION, format!("Bearer {}", h.admin_token))
         .body(Body::from(wasm))
         .unwrap();
     let upload_resp = app.clone().oneshot(upload_req).await.unwrap();
     assert_eq!(upload_resp.status(), StatusCode::CREATED);
-    let upload_json: serde_json::Value = serde_json::from_slice(
-        &upload_resp.into_body().collect().await.unwrap().to_bytes(),
-    )
-    .unwrap();
+    let upload_json: serde_json::Value =
+        serde_json::from_slice(&upload_resp.into_body().collect().await.unwrap().to_bytes())
+            .unwrap();
     assert_eq!(upload_json["precompiled"], false);
     let artifact_path = upload_json["artifact_path"].as_str().unwrap().to_string();
     assert!(artifact_path.ends_with(".cwasm"));
@@ -447,7 +449,13 @@ async fn precompiled_cwasm_upload_limits_and_epoch_timeout() {
         .unwrap();
     assert_eq!(ok_resp.status(), StatusCode::OK);
     assert_eq!(
-        ok_resp.into_body().collect().await.unwrap().to_bytes().as_ref(),
+        ok_resp
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .as_ref(),
         b"ok:Method::Get:/ping"
     );
 
@@ -532,7 +540,12 @@ async fn queue_consumer_ack_retry_dead_and_dlq_replay() {
         .unwrap();
 
     h.svc
-        .queue_enqueue(&h.admin, "jobs", Bytes::from_static(b"ack"), EnqueueOpts::default())
+        .queue_enqueue(
+            &h.admin,
+            "jobs",
+            Bytes::from_static(b"ack"),
+            EnqueueOpts::default(),
+        )
         .await
         .unwrap();
     h.svc
@@ -557,7 +570,12 @@ async fn queue_consumer_ack_retry_dead_and_dlq_replay() {
     let count = h.svc.run_queue_dispatch_once().await.unwrap();
     assert_eq!(count, 3);
 
-    let kv_ack = h.svc.kv_get(&h.admin, "q-kv", "queue_acked").await.unwrap().unwrap();
+    let kv_ack = h
+        .svc
+        .kv_get(&h.admin, "q-kv", "queue_acked")
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(kv_ack.value, b"yes");
 
     let stats = h.svc.queue_stats(&h.admin, "jobs").await.unwrap();
@@ -573,7 +591,11 @@ async fn queue_consumer_ack_retry_dead_and_dlq_replay() {
     assert_eq!(dead_jobs.len(), 1);
     assert_eq!(dead_jobs[0].last_error.as_deref(), Some("dead requested"));
 
-    let replayed = h.svc.queue_dlq_replay(&h.admin, "jobs", None).await.unwrap();
+    let replayed = h
+        .svc
+        .queue_dlq_replay(&h.admin, "jobs", None)
+        .await
+        .unwrap();
     assert_eq!(replayed, 1);
     let stats_after = h.svc.queue_stats(&h.admin, "jobs").await.unwrap();
     assert_eq!(stats_after.dead, 0);
@@ -583,9 +605,18 @@ async fn queue_consumer_ack_retry_dead_and_dlq_replay() {
 #[tokio::test]
 async fn cron_matcher_and_scheduled_worker_execution() {
     // Unit checks for cron_matches_timestamp
-    let mon_0230 = Utc.with_ymd_and_hms(2026, 11, 16, 2, 30, 0).unwrap().timestamp();
-    let sat_0230 = Utc.with_ymd_and_hms(2026, 11, 21, 2, 30, 0).unwrap().timestamp();
-    let hourly = Utc.with_ymd_and_hms(2026, 11, 21, 5, 0, 0).unwrap().timestamp();
+    let mon_0230 = Utc
+        .with_ymd_and_hms(2026, 11, 16, 2, 30, 0)
+        .unwrap()
+        .timestamp();
+    let sat_0230 = Utc
+        .with_ymd_and_hms(2026, 11, 21, 2, 30, 0)
+        .unwrap()
+        .timestamp();
+    let hourly = Utc
+        .with_ymd_and_hms(2026, 11, 21, 5, 0, 0)
+        .unwrap()
+        .timestamp();
     assert!(cron_matches_timestamp("* * * * *", mon_0230));
     assert!(cron_matches_timestamp("*/5 * * * *", mon_0230));
     assert!(!cron_matches_timestamp("*/7 * * * *", mon_0230));

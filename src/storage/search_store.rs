@@ -308,7 +308,13 @@ pub fn score_json_document(doc: &serde_json::Value, query: &str, fuzzy: bool) ->
             score += 1.2;
             hit = true;
         }
-        if !hit && fuzzy && term.len() >= 3 && term.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        if !hit
+            && fuzzy
+            && term.len() >= 3
+            && term
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
             if ascii_words.iter().any(|w| edit_distance_one(term, w)) {
                 score += 1.25;
                 hit = true;
@@ -359,7 +365,13 @@ impl SearchStore for TursoSearchStore {
         let now = Utc::now().timestamp_millis();
         let clean_slug: String = name
             .chars()
-            .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect();
         let id = format!(
             "idx_{}_{}",
@@ -466,8 +478,11 @@ impl SearchStore for TursoSearchStore {
                 let tx = conn
                     .transaction_with_behavior(TransactionBehavior::Concurrent)
                     .await?;
-                tx.execute("DELETE FROM search_docs WHERE index_id = ?1", [id_s.as_str()])
-                    .await?;
+                tx.execute(
+                    "DELETE FROM search_docs WHERE index_id = ?1",
+                    [id_s.as_str()],
+                )
+                .await?;
                 tx.execute("DELETE FROM search_indexes WHERE id = ?1", [id_s.as_str()])
                     .await?;
                 tx.commit().await
@@ -615,11 +630,7 @@ impl SearchStore for TursoSearchStore {
         .await
     }
 
-    async fn search(
-        &self,
-        index_id: &str,
-        input: SearchQueryInput,
-    ) -> Result<SearchQueryResult> {
+    async fn search(&self, index_id: &str, input: SearchQueryInput) -> Result<SearchQueryResult> {
         let started = Instant::now();
         let meta = self
             .get_index(index_id)

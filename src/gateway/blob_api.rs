@@ -69,15 +69,13 @@ async fn resolve_blob_auth(
 }
 
 pub fn router() -> Router<PlatformService> {
-    Router::new()
-        .route("/{bucket}", get(list_objects))
-        .route(
-            "/{bucket}/{*key}",
-            put(put_object)
-                .get(get_object)
-                .head(head_object)
-                .delete(delete_object),
-        )
+    Router::new().route("/{bucket}", get(list_objects)).route(
+        "/{bucket}/{*key}",
+        put(put_object)
+            .get(get_object)
+            .head(head_object)
+            .delete(delete_object),
+    )
 }
 
 async fn put_object(
@@ -127,7 +125,10 @@ async fn get_object(
         .ok_or_else(|| ApiError(FerroError::NotFound(format!("object '{bucket}/{key}'"))))?;
 
     let etag = format!("\"{}\"", head_meta.sha256);
-    if let Some(inm) = headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()) {
+    if let Some(inm) = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+    {
         if inm.trim() == etag || inm.trim() == "*" {
             return Ok(Response::builder()
                 .status(StatusCode::NOT_MODIFIED)
@@ -232,7 +233,12 @@ async fn list_objects(
         OwnedBlobAuth::Anonymous
     };
     let items = svc
-        .list_objects(&auth.as_ref(), &bucket, q.prefix.as_deref(), q.limit.unwrap_or(200))
+        .list_objects(
+            &auth.as_ref(),
+            &bucket,
+            q.prefix.as_deref(),
+            q.limit.unwrap_or(200),
+        )
         .await
         .map_err(ApiError)?;
     Ok(Json(items))

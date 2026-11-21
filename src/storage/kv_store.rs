@@ -127,7 +127,10 @@ impl TursoKvStore {
             }
             kv_conn.execute("COMMIT", ()).await.map_err(map_turso_err)?;
 
-            core_conn.execute("BEGIN", ()).await.map_err(map_turso_err)?;
+            core_conn
+                .execute("BEGIN", ())
+                .await
+                .map_err(map_turso_err)?;
             for vals in &batch {
                 if let Err(e) = core_conn
                     .execute(
@@ -140,7 +143,10 @@ impl TursoKvStore {
                     return Err(map_turso_err(e));
                 }
             }
-            core_conn.execute("COMMIT", ()).await.map_err(map_turso_err)?;
+            core_conn
+                .execute("COMMIT", ())
+                .await
+                .map_err(map_turso_err)?;
             moved += batch.len() as u64;
         }
 
@@ -153,7 +159,10 @@ impl TursoKvStore {
             .await
             .map_err(map_turso_err)?;
         if moved > 0 {
-            info!(rows = moved, "migrated legacy KV entries from core.db to kv.db");
+            info!(
+                rows = moved,
+                "migrated legacy KV entries from core.db to kv.db"
+            );
         }
         Ok(moved)
     }
@@ -536,8 +545,8 @@ impl KvStore for TursoKvStore {
                 .await
                 .map_err(map_turso_err)?
             }
-            (None, Some(cur)) => {
-                conn.query(
+            (None, Some(cur)) => conn
+                .query(
                     "SELECT key, LENGTH(value), metadata, expires_at, updated_at FROM kv_entries
                      WHERE namespace = ?1 AND (expires_at IS NULL OR expires_at > ?2)
                        AND key > ?3
@@ -545,18 +554,16 @@ impl KvStore for TursoKvStore {
                     (ns, now, cur, fetch_limit),
                 )
                 .await
-                .map_err(map_turso_err)?
-            }
-            (None, None) => {
-                conn.query(
+                .map_err(map_turso_err)?,
+            (None, None) => conn
+                .query(
                     "SELECT key, LENGTH(value), metadata, expires_at, updated_at FROM kv_entries
                      WHERE namespace = ?1 AND (expires_at IS NULL OR expires_at > ?2)
                      ORDER BY key ASC LIMIT ?3",
                     (ns, now, fetch_limit),
                 )
                 .await
-                .map_err(map_turso_err)?
-            }
+                .map_err(map_turso_err)?,
         };
 
         let mut merged: HashMap<String, KvKeyMeta> = HashMap::new();

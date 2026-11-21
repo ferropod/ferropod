@@ -152,7 +152,12 @@ impl TursoCoreStore {
         conn.execute_batch(CORE_SCHEMA)
             .await
             .map_err(map_turso_err)?;
-        for table in ["projects", "kv_namespaces", "user_databases", "blob_buckets"] {
+        for table in [
+            "projects",
+            "kv_namespaces",
+            "user_databases",
+            "blob_buckets",
+        ] {
             ensure_resource_group_column(&conn, table).await?;
         }
         Ok(Self {

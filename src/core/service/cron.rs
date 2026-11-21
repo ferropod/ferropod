@@ -26,8 +26,18 @@ fn parse_every_secs(schedule: &str) -> Option<i64> {
     }
 }
 
-fn match_cron_field(field: &str, value: u32, min: u32, max: u32, allow_seven_as_zero: bool) -> bool {
-    let norm_val = if allow_seven_as_zero && value == 7 { 0 } else { value };
+fn match_cron_field(
+    field: &str,
+    value: u32,
+    min: u32,
+    max: u32,
+    allow_seven_as_zero: bool,
+) -> bool {
+    let norm_val = if allow_seven_as_zero && value == 7 {
+        0
+    } else {
+        value
+    };
     for part in field.split(',') {
         let part = part.trim();
         if part.is_empty() {
@@ -113,13 +123,7 @@ pub fn cron_matches_timestamp(schedule: &str, ts_secs: i64) -> bool {
                 && match_cron_field(fields[1], dt.hour(), 0, 23, false)
                 && match_cron_field(fields[2], dt.day(), 1, 31, false)
                 && match_cron_field(fields[3], dt.month(), 1, 12, false)
-                && match_cron_field(
-                    fields[4],
-                    dt.weekday().num_days_from_sunday(),
-                    0,
-                    6,
-                    true,
-                )
+                && match_cron_field(fields[4], dt.weekday().num_days_from_sunday(), 0, 6, true)
         }
     }
 }
@@ -214,7 +218,9 @@ impl PlatformService {
         if let Some(sc) = schedule {
             let sc = sc.trim();
             if sc.is_empty() {
-                return Err(FerroError::InvalidArgument("schedule cannot be empty".into()));
+                return Err(FerroError::InvalidArgument(
+                    "schedule cannot be empty".into(),
+                ));
             }
             job.schedule = sc.to_string();
         }
@@ -305,7 +311,11 @@ impl PlatformService {
                 None => format!(
                     "Cron job '{}' {} -> {}",
                     job.name,
-                    if manual { "triggered manually" } else { "executed" },
+                    if manual {
+                        "triggered manually"
+                    } else {
+                        "executed"
+                    },
                     job.target
                 ),
             },

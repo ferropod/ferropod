@@ -258,8 +258,8 @@ fn build_http_client() -> Result<reqwest::Client> {
         ACCEPT,
         HeaderValue::from_static("application/vnd.github+json"),
     );
-    if let Ok(token) = std::env::var("FERROPOD_GITHUB_TOKEN")
-        .or_else(|_| std::env::var("GITHUB_TOKEN"))
+    if let Ok(token) =
+        std::env::var("FERROPOD_GITHUB_TOKEN").or_else(|_| std::env::var("GITHUB_TOKEN"))
     {
         let trimmed = token.trim();
         if !trimmed.is_empty() {
@@ -447,10 +447,7 @@ async fn fetch_release_by_tag(
         .with_context(|| format!("fetch release metadata from {url}"))?;
 
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
-        bail!(
-            "release {} not found in {repo}",
-            tag.unwrap_or("latest")
-        );
+        bail!("release {} not found in {repo}", tag.unwrap_or("latest"));
     }
     if !resp.status().is_success() {
         let status = resp.status();
@@ -585,9 +582,7 @@ pub async fn apply_update(
                 hasher.update(&archive_bytes);
                 let actual = hex::encode(hasher.finalize());
                 if actual != expected {
-                    bail!(
-                        "SHA-256 mismatch for {asset_name}: expected {expected}, got {actual}"
-                    );
+                    bail!("SHA-256 mismatch for {asset_name}: expected {expected}, got {actual}");
                 }
                 checksum_verified = true;
             }
@@ -636,10 +631,7 @@ pub async fn apply_update(
     // Atomic replacement on the same filesystem.
     if let Err(e) = tokio::fs::rename(&tmp_bin, &exe_path).await {
         let _ = tokio::fs::remove_file(&tmp_bin).await;
-        return Err(anyhow!(
-            "failed to replace {}: {e}",
-            exe_path.display()
-        ));
+        return Err(anyhow!("failed to replace {}: {e}", exe_path.display()));
     }
 
     Ok(UpdateApplyResult {

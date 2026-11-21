@@ -378,11 +378,7 @@ impl DbManager for TursoUserDbManager {
         })
     }
 
-    async fn execute_batch(
-        &self,
-        db_id: &str,
-        stmts: Vec<(String, Vec<SqlValue>)>,
-    ) -> Result<u64> {
+    async fn execute_batch(&self, db_id: &str, stmts: Vec<(String, Vec<SqlValue>)>) -> Result<u64> {
         if stmts.is_empty() {
             return Ok(0);
         }
@@ -482,7 +478,10 @@ mod tests {
         assert!(validate_read_only_sql("-- leading comment\nSELECT * FROM posts;").is_ok());
         assert!(validate_read_only_sql("/* c */ WITH cte AS (SELECT 1) SELECT * FROM cte").is_ok());
         assert!(validate_read_only_sql("SELECT 'DELETE FROM x; DROP TABLE y' AS msg").is_ok());
-        assert!(validate_read_only_sql("SELECT REPLACE(title, 'a', 'b'), t.update FROM posts t").is_ok());
+        assert!(
+            validate_read_only_sql("SELECT REPLACE(title, 'a', 'b'), t.update FROM posts t")
+                .is_ok()
+        );
         assert!(validate_read_only_sql("SELECT \"delete\" FROM posts WHERE id = :delete").is_ok());
         assert!(validate_read_only_sql("EXPLAIN QUERY PLAN SELECT * FROM posts").is_ok());
         assert!(validate_read_only_sql("VALUES (1, 2)").is_ok());
@@ -494,14 +493,19 @@ mod tests {
         assert!(validate_read_only_sql("   -- only comment").is_err());
         assert!(validate_read_only_sql("DELETE FROM posts").is_err());
         assert!(validate_read_only_sql("/* c */ DELETE FROM posts").is_err());
-        assert!(validate_read_only_sql("INSERT INTO posts (title) VALUES ('x') RETURNING id").is_err());
+        assert!(
+            validate_read_only_sql("INSERT INTO posts (title) VALUES ('x') RETURNING id").is_err()
+        );
         assert!(validate_read_only_sql("UPDATE posts SET title = 'x' RETURNING *").is_err());
         assert!(validate_read_only_sql("REPLACE INTO posts VALUES (1, 'x')").is_err());
         assert!(validate_read_only_sql("DROP TABLE posts").is_err());
         assert!(validate_read_only_sql("PRAGMA writable_schema = ON").is_err());
         assert!(validate_read_only_sql("ATTACH DATABASE '/tmp/x.db' AS x").is_err());
         assert!(validate_read_only_sql("SELECT 1; DROP TABLE posts").is_err());
-        assert!(validate_read_only_sql("WITH d AS (DELETE FROM posts RETURNING *) SELECT * FROM d").is_err());
+        assert!(validate_read_only_sql(
+            "WITH d AS (DELETE FROM posts RETURNING *) SELECT * FROM d"
+        )
+        .is_err());
         assert!(validate_read_only_sql("EXPLAIN DELETE FROM posts").is_err());
     }
 

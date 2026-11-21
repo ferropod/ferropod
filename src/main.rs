@@ -14,13 +14,17 @@ use ferropod::core::service::{PlatformDeps, PlatformService};
 use ferropod::dispatcher::{maintenance::run_maintenance_loop, shutdown::shutdown_signal};
 use ferropod::gateway::{router::build_router, tls::serve_http_and_https};
 use ferropod::storage::{
-    blob_fs::FsBlobStore, core_store::TursoCoreStore, kv_store::TursoKvStore, log_store::DailyLogStore,
-    queue_store::TursoQueueStore, user_db::TursoUserDbManager,
+    blob_fs::FsBlobStore, core_store::TursoCoreStore, kv_store::TursoKvStore,
+    log_store::DailyLogStore, queue_store::TursoQueueStore, user_db::TursoUserDbManager,
 };
 use ferropod::update;
 
 #[derive(Debug, Parser)]
-#[command(name = "ferropod", version, about = "AI-Native lightweight self-hosted PaaS")]
+#[command(
+    name = "ferropod",
+    version,
+    about = "AI-Native lightweight self-hosted PaaS"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -58,7 +62,11 @@ enum Commands {
         http_redirect_https: bool,
         #[arg(long, env = "FERROPOD_DATA_DIR", default_value = "./data")]
         data_dir: PathBuf,
-        #[arg(long, env = "FERROPOD_MASTER_KEY", default_value = "dev-insecure-master-key-change-me")]
+        #[arg(
+            long,
+            env = "FERROPOD_MASTER_KEY",
+            default_value = "dev-insecure-master-key-change-me"
+        )]
         master_key: String,
     },
     /// Start a local development instance using ./.ferropod-dev and auto-create a dev admin token.
@@ -79,7 +87,11 @@ enum Commands {
         out: PathBuf,
         #[arg(long, env = "FERROPOD_DATA_DIR", default_value = "./data")]
         data_dir: PathBuf,
-        #[arg(long, env = "FERROPOD_MASTER_KEY", default_value = "dev-insecure-master-key-change-me")]
+        #[arg(
+            long,
+            env = "FERROPOD_MASTER_KEY",
+            default_value = "dev-insecure-master-key-change-me"
+        )]
         master_key: String,
     },
     /// Print a ready-to-use systemd unit configuration.
@@ -131,7 +143,11 @@ enum TokenCommands {
         expires_in_days: Option<i64>,
         #[arg(long, env = "FERROPOD_DATA_DIR", default_value = "./data")]
         data_dir: PathBuf,
-        #[arg(long, env = "FERROPOD_MASTER_KEY", default_value = "dev-insecure-master-key-change-me")]
+        #[arg(
+            long,
+            env = "FERROPOD_MASTER_KEY",
+            default_value = "dev-insecure-master-key-change-me"
+        )]
         master_key: String,
     },
 }
@@ -170,10 +186,11 @@ async fn init_service(cfg: &Config) -> Result<PlatformService> {
     tokio::fs::create_dir_all(cfg.artifacts_dir()).await?;
 
     let core_store = Arc::new(TursoCoreStore::open(&cfg.core_db_path()).await?);
-    let kv_store = Arc::new(
-        TursoKvStore::open(&cfg.kv_db_path(), cfg.max_ephemeral_kv_entries).await?,
-    );
-    kv_store.migrate_from_legacy_core(core_store.database()).await?;
+    let kv_store =
+        Arc::new(TursoKvStore::open(&cfg.kv_db_path(), cfg.max_ephemeral_kv_entries).await?);
+    kv_store
+        .migrate_from_legacy_core(core_store.database())
+        .await?;
     let queue_store = Arc::new(TursoQueueStore::open(&cfg.queue_db_path()).await?);
     let user_dbs = Arc::new(TursoUserDbManager::new(
         cfg.user_dbs_dir(),
@@ -184,9 +201,7 @@ async fn init_service(cfg: &Config) -> Result<PlatformService> {
         core_store.clone(),
         cfg.blob_gc_grace_secs,
     )?);
-    let log_store = Arc::new(
-        DailyLogStore::open(cfg.logs_dir(), cfg.log_channel_capacity).await?,
-    );
+    let log_store = Arc::new(DailyLogStore::open(cfg.logs_dir(), cfg.log_channel_capacity).await?);
 
     let svc = PlatformService::new(
         cfg.clone(),
@@ -284,7 +299,10 @@ async fn async_main(cli: Cli) -> Result<()> {
             let svc = init_service(&cfg).await?;
             let caller = Caller::system("cli");
             let count = svc.create_snapshot(&caller, &out).await?;
-            println!("Snapshot complete at {} ({count} user databases)", out.display());
+            println!(
+                "Snapshot complete at {} ({count} user databases)",
+                out.display()
+            );
         }
         Commands::InstallSystemd {
             data_dir,
@@ -403,8 +421,12 @@ WantedBy=multi-user.target"
                                 .await;
                             match st {
                                 Ok(s) if s.success() => println!("Service `ferropod` restarted."),
-                                Ok(s) => eprintln!("Warning: `systemctl restart ferropod` exited with {s}"),
-                                Err(e) => eprintln!("Warning: failed to restart systemd service: {e}"),
+                                Ok(s) => eprintln!(
+                                    "Warning: `systemctl restart ferropod` exited with {s}"
+                                ),
+                                Err(e) => {
+                                    eprintln!("Warning: failed to restart systemd service: {e}")
+                                }
                             }
                         }
                     }

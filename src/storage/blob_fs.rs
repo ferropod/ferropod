@@ -80,7 +80,9 @@ impl ObjectStore for FsBlobStore {
         group: Option<&str>,
     ) -> Result<BucketMeta> {
         Self::validate_name(name)?;
-        self.meta.create_bucket(name, project_id, public_read, group).await
+        self.meta
+            .create_bucket(name, project_id, public_read, group)
+            .await
     }
 
     async fn get_bucket(&self, name: &str) -> Result<Option<BucketMeta>> {
@@ -132,7 +134,8 @@ impl ObjectStore for FsBlobStore {
 
         let write_res: std::result::Result<(), FerroError> = async {
             while let Some(chunk) = stream.next().await {
-                let data = chunk.map_err(|e| FerroError::Internal(anyhow!("read body stream: {e}")))?;
+                let data =
+                    chunk.map_err(|e| FerroError::Internal(anyhow!("read body stream: {e}")))?;
                 total_size += data.len() as u64;
                 hasher.update(&data);
                 tmp_file
@@ -244,7 +247,12 @@ impl ObjectStore for FsBlobStore {
             .await
     }
 
-    async fn list(&self, bucket: &str, prefix: Option<&str>, limit: usize) -> Result<Vec<ObjectMeta>> {
+    async fn list(
+        &self,
+        bucket: &str,
+        prefix: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ObjectMeta>> {
         self.meta.list_objects_meta(bucket, prefix, limit).await
     }
 

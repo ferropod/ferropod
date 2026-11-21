@@ -415,8 +415,11 @@ impl BlobMetaStore for TursoCoreStore {
                     None => 0,
                 };
                 drop(cnt_rows);
-                tx.execute("DELETE FROM blob_gc WHERE blob_path = ?1", [path_s.as_str()])
-                    .await?;
+                tx.execute(
+                    "DELETE FROM blob_gc WHERE blob_path = ?1",
+                    [path_s.as_str()],
+                )
+                .await?;
                 tx.commit().await?;
                 Ok(cnt == 0)
             }

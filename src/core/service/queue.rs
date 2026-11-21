@@ -3,8 +3,8 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use crate::core::model::{
-    Caller, EnqueueOpts, FerroError, Job, JobOutcome, JobStatus, LogEntry, QueueConfig,
-    QueueStats, RequestCtx, Result, TokenScope,
+    Caller, EnqueueOpts, FerroError, Job, JobOutcome, JobStatus, LogEntry, QueueConfig, QueueStats,
+    RequestCtx, Result, TokenScope,
 };
 
 use super::PlatformService;
@@ -42,11 +42,7 @@ impl PlatformService {
         Ok(cfg)
     }
 
-    pub async fn queue_create(
-        &self,
-        caller: &Caller,
-        mut cfg: QueueConfig,
-    ) -> Result<QueueConfig> {
+    pub async fn queue_create(&self, caller: &Caller, mut cfg: QueueConfig) -> Result<QueueConfig> {
         cfg.group = super::normalize_resource_group(cfg.group.as_deref())?.map(str::to_owned);
         cfg.name = cfg.name.trim().to_string();
         if cfg.name.is_empty() {
@@ -242,9 +238,7 @@ impl PlatformService {
                         match outcomes.get(idx) {
                             Some(JobOutcome::Ack) => ack_ids.push(job.id),
                             Some(JobOutcome::Retry { delay_secs, error }) => {
-                                self.queue
-                                    .nack(job.id, (*delay_secs).max(1), error)
-                                    .await?;
+                                self.queue.nack(job.id, (*delay_secs).max(1), error).await?;
                             }
                             Some(JobOutcome::Dead { error }) => {
                                 self.queue.mark_dead(job.id, error).await?;

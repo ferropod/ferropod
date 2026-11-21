@@ -1,8 +1,7 @@
 use chrono::Utc;
 
 use crate::core::model::{
-    BlobAuth, BucketMeta, ByteRange, ByteStream, Caller, FerroError, ObjectMeta, Result,
-    TokenScope,
+    BlobAuth, BucketMeta, ByteRange, ByteStream, Caller, FerroError, ObjectMeta, Result, TokenScope,
 };
 
 use super::PlatformService;
@@ -41,7 +40,9 @@ impl PlatformService {
                     ));
                 }
                 let k = key.ok_or_else(|| {
-                    FerroError::Unauthorized("presigned URL cannot be used for bucket listing".into())
+                    FerroError::Unauthorized(
+                        "presigned URL cannot be used for bucket listing".into(),
+                    )
                 })?;
                 self.crypto
                     .verify_blob_op("get", bucket, k, *exp, sig, Utc::now().timestamp())?;
@@ -82,8 +83,14 @@ impl PlatformService {
                         "presigned URL operation mismatch (expected 'put')".into(),
                     ));
                 }
-                self.crypto
-                    .verify_blob_op("put", bucket, key, *exp, sig, Utc::now().timestamp())?;
+                self.crypto.verify_blob_op(
+                    "put",
+                    bucket,
+                    key,
+                    *exp,
+                    sig,
+                    Utc::now().timestamp(),
+                )?;
                 Ok(meta)
             }
             BlobAuth::Anonymous => Err(FerroError::Unauthorized(format!(
@@ -99,7 +106,8 @@ impl PlatformService {
         project_id: Option<&str>,
         public_read: bool,
     ) -> Result<BucketMeta> {
-        self.create_grouped_bucket(caller, name, project_id, public_read, None).await
+        self.create_grouped_bucket(caller, name, project_id, public_read, None)
+            .await
     }
 
     pub async fn create_grouped_bucket(
@@ -309,11 +317,7 @@ impl PlatformService {
     }
 
     /// Internal static-site asset HEAD bypasses bucket auth because the deployment explicitly bound `assets_bucket`.
-    pub async fn static_head_object(
-        &self,
-        bucket: &str,
-        key: &str,
-    ) -> Result<Option<ObjectMeta>> {
+    pub async fn static_head_object(&self, bucket: &str, key: &str) -> Result<Option<ObjectMeta>> {
         self.objects.head(bucket, key).await
     }
 

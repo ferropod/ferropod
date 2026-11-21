@@ -98,11 +98,7 @@ impl TursoQueueStore {
     }
 }
 
-async fn run_batch_ingestor(
-    db: Database,
-    mut rx: mpsc::Receiver<IngestItem>,
-    notify: Arc<Notify>,
-) {
+async fn run_batch_ingestor(db: Database, mut rx: mpsc::Receiver<IngestItem>, notify: Arc<Notify>) {
     const MAX_BATCH: usize = 200;
     const MAX_WAIT: Duration = Duration::from_millis(10);
 
@@ -251,18 +247,26 @@ impl QueueStore for TursoQueueStore {
                      WHERE name = ?6 AND project_id IS ?7",
                     vec![
                         TursoValue::Integer(cfg.max_concurrency),
-                        cfg.rate_limit_per_sec.map(TursoValue::Integer).unwrap_or(TursoValue::Null),
+                        cfg.rate_limit_per_sec
+                            .map(TursoValue::Integer)
+                            .unwrap_or(TursoValue::Null),
                         TursoValue::Integer(cfg.batch_size),
                         TursoValue::Integer(cfg.lease_secs),
                         TursoValue::Integer(cfg.max_attempts),
                         TursoValue::Text(cfg.name),
-                        cfg.project_id.map(TursoValue::Text).unwrap_or(TursoValue::Null),
+                        cfg.project_id
+                            .map(TursoValue::Text)
+                            .unwrap_or(TursoValue::Null),
                     ],
-                ).await
+                )
+                .await
             }
-        }).await?;
+        })
+        .await?;
         if affected == 0 {
-            return Err(FerroError::NotFound("queue no longer exists or ownership changed".into()));
+            return Err(FerroError::NotFound(
+                "queue no longer exists or ownership changed".into(),
+            ));
         }
         Ok(())
     }
@@ -419,7 +423,12 @@ impl QueueStore for TursoQueueStore {
         .await
     }
 
-    async fn nack(&self, job_id: i64, retry_after_secs: u64, err: &str) -> Result<Option<JobStatus>> {
+    async fn nack(
+        &self,
+        job_id: i64,
+        retry_after_secs: u64,
+        err: &str,
+    ) -> Result<Option<JobStatus>> {
         let now_ms = Utc::now().timestamp_millis();
         let next_run_at = now_ms + retry_after_secs as i64 * 1_000;
         let err_s = err.to_string();
@@ -599,8 +608,7 @@ impl QueueStore for TursoQueueStore {
             let q = q.clone();
             async move {
                 let conn = db.connect()?;
-                conn.execute("DELETE FROM jobs WHERE queue = ?1", [q])
-                    .await
+                conn.execute("DELETE FROM jobs WHERE queue = ?1", [q]).await
             }
         })
         .await

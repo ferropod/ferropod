@@ -25,7 +25,8 @@ impl PlatformService {
         name: &str,
         project_id: Option<&str>,
     ) -> Result<KvNamespaceMeta> {
-        self.create_grouped_kv_namespace(caller, name, project_id, None).await
+        self.create_grouped_kv_namespace(caller, name, project_id, None)
+            .await
     }
 
     pub async fn create_grouped_kv_namespace(

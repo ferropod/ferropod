@@ -3,8 +3,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::anyhow;
-use turso::{Builder, Connection, Database, Error as TursoError, Value as TursoValue};
 use tracing::warn;
+use turso::{Builder, Connection, Database, Error as TursoError, Value as TursoValue};
 
 use crate::core::model::{FerroError, Result, SqlValue};
 
@@ -60,9 +60,12 @@ pub(super) async fn ensure_resource_group_column(conn: &Connection, table: &str)
         }
     }
     drop(columns);
-    conn.execute(&format!("ALTER TABLE {table} ADD COLUMN resource_group TEXT"), ())
-        .await
-        .map_err(map_turso_err)?;
+    conn.execute(
+        &format!("ALTER TABLE {table} ADD COLUMN resource_group TEXT"),
+        (),
+    )
+    .await
+    .map_err(map_turso_err)?;
     Ok(())
 }
 
@@ -127,8 +130,7 @@ pub async fn copy_db_with_sidecars(src: &Path, dest: &Path) -> Result<()> {
     for suffix in ["-wal", "-log", "-shm"] {
         let sidecar = std::path::PathBuf::from(format!("{}{}", src.display(), suffix));
         if sidecar.exists() {
-            let dest_sidecar =
-                std::path::PathBuf::from(format!("{}{}", dest.display(), suffix));
+            let dest_sidecar = std::path::PathBuf::from(format!("{}{}", dest.display(), suffix));
             tokio::fs::copy(&sidecar, &dest_sidecar)
                 .await
                 .map_err(|e| FerroError::Internal(anyhow!("copy db sidecar: {e}")))?;

@@ -26,11 +26,15 @@ struct HealthzResp {
 /// Build the unified HTTP router covering healthz, Blob API, REST API,
 /// zero-build Admin UI, and Host-routed static sites / Workers.
 pub fn build_router(svc: PlatformService) -> Router {
-    let blob_router = blob_api::router()
-        .layer(RequestBodyLimitLayer::new(svc.config().max_blob_upload_bytes));
+    let blob_router = blob_api::router().layer(RequestBodyLimitLayer::new(
+        svc.config().max_blob_upload_bytes,
+    ));
 
     Router::new()
-        .route("/_healthz", get(|| async { Json(HealthzResp { status: "ok" }) }))
+        .route(
+            "/_healthz",
+            get(|| async { Json(HealthzResp { status: "ok" }) }),
+        )
         .nest("/_blob", blob_router)
         .nest("/_api/v1", web::api::router())
         .route("/_panel", get(web::admin_index))
@@ -45,10 +49,7 @@ pub fn build_router(svc: PlatformService) -> Router {
         .with_state(svc)
 }
 
-async fn host_route_handler(
-    State(svc): State<PlatformService>,
-    req: Request<Body>,
-) -> Response {
+async fn host_route_handler(State(svc): State<PlatformService>, req: Request<Body>) -> Response {
     let req_path = req.uri().path();
     if req_path == "/_internal" || req_path.starts_with("/_internal/") {
         return (StatusCode::FORBIDDEN, "internal path forbidden").into_response();
@@ -66,13 +67,25 @@ async fn host_route_handler(
     };
 
     let Some(dep) = route.active_deployment else {
-        return (StatusCode::SERVICE_UNAVAILABLE, "project has no active deployment").into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "project has no active deployment",
+        )
+            .into_response();
     };
 
     if let Some(bucket) = dep.assets_bucket.as_deref() {
         if method == Method::GET || method == Method::HEAD {
-            if let Some(resp) =
-                try_serve_static(&svc, bucket, dep.assets_prefix.as_deref(), dep.spa_fallback, req.uri().path(), &headers, method == Method::HEAD).await
+            if let Some(resp) = try_serve_static(
+                &svc,
+                bucket,
+                dep.assets_prefix.as_deref(),
+                dep.spa_fallback,
+                req.uri().path(),
+                &headers,
+                method == Method::HEAD,
+            )
+            .await
             {
                 return resp;
             }
@@ -146,7 +159,10 @@ fn build_asset_key(prefix: Option<&str>, req_path: &str) -> String {
     } else {
         clean.to_string()
     };
-    match prefix.map(|p| p.trim_matches('/')).filter(|p| !p.is_empty()) {
+    match prefix
+        .map(|p| p.trim_matches('/'))
+        .filter(|p| !p.is_empty())
+    {
         Some(pfx) => format!("{pfx}/{rel}"),
         None => rel,
     }
@@ -181,7 +197,10 @@ async fn try_serve_static(
 
     let meta = found?;
     let etag = format!("\"{}\"", meta.sha256);
-    if let Some(inm) = headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()) {
+    if let Some(inm) = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+    {
         if inm.trim() == etag || inm.trim() == "*" {
             return Some(
                 Response::builder()

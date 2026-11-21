@@ -2,7 +2,9 @@ use async_trait::async_trait;
 use chrono::Utc;
 use turso::Value as TursoValue;
 
-use crate::core::model::{CronJob, DbFtsIndexMeta, FerroError, KvNamespaceMeta, Result, UserDbMeta};
+use crate::core::model::{
+    CronJob, DbFtsIndexMeta, FerroError, KvNamespaceMeta, Result, UserDbMeta,
+};
 use crate::core::traits::RegistryStore;
 use crate::storage::tx::{connect_db, map_turso_err, with_retry};
 
@@ -48,7 +50,10 @@ impl RegistryStore for TursoCoreStore {
             async move {
                 let conn = db.connect()?;
                 let _ = conn
-                    .execute("DELETE FROM user_db_fts_indexes WHERE db_id = ?1", [id_s.as_str()])
+                    .execute(
+                        "DELETE FROM user_db_fts_indexes WHERE db_id = ?1",
+                        [id_s.as_str()],
+                    )
                     .await;
                 conn.execute("DELETE FROM user_databases WHERE id = ?1", [id_s])
                     .await

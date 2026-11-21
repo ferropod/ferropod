@@ -30,7 +30,8 @@ impl PlatformService {
         name: &str,
         project_id: Option<&str>,
     ) -> Result<String> {
-        self.create_grouped_user_db(caller, name, project_id, None).await
+        self.create_grouped_user_db(caller, name, project_id, None)
+            .await
     }
 
     pub async fn create_grouped_user_db(
@@ -160,7 +161,13 @@ impl PlatformService {
             let safe_name: String = db
                 .name
                 .chars()
-                .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
                 .collect();
             let dest = out_dir.join(format!("{safe_name}__{}.db", db.id));
             self.db.snapshot_to(&db.id, &dest).await?;
@@ -188,7 +195,8 @@ impl PlatformService {
                     if let Some(first_row) = qr.rows.first() {
                         if let Some(cnt) = first_row.first().and_then(|v| v.as_i64()) {
                             idx.rows_indexed = cnt.max(0) as usize;
-                            idx.size_bytes = (idx.rows_indexed as u64).saturating_mul(256).max(4096);
+                            idx.size_bytes =
+                                (idx.rows_indexed as u64).saturating_mul(256).max(4096);
                         }
                     }
                 }
@@ -219,19 +227,38 @@ impl PlatformService {
             .map(|c| c.trim().to_string())
             .filter(|c| !c.is_empty())
             .collect();
-        if !valid_sql_ident(name) || !valid_sql_ident(table) || cols.is_empty() || !cols.iter().all(|c| valid_sql_ident(c)) {
+        if !valid_sql_ident(name)
+            || !valid_sql_ident(table)
+            || cols.is_empty()
+            || !cols.iter().all(|c| valid_sql_ident(c))
+        {
             return Err(FerroError::InvalidArgument(
                 "invalid FTS index name, table, or column identifier".into(),
             ));
         }
 
-        let quoted_columns = cols.iter().map(|col| format!("\"{col}\"")).collect::<Vec<_>>().join(", ");
-        self.db.query(&meta.id, &format!("SELECT {quoted_columns} FROM \"{table}\" LIMIT 0"), vec![]).await?;
+        let quoted_columns = cols
+            .iter()
+            .map(|col| format!("\"{col}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.db
+            .query(
+                &meta.id,
+                &format!("SELECT {quoted_columns} FROM \"{table}\" LIMIT 0"),
+                vec![],
+            )
+            .await?;
 
         let mut rows_indexed = 0usize;
         let count_sql = format!("SELECT COUNT(*) FROM \"{table}\"");
         if let Ok(qr) = self.db.query(&meta.id, &count_sql, vec![]).await {
-            if let Some(cnt) = qr.rows.first().and_then(|r| r.first()).and_then(|v| v.as_i64()) {
+            if let Some(cnt) = qr
+                .rows
+                .first()
+                .and_then(|r| r.first())
+                .and_then(|v| v.as_i64())
+            {
                 rows_indexed = cnt.max(0) as usize;
             }
         }
@@ -272,7 +299,9 @@ impl PlatformService {
             meta.project_id.as_deref(),
             &format!("database '{}'", meta.name),
         )?;
-        self.registry.delete_db_fts_index(&meta.id, index_name).await?;
+        self.registry
+            .delete_db_fts_index(&meta.id, index_name)
+            .await?;
         self.audit(
             meta.project_id.as_deref(),
             &caller.actor,

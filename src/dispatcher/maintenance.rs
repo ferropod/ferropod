@@ -7,10 +7,7 @@ use crate::core::service::PlatformService;
 
 /// Periodically runs maintenance (KV TTL, queue reaper/retention, blob GC, log rotation),
 /// polls queue consumers, and triggers due cron jobs.
-pub async fn run_maintenance_loop(
-    svc: PlatformService,
-    mut shutdown_rx: watch::Receiver<bool>,
-) {
+pub async fn run_maintenance_loop(svc: PlatformService, mut shutdown_rx: watch::Receiver<bool>) {
     let mut maint_interval = tokio::time::interval(Duration::from_secs(
         svc.config().maintenance_interval_secs.max(5),
     ));

@@ -141,12 +141,19 @@ fn strip_host_port(host_header: &str) -> &str {
 /// Build an HTTP-to-HTTPS `308 Permanent Redirect` router that keeps `/_healthz` reachable over HTTP.
 pub fn build_https_redirect_router(https_port: u16) -> Router {
     Router::new()
-        .route("/_healthz", get(|| async { Json(HealthzResp { status: "ok" }) }))
+        .route(
+            "/_healthz",
+            get(|| async { Json(HealthzResp { status: "ok" }) }),
+        )
         .fallback(move |req: Request<Body>| async move { redirect_to_https(req, https_port) })
 }
 
 fn redirect_to_https(req: Request<Body>, https_port: u16) -> Response {
-    let Some(raw_host) = req.headers().get(header::HOST).and_then(|v| v.to_str().ok()) else {
+    let Some(raw_host) = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+    else {
         return (StatusCode::BAD_REQUEST, "missing Host header").into_response();
     };
     let host = strip_host_port(raw_host);
@@ -250,7 +257,9 @@ where
             ensure_crypto_provider();
             tokio::fs::create_dir_all(&cache_dir)
                 .await
-                .with_context(|| format!("failed to create ACME cache dir {}", cache_dir.display()))?;
+                .with_context(|| {
+                    format!("failed to create ACME cache dir {}", cache_dir.display())
+                })?;
 
             let mut acme_cfg = AcmeConfig::new(domains.clone())
                 .cache(DirCache::new(cache_dir.clone()))
@@ -318,8 +327,7 @@ fn spawn_shutdown_bridge<F>(
     shutdown: F,
     http_handle: Handle<SocketAddr>,
     https_handle: Handle<SocketAddr>,
-)
-where
+) where
     F: Future<Output = ()> + Send + 'static,
 {
     tokio::spawn(async move {

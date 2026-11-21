@@ -81,7 +81,8 @@ impl PlatformService {
         name: &str,
         health_check_path: Option<&str>,
     ) -> Result<Project> {
-        self.create_grouped_project(caller, name, health_check_path, None).await
+        self.create_grouped_project(caller, name, health_check_path, None)
+            .await
     }
 
     pub async fn create_grouped_project(
@@ -99,7 +100,10 @@ impl PlatformService {
                 "project name cannot be empty".into(),
             ));
         }
-        let proj = self.projects.create_project(name, health_check_path, group).await?;
+        let proj = self
+            .projects
+            .create_project(name, health_check_path, group)
+            .await?;
         self.audit(
             Some(&proj.id),
             &caller.actor,
@@ -173,7 +177,10 @@ impl PlatformService {
             )?;
         }
         for ns in input.bindings.kv.values() {
-            let meta = self.registry.get_kv_namespace(ns).await?
+            let meta = self
+                .registry
+                .get_kv_namespace(ns)
+                .await?
                 .ok_or_else(|| FerroError::NotFound(format!("kv namespace '{ns}'")))?;
             Self::require_resource_write(
                 &Caller::project("deployment", proj.id.clone()),
@@ -248,7 +255,9 @@ impl PlatformService {
         if let Some(ref rel) = dep.artifact_path {
             let clean = rel.trim_start_matches('/');
             if clean.is_empty() {
-                return Err(FerroError::InvalidArgument("artifact path cannot be empty".into()));
+                return Err(FerroError::InvalidArgument(
+                    "artifact path cannot be empty".into(),
+                ));
             }
             self.runtime.preload_deployment(&dep).await?;
         }
@@ -380,12 +389,13 @@ impl PlatformService {
                 }
                 d
             }
-            None => {
-                self.projects.previous_production_deployment(&proj.id).await?
-                    .ok_or_else(|| {
-                        FerroError::InvalidArgument("no previous deployment to roll back to".into())
-                    })?
-            }
+            None => self
+                .projects
+                .previous_production_deployment(&proj.id)
+                .await?
+                .ok_or_else(|| {
+                    FerroError::InvalidArgument("no previous deployment to roll back to".into())
+                })?,
         };
 
         self.projects
@@ -468,7 +478,9 @@ impl PlatformService {
         let all = self.projects.list_routes().await?;
         match &caller.scope {
             TokenScope::Admin | TokenScope::Readonly => Ok(all),
-            TokenScope::Project(pid) => Ok(all.into_iter().filter(|r| r.project_id == *pid).collect()),
+            TokenScope::Project(pid) => {
+                Ok(all.into_iter().filter(|r| r.project_id == *pid).collect())
+            }
         }
     }
 
@@ -543,7 +555,10 @@ impl PlatformService {
             TargetEnv::Preview => proj.preview_deployment_id.clone(),
         }
         .ok_or_else(|| {
-            FerroError::NotFound(format!("project '{}' has no deployment for target env", proj.name))
+            FerroError::NotFound(format!(
+                "project '{}' has no deployment for target env",
+                proj.name
+            ))
         })?;
 
         let dep = self
@@ -592,7 +607,9 @@ impl PlatformService {
                                 Ok(acc)
                             })
                             .await
-                            .map_err(|e| FerroError::Internal(anyhow::anyhow!("read static asset: {e}")))?;
+                            .map_err(|e| {
+                                FerroError::Internal(anyhow::anyhow!("read static asset: {e}"))
+                            })?;
                         Box::pin(futures_util::stream::once(async move {
                             Ok::<_, std::io::Error>(Bytes::from(bytes))
                         })) as crate::core::model::ByteStream

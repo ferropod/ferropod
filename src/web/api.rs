@@ -250,15 +250,9 @@ pub fn router() -> Router<PlatformService> {
         .route("/routes/{host}", delete(delete_route))
         .route("/tokens", get(list_tokens).post(create_token))
         .route("/tokens/{id}", delete(revoke_token))
-        .route(
-            "/kv",
-            get(kv_list_namespaces).post(kv_create_namespace),
-        )
+        .route("/kv", get(kv_list_namespaces).post(kv_create_namespace))
         .route("/kv/{ns}", get(kv_list).delete(kv_delete_namespace))
-        .route(
-            "/kv/{ns}/{key}",
-            get(kv_get).put(kv_put).delete(kv_delete),
-        )
+        .route("/kv/{ns}/{key}", get(kv_get).put(kv_put).delete(kv_delete))
         .route("/kv/{ns}/{key}/incr", post(kv_incr))
         .route("/queues", get(queue_list).post(queue_create))
         .route("/queues/{name}", patch(queue_update).delete(queue_delete))
@@ -268,7 +262,10 @@ pub fn router() -> Router<PlatformService> {
         .route("/queues/{name}/dlq/replay", post(queue_dlq_replay))
         .route("/queues/{name}/purge", post(queue_purge))
         .route("/buckets", get(bucket_list).post(bucket_create))
-        .route("/buckets/{name}", patch(bucket_update).delete(bucket_delete))
+        .route(
+            "/buckets/{name}",
+            patch(bucket_update).delete(bucket_delete),
+        )
         .route("/buckets/{name}/presign", post(bucket_presign))
         .route("/dbs", get(db_list).post(db_create))
         .route("/dbs/{id}", delete(db_delete))
@@ -278,10 +275,16 @@ pub fn router() -> Router<PlatformService> {
         .route("/dbs/{id}/fts", get(db_fts_list).post(db_fts_create))
         .route("/dbs/{id}/fts/{name}", delete(db_fts_drop))
         .route("/dbs/{id}/fts/{name}/query", post(db_fts_query))
-        .route("/search", get(search_list_indexes).post(search_create_index))
+        .route(
+            "/search",
+            get(search_list_indexes).post(search_create_index),
+        )
         .route("/search/{id}", delete(search_delete_index))
         .route("/search/{id}/commit", post(search_commit_index))
-        .route("/search/{id}/docs", get(search_list_docs).post(search_upsert_doc))
+        .route(
+            "/search/{id}/docs",
+            get(search_list_docs).post(search_upsert_doc),
+        )
         .route("/search/{id}/docs/{doc_id}", delete(search_delete_doc))
         .route("/search/{id}/query", post(search_query_index))
         .route("/logs", get(logs_query))
@@ -316,7 +319,10 @@ async fn list_resource_groups(
 fn runtime_routes(prefix: &str) -> Router<PlatformService> {
     Router::new()
         .route(prefix, get(list_projects).post(create_project))
-        .route(&format!("{prefix}/{{id}}"), get(get_project).delete(delete_project))
+        .route(
+            &format!("{prefix}/{{id}}"),
+            get(get_project).delete(delete_project),
+        )
         .route(
             &format!("{prefix}/{{id}}/deployments"),
             get(list_deployments).post(create_deployment),
@@ -330,10 +336,22 @@ fn runtime_routes(prefix: &str) -> Router<PlatformService> {
             put(upload_artifact).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
         )
         .route(&format!("{prefix}/{{id}}/invoke"), post(invoke_project))
-        .route(&format!("{prefix}/{{id}}/promote"), post(promote_deployment))
-        .route(&format!("{prefix}/{{id}}/rollback"), post(rollback_deployment))
-        .route(&format!("{prefix}/{{id}}/secrets"), get(list_secrets).post(set_secret))
-        .route(&format!("{prefix}/{{id}}/secrets/{{key}}"), delete(delete_secret))
+        .route(
+            &format!("{prefix}/{{id}}/promote"),
+            post(promote_deployment),
+        )
+        .route(
+            &format!("{prefix}/{{id}}/rollback"),
+            post(rollback_deployment),
+        )
+        .route(
+            &format!("{prefix}/{{id}}/secrets"),
+            get(list_secrets).post(set_secret),
+        )
+        .route(
+            &format!("{prefix}/{{id}}/secrets/{{key}}"),
+            delete(delete_secret),
+        )
 }
 
 async fn status(
@@ -412,11 +430,19 @@ fn read_proc_meminfo() -> (u64, u64) {
     let mut avail = 0u64;
     for line in content.lines() {
         if let Some(rest) = line.strip_prefix("MemTotal:") {
-            if let Some(kb) = rest.split_whitespace().next().and_then(|s| s.parse::<u64>().ok()) {
+            if let Some(kb) = rest
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.parse::<u64>().ok())
+            {
                 total = kb.saturating_mul(1024);
             }
         } else if let Some(rest) = line.strip_prefix("MemAvailable:") {
-            if let Some(kb) = rest.split_whitespace().next().and_then(|s| s.parse::<u64>().ok()) {
+            if let Some(kb) = rest
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.parse::<u64>().ok())
+            {
                 avail = kb.saturating_mul(1024);
             }
         }
@@ -429,9 +455,18 @@ fn read_proc_loadavg() -> (f64, f64, f64) {
         return (0.0, 0.0, 0.0);
     };
     let mut parts = content.split_whitespace();
-    let l1 = parts.next().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-    let l5 = parts.next().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-    let l15 = parts.next().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+    let l1 = parts
+        .next()
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let l5 = parts
+        .next()
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let l15 = parts
+        .next()
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0);
     (l1, l5, l15)
 }
 
@@ -815,7 +850,11 @@ async fn invoke_project(
             Ok(acc)
         })
         .await
-        .map_err(|e| ApiError(FerroError::Internal(anyhow::anyhow!("read response body: {e}"))))?;
+        .map_err(|e| {
+            ApiError(FerroError::Internal(anyhow::anyhow!(
+                "read response body: {e}"
+            )))
+        })?;
 
     let mut resp_headers = serde_json::Map::new();
     for (k, v) in resp.headers {
@@ -1384,7 +1423,9 @@ async fn bucket_presign(
         .presign_blob_url(&caller, &req.op, &name, &req.key, req.expires_secs)
         .await
         .map_err(ApiError)?;
-    Ok(Json(serde_json::json!({ "url": url, "expires_at": expires_at })))
+    Ok(Json(
+        serde_json::json!({ "url": url, "expires_at": expires_at }),
+    ))
 }
 
 async fn db_list(
@@ -1609,10 +1650,7 @@ async fn search_list_docs(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     let caller = authenticate_caller(&svc, &headers, None).await?;
-    let docs = svc
-        .list_search_docs(&caller, &id)
-        .await
-        .map_err(ApiError)?;
+    let docs = svc.list_search_docs(&caller, &id).await.map_err(ApiError)?;
     Ok(Json(docs))
 }
 
