@@ -18,14 +18,14 @@ use ferropod::core::service::{CreateDeploymentInput, PlatformDeps, PlatformServi
 use ferropod::core::traits::{DbManager, KvStore, LogStore, ObjectStore, QueueStore};
 use ferropod::gateway::router::build_router;
 use ferropod::storage::{
-    blob_fs::FsBlobStore, core_store::TursoCoreStore, log_store::DailyLogStore,
+    blob_fs::FsBlobStore, core_store::TursoCoreStore, kv_store::TursoKvStore, log_store::DailyLogStore,
     queue_store::TursoQueueStore, user_db::TursoUserDbManager,
 };
 
 struct TestHarness {
     _tmp: TempDir,
     svc: PlatformService,
-    core: Arc<TursoCoreStore>,
+    kv: Arc<TursoKvStore>,
     queue: Arc<TursoQueueStore>,
     user_dbs: Arc<TursoUserDbManager>,
     blobs: Arc<FsBlobStore>,
@@ -44,8 +44,9 @@ async fn setup_harness() -> TestHarness {
     );
     cfg.blob_gc_grace_secs = 0;
 
-    let core = Arc::new(
-        TursoCoreStore::open(&cfg.core_db_path(), cfg.max_ephemeral_kv_entries)
+    let core = Arc::new(TursoCoreStore::open(&cfg.core_db_path()).await.unwrap());
+    let kv = Arc::new(
+        TursoKvStore::open(&cfg.kv_db_path(), cfg.max_ephemeral_kv_entries)
             .await
             .unwrap(),
     );
@@ -69,7 +70,7 @@ async fn setup_harness() -> TestHarness {
             secrets: core.clone(),
             tokens: core.clone(),
             registry: core.clone(),
-            kv: core.clone(),
+            kv: kv.clone(),
             queue: queue.clone(),
             objects: blobs.clone(),
             db: user_dbs.clone(),
@@ -88,7 +89,7 @@ async fn setup_harness() -> TestHarness {
     TestHarness {
         _tmp: tmp,
         svc,
-        core,
+        kv,
         queue,
         user_dbs,
         blobs,
@@ -165,7 +166,7 @@ async fn kv_persistent_ttl_atomic_and_ephemeral() {
         .is_none());
 
     // Batch cleanup deletes expired persistent key
-    let cleaned = h.core.cleanup_expired_batch(500).await.unwrap();
+    let cleaned = h.kv.cleanup_expired_batch(500).await.unwrap();
     assert!(cleaned >= 1);
 
     // put_if_absent atomicity

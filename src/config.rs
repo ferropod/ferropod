@@ -118,6 +118,10 @@ impl Config {
         self.data_dir.join("core.db")
     }
 
+    pub fn kv_db_path(&self) -> PathBuf {
+        self.data_dir.join("kv.db")
+    }
+
     pub fn queue_db_path(&self) -> PathBuf {
         self.data_dir.join("queue.db")
     }

@@ -1,12 +1,9 @@
 pub mod blob_meta;
-pub mod kv;
 pub mod projects;
 pub mod registry;
 pub mod security;
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use turso::{Database, Value as TursoValue};
 
@@ -71,17 +68,6 @@ CREATE TABLE IF NOT EXISTS kv_namespaces (
     created_at INTEGER NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS kv_entries (
-    namespace TEXT NOT NULL,
-    key TEXT NOT NULL,
-    value BLOB NOT NULL,
-    metadata TEXT,
-    expires_at INTEGER,
-    updated_at INTEGER NOT NULL,
-    PRIMARY KEY (namespace, key)
-);
-CREATE INDEX IF NOT EXISTS idx_kv_expires ON kv_entries (expires_at);
-
 CREATE TABLE IF NOT EXISTS blob_buckets (
     name TEXT PRIMARY KEY,
     project_id TEXT,
@@ -128,25 +114,16 @@ CREATE TABLE IF NOT EXISTS cron_jobs (
 );
 "#;
 
-#[derive(Debug, Clone)]
-pub(super) struct EphemeralEntry {
-    pub(super) value: Vec<u8>,
-    pub(super) metadata: Option<String>,
-    pub(super) expires_at: Option<i64>,
-    pub(super) updated_at: i64,
-}
-
-/// Turso MVCC store for `core.db` (metadata, KV, secrets, tokens, blob index, user DB registry).
+/// Turso MVCC store for `core.db` (control-plane metadata: projects, routes, secrets, tokens, KV namespace
+/// ownership, blob index, user DB registry, cron jobs). User KV entries live in the separate `kv.db`.
 #[derive(Clone)]
 pub struct TursoCoreStore {
     pub(super) db: Database,
     pub(super) db_path: PathBuf,
-    pub(super) ephemeral_kv: Arc<tokio::sync::RwLock<HashMap<(String, String), EphemeralEntry>>>,
-    pub(super) max_ephemeral_entries: usize,
 }
 
 impl TursoCoreStore {
-    pub async fn open(path: &Path, max_ephemeral_entries: usize) -> Result<Self> {
+    pub async fn open(path: &Path) -> Result<Self> {
         let db = open_turso_db(path).await?;
         let conn = connect_db(&db)?;
         conn.execute_batch(CORE_SCHEMA)
@@ -155,17 +132,20 @@ impl TursoCoreStore {
         Ok(Self {
             db,
             db_path: path.to_path_buf(),
-            ephemeral_kv: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            max_ephemeral_entries: max_ephemeral_entries.max(64),
         })
     }
 
     pub async fn checkpoint(&self) {
         checkpoint_db(&self.db).await;
     }
+
+    /// Underlying `core.db` handle (used for one-time legacy migrations).
+    pub fn database(&self) -> &Database {
+        &self.db
+    }
 }
 
-pub(super) fn opt_text(row: &turso::Row, idx: usize) -> Result<Option<String>> {
+pub(crate) fn opt_text(row: &turso::Row, idx: usize) -> Result<Option<String>> {
     match row.get_value(idx).map_err(map_turso_err)? {
         TursoValue::Null => Ok(None),
         TursoValue::Text(s) => Ok(Some(s)),
@@ -175,7 +155,7 @@ pub(super) fn opt_text(row: &turso::Row, idx: usize) -> Result<Option<String>> {
     }
 }
 
-pub(super) fn opt_i64(row: &turso::Row, idx: usize) -> Result<Option<i64>> {
+pub(crate) fn opt_i64(row: &turso::Row, idx: usize) -> Result<Option<i64>> {
     match row.get_value(idx).map_err(map_turso_err)? {
         TursoValue::Null => Ok(None),
         TursoValue::Integer(i) => Ok(Some(i)),
@@ -185,14 +165,14 @@ pub(super) fn opt_i64(row: &turso::Row, idx: usize) -> Result<Option<i64>> {
     }
 }
 
-pub(super) fn opt_text_param(s: Option<String>) -> TursoValue {
+pub(crate) fn opt_text_param(s: Option<String>) -> TursoValue {
     match s {
         Some(v) => TursoValue::Text(v),
         None => TursoValue::Null,
     }
 }
 
-pub(super) fn escape_like(s: &str) -> String {
+pub(crate) fn escape_like(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('%', "\\%")
         .replace('_', "\\_")

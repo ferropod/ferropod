@@ -1,18 +1,166 @@
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::Utc;
-use turso::{transaction::TransactionBehavior, Value as TursoValue};
+use tracing::info;
+use turso::{transaction::TransactionBehavior, Database, Value as TursoValue};
 
 use crate::core::model::{KvKeyMeta, KvValue, Result};
 use crate::core::traits::KvStore;
-use crate::storage::tx::{connect_db, map_turso_err, with_retry};
+use crate::storage::core_store::{escape_like, opt_i64, opt_text, opt_text_param};
+use crate::storage::tx::{
+    checkpoint_db, connect_db, copy_db_with_sidecars, map_turso_err, open_turso_db, with_retry,
+};
 
-use super::{escape_like, opt_i64, opt_text, opt_text_param, EphemeralEntry, TursoCoreStore};
+const KV_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS kv_entries (
+    namespace TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value BLOB NOT NULL,
+    metadata TEXT,
+    expires_at INTEGER,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (namespace, key)
+);
+CREATE INDEX IF NOT EXISTS idx_kv_expires ON kv_entries (expires_at);
+"#;
+
+/// Rows copied per transaction when migrating legacy `core.db` KV entries.
+const LEGACY_MIGRATION_BATCH: i64 = 500;
+
+#[derive(Debug, Clone)]
+pub(crate) struct EphemeralEntry {
+    pub(crate) value: Vec<u8>,
+    pub(crate) metadata: Option<String>,
+    pub(crate) expires_at: Option<i64>,
+    pub(crate) updated_at: i64,
+}
+
+/// Dedicated Turso store for user KV data (`kv.db`), isolated from control-plane metadata in
+/// `core.db` so high-frequency user writes never contend with routing/token/deployment writes.
+/// Namespace ownership (`kv_namespaces`) stays in `core.db` via `RegistryStore`.
+#[derive(Clone)]
+pub struct TursoKvStore {
+    db: Database,
+    db_path: PathBuf,
+    ephemeral_kv: Arc<tokio::sync::RwLock<HashMap<(String, String), EphemeralEntry>>>,
+    max_ephemeral_entries: usize,
+}
+
+impl TursoKvStore {
+    pub async fn open(path: &Path, max_ephemeral_entries: usize) -> Result<Self> {
+        let db = open_turso_db(path).await?;
+        let conn = connect_db(&db)?;
+        conn.execute_batch(KV_SCHEMA).await.map_err(map_turso_err)?;
+        Ok(Self {
+            db,
+            db_path: path.to_path_buf(),
+            ephemeral_kv: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            max_ephemeral_entries: max_ephemeral_entries.max(64),
+        })
+    }
+
+    /// One-time migration of KV entries that older versions stored inside `core.db`.
+    ///
+    /// Copies rows in batches (upsert, so it is idempotent and crash-safe), deletes each copied
+    /// batch from `core.db`, and finally drops the legacy table. Returns the number of rows moved.
+    pub async fn migrate_from_legacy_core(&self, core: &Database) -> Result<u64> {
+        let core_conn = connect_db(core)?;
+        let mut exists = core_conn
+            .query(
+                "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'kv_entries'",
+                (),
+            )
+            .await
+            .map_err(map_turso_err)?;
+        if exists.next().await.map_err(map_turso_err)?.is_none() {
+            return Ok(0);
+        }
+        drop(exists);
+
+        let mut moved = 0u64;
+        loop {
+            let mut rows = core_conn
+                .query(
+                    "SELECT namespace, key, value, metadata, expires_at, updated_at
+                     FROM kv_entries ORDER BY namespace, key LIMIT ?1",
+                    [TursoValue::Integer(LEGACY_MIGRATION_BATCH)],
+                )
+                .await
+                .map_err(map_turso_err)?;
+            let mut batch: Vec<Vec<TursoValue>> = Vec::new();
+            while let Some(row) = rows.next().await.map_err(map_turso_err)? {
+                let mut vals = Vec::with_capacity(6);
+                for i in 0..6 {
+                    vals.push(row.get_value(i).map_err(map_turso_err)?);
+                }
+                batch.push(vals);
+            }
+            drop(rows);
+            if batch.is_empty() {
+                break;
+            }
+
+            let kv_conn = connect_db(&self.db)?;
+            kv_conn.execute("BEGIN", ()).await.map_err(map_turso_err)?;
+            for vals in &batch {
+                if let Err(e) = kv_conn
+                    .execute(
+                        "INSERT INTO kv_entries (namespace, key, value, metadata, expires_at, updated_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                         ON CONFLICT(namespace, key) DO UPDATE SET
+                            value = excluded.value,
+                            metadata = excluded.metadata,
+                            expires_at = excluded.expires_at,
+                            updated_at = excluded.updated_at
+                         WHERE excluded.updated_at >= kv_entries.updated_at",
+                        vals.clone(),
+                    )
+                    .await
+                {
+                    let _ = kv_conn.execute("ROLLBACK", ()).await;
+                    return Err(map_turso_err(e));
+                }
+            }
+            kv_conn.execute("COMMIT", ()).await.map_err(map_turso_err)?;
+
+            core_conn.execute("BEGIN", ()).await.map_err(map_turso_err)?;
+            for vals in &batch {
+                if let Err(e) = core_conn
+                    .execute(
+                        "DELETE FROM kv_entries WHERE namespace = ?1 AND key = ?2",
+                        vec![vals[0].clone(), vals[1].clone()],
+                    )
+                    .await
+                {
+                    let _ = core_conn.execute("ROLLBACK", ()).await;
+                    return Err(map_turso_err(e));
+                }
+            }
+            core_conn.execute("COMMIT", ()).await.map_err(map_turso_err)?;
+            moved += batch.len() as u64;
+        }
+
+        core_conn
+            .execute("DROP INDEX IF EXISTS idx_kv_expires", ())
+            .await
+            .map_err(map_turso_err)?;
+        core_conn
+            .execute("DROP TABLE IF EXISTS kv_entries", ())
+            .await
+            .map_err(map_turso_err)?;
+        if moved > 0 {
+            info!(rows = moved, "migrated legacy KV entries from core.db to kv.db");
+        }
+        Ok(moved)
+    }
+}
 
 #[async_trait]
-impl KvStore for TursoCoreStore {
+impl KvStore for TursoKvStore {
     async fn get(&self, ns: &str, key: &str) -> Result<Option<KvValue>> {
         let now = Utc::now().timestamp();
         {
@@ -460,5 +608,15 @@ impl KvStore for TursoCoreStore {
             }
         })
         .await
+    }
+
+    async fn checkpoint(&self) -> Result<()> {
+        checkpoint_db(&self.db).await;
+        Ok(())
+    }
+
+    async fn snapshot_to(&self, dest_path: &Path) -> Result<()> {
+        checkpoint_db(&self.db).await;
+        copy_db_with_sidecars(&self.db_path, dest_path).await
     }
 }

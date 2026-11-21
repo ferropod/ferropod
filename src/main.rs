@@ -14,7 +14,7 @@ use ferropod::core::service::{PlatformDeps, PlatformService};
 use ferropod::dispatcher::{maintenance::run_maintenance_loop, shutdown::shutdown_signal};
 use ferropod::gateway::{router::build_router, tls::serve_http_and_https};
 use ferropod::storage::{
-    blob_fs::FsBlobStore, core_store::TursoCoreStore, log_store::DailyLogStore,
+    blob_fs::FsBlobStore, core_store::TursoCoreStore, kv_store::TursoKvStore, log_store::DailyLogStore,
     queue_store::TursoQueueStore, user_db::TursoUserDbManager,
 };
 use ferropod::update;
@@ -169,9 +169,11 @@ async fn init_service(cfg: &Config) -> Result<PlatformService> {
     tokio::fs::create_dir_all(&cfg.data_dir).await?;
     tokio::fs::create_dir_all(cfg.artifacts_dir()).await?;
 
-    let core_store = Arc::new(
-        TursoCoreStore::open(&cfg.core_db_path(), cfg.max_ephemeral_kv_entries).await?,
+    let core_store = Arc::new(TursoCoreStore::open(&cfg.core_db_path()).await?);
+    let kv_store = Arc::new(
+        TursoKvStore::open(&cfg.kv_db_path(), cfg.max_ephemeral_kv_entries).await?,
     );
+    kv_store.migrate_from_legacy_core(core_store.database()).await?;
     let queue_store = Arc::new(TursoQueueStore::open(&cfg.queue_db_path()).await?);
     let user_dbs = Arc::new(TursoUserDbManager::new(
         cfg.user_dbs_dir(),
@@ -193,7 +195,7 @@ async fn init_service(cfg: &Config) -> Result<PlatformService> {
             secrets: core_store.clone(),
             tokens: core_store.clone(),
             registry: core_store.clone(),
-            kv: core_store,
+            kv: kv_store,
             queue: queue_store,
             objects: blob_store,
             db: user_dbs,

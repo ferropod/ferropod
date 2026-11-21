@@ -151,6 +151,15 @@ pub trait KvStore: Send + Sync {
     async fn delete_namespace(&self, ns: &str) -> Result<()>;
     async fn list(&self, ns: &str, prefix: Option<&str>, limit: usize) -> Result<Vec<KvKeyMeta>>;
     async fn cleanup_expired_batch(&self, batch_limit: usize) -> Result<u64>;
+
+    async fn checkpoint(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn snapshot_to(&self, dest_path: &Path) -> Result<()> {
+        let _ = dest_path;
+        Ok(())
+    }
 }
 
 #[async_trait]

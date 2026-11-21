@@ -120,6 +120,7 @@ impl PlatformService {
         self.logs.flush().await?;
         self.db.checkpoint_all().await?;
         self.projects.checkpoint().await?;
+        self.kv.checkpoint().await?;
         self.queue.checkpoint().await?;
         Ok(())
     }
@@ -173,7 +174,7 @@ impl PlatformService {
         }
     }
 
-    /// Export consistent database snapshots (`core.db`, `queue.db`, and user DBs) for off-site backup.
+    /// Export consistent database snapshots (`core.db`, `kv.db`, `queue.db`, and user DBs) for off-site backup.
     pub async fn create_snapshot(&self, caller: &Caller, out_dir: &Path) -> Result<usize> {
         Self::require_admin(caller)?;
         tokio::fs::create_dir_all(out_dir)
@@ -181,6 +182,7 @@ impl PlatformService {
             .map_err(|e| FerroError::Internal(anyhow::anyhow!("create snapshot dir: {e}")))?;
         self.flush_and_checkpoint().await?;
         self.projects.snapshot_to(&out_dir.join("core.db")).await?;
+        self.kv.snapshot_to(&out_dir.join("kv.db")).await?;
         self.queue.snapshot_to(&out_dir.join("queue.db")).await?;
         self.snapshot_user_dbs(caller, &out_dir.join("dbs")).await
     }
