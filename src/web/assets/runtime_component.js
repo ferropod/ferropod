@@ -418,22 +418,40 @@ class FpRuntimePanel extends HTMLElement {
           host: window.location.host,
           body: txt
         };
-      } else {
-        // Preview simulated invocation (Wasmtime M2 runtime executes live here once enabled)
-        await new Promise((r) => setTimeout(r, 45));
-        this._invoke.result = {
-          status: proj && proj.active_deployment_id ? 200 : 503,
-          latencyMs: (performance.now() - started).toFixed(1),
-          mode: 'm2-preview',
-          host: route ? route.host : (proj ? `${proj.name}.local` : 'unassigned'),
+      } else if (proj) {
+        const res = await fetch('/_api/v1/projects/' + encodeURIComponent(proj.id) + '/invoke', {
+          method: 'POST',
+          headers: this._authHeaders(true),
           body: JSON.stringify({
-            ok: Boolean(proj && proj.active_deployment_id),
-            runtime: 'wasmtime-wasi-http-0.2 (M2 Preview)',
-            project: proj ? proj.name : null,
-            active_deployment: proj ? proj.active_deployment_id : null,
-            request: { method: this._invoke.method, path: this._invoke.path }
-          }, null, 2)
-        };
+            method: this._invoke.method,
+            path: this._invoke.path || '/',
+            body: this._invoke.body || null
+          })
+        });
+        const text = await res.text();
+        let data = null;
+        try {
+          data = JSON.parse(text);
+        } catch (_) {
+          data = null;
+        }
+        if (!res.ok) {
+          this._invoke.result = {
+            status: res.status,
+            latencyMs: (performance.now() - started).toFixed(1),
+            mode: 'live',
+            host: route ? route.host : `${proj.name}.local`,
+            body: (data && data.error) ? data.error : text
+          };
+        } else {
+          this._invoke.result = {
+            status: data.status,
+            latencyMs: typeof data.latency_ms === 'number' ? data.latency_ms.toFixed(1) : (performance.now() - started).toFixed(1),
+            mode: 'live',
+            host: route ? route.host : `${proj.name}.local`,
+            body: data.body || ''
+          };
+        }
       }
     } catch (err) {
       emitToast(this, err.message || t('common.empty'), 'error');
@@ -552,7 +570,7 @@ class FpRuntimePanel extends HTMLElement {
           <div class="panel-header">
             <h3 class="panel-title">
               <span>${esc(t('runtime.invokeTitle'))}</span>
-              <span class="badge badge-warn">M2 Preview</span>
+              <span class="badge badge-success">Live</span>
             </h3>
           </div>
           <div class="panel-body stack gap-sm">
@@ -844,11 +862,12 @@ class FpProjectBindings extends HTMLElement {
 
   _buildWitSnippet(bindingsObj) {
     const lines = [];
-    Object.entries(bindingsObj.db).forEach(([k, v]) => lines.push(`// db binding "${k}" -> ${v}\nlet rows = db::query("${k}", "SELECT * FROM items LIMIT 10", "[]")?;`));
-    Object.entries(bindingsObj.kv).forEach(([k, v]) => lines.push(`// kv binding "${k}" -> ${v}\nlet val = kv::get("${k}", "session:1")?;`));
-    Object.entries(bindingsObj.queue).forEach(([k, v]) => lines.push(`// queue binding "${k}" -> ${v}\nqueue::enqueue("${k}", b"{\\"task\\":1}", None, None, None)?;`));
-    Object.entries(bindingsObj.bucket).forEach(([k, v]) => lines.push(`// bucket binding "${k}" -> ${v}\nlet obj = bucket::get("${k}", "assets/logo.svg")?;`));
+    Object.entries(bindingsObj.db).forEach(([k, v]) => lines.push(`// db binding "${k}" -> ${v}\nlet res = db::query("${k}", "SELECT * FROM items LIMIT ?1", &[SqlValue::Integer(10)])?;`));
+    Object.entries(bindingsObj.kv).forEach(([k, v]) => lines.push(`// kv binding "${k}" -> ${v}\nlet val = kv::get("${k}", "session:1")?;\nlet page = kv::list("${k}", Some("user:"), None, 50)?;`));
+    Object.entries(bindingsObj.queue).forEach(([k, v]) => lines.push(`// queue binding "${k}" -> ${v}\nqueue::enqueue("${k}", b"{\\"task\\":1}", None)?;`));
+    Object.entries(bindingsObj.bucket).forEach(([k, v]) => lines.push(`// bucket binding "${k}" -> ${v}\nlet page = bucket::list("${k}", Some("assets/"), None, 50)?;`));
     Object.entries(bindingsObj.env).forEach(([k, v]) => lines.push(`// env "${k}" = "${v}"\nlet cfg = env::get("${k}");`));
+    lines.push(`// structured host logging\nlog::emit(log::Level::Info, "handled request", None);`);
     return lines.length ? lines.join('\n\n') : '// Add a resource binding or env var above to preview WIT host calls.';
   }
 

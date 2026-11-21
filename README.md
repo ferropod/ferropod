@@ -17,7 +17,7 @@
 Single binary + single `/data` directory. Designed to run comfortably even on a **512 MiB RAM** VPS.
 
 - **Workers & Static Sites**: Wasmtime (`wasi:http/incoming-handler@0.2.0`) with WIT Host Bindings + zero-overhead static asset hosting (SPA fallback, Range, ETag/304).
-- **Turso Database (MVCC + `io_uring`)**: Dedicated isolated databases (`core.db`, `queue.db`, per-project `dbs/<id>.db`, daily `logs/*.db`).
+- **Turso Database (MVCC + `io_uring`)**: Dedicated isolated databases (`core.db`, `kv.db`, `queue.db`, per-project `dbs/<id>.db`, daily `logs/*.db`).
 - **Native Streaming Blob Storage**: 5-endpoint HTTP Blob API (`PUT`/`GET`/`HEAD`/`DELETE`/`LIST`) with `HMAC-SHA256` presigned URLs, content-addressed files in `/data/blobs`, and async GC.
 - **Persistent Queue & KV**: Disk-backed durability with bounded micro-batch ingestion, backpressure (`429`), lease recovery, exponential backoff, DLQ replay, TTL batch cleanup, and ephemeral in-memory KV mode.
 - **Zero-Build Admin UI & Daily Logs**: Embedded HTML/HTMX dashboard at `/_admin`, SSE live tail, and daily rotating Turso log files.
@@ -113,14 +113,14 @@ docker compose up -d --build
 ## Documentation & Contracts
 
 - Architecture Specification: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
-- WIT Host Binding Contract: [wit/platform.wit](wit/platform.wit)
+- WIT Host Binding Contract (`ferropod:platform@0.2.0`): [wit/platform.wit](wit/platform.wit)
 
 ## Roadmap
 
-- **M1 (Current)**: Storage foundation (`turso` MVCC + Blob FS), native Blob API, static site routing, daily logs, maintenance & graceful shutdown, zero-build `/_admin` shell, REST API (`/_api/v1`), CLI.
-- **M2**: Wasmtime AOT `.cwasm` runtime + WIT host bindings + Queue/Cron HTTP dispatcher.
+- **M1 (Done)**: Storage foundation (`turso` MVCC + Blob FS), native Blob API, static site routing, daily logs, maintenance & graceful shutdown, zero-build `/_panel` shell, REST API (`/_api/v1`), CLI.
+- **M2 (Current / Implemented)**: Wasmtime AOT `.cwasm` runtime + precompiled `.cwasm` upload + strongly-typed WIT host bindings (`ferropod:platform@0.2.0`) + `wasi:http/outgoing-handler` + Queue/Cron worker dispatcher.
 - **M3**: Native `rmcp` MCP server (`deploy_stack`, `worker_invoke`, `logs_query`, resource tools, audit trail).
-- **M4**: Hardening, automated health checks & rollback, alerting webhooks, release packaging.
+- **M4**: Hardening, automated health checks & rollback, alerting webhooks, release packaging, and optional `--features search` full-text indexing.
 
 ## License
 

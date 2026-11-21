@@ -52,6 +52,7 @@
 │                                         │                                                       │
 │  Storage Engine (Turso MVCC + Local Streaming FS):                                              │
 │   • core.db (MVCC)    : projects, deployments, routes, secrets (AES-GCM), tokens, kv/ns, blob   │
+│   • kv.db (MVCC)      : isolated user KV entries (persistent + TTL + ephemeral in-memory mode)  │
 │   • queue.db (MVCC)   : queues, jobs (isolated checkpointing & 4-layer peak shaving)            │
 │   • dbs/<id>.db       : per-project isolated databases (LRU connection cache + per-DB DDL lock) │
 │   • logs/logs_YYYY_MM_DD.db : daily rotating log DBs (drop expired files via fs::remove_file)   │
@@ -72,7 +73,8 @@ ferropod/
     ├── lib.rs / main.rs       # CLI entry & runtime bootstrap
     ├── config.rs              # Profile presets (low-mem / standard) & TLS settings
     ├── core/                  # model, traits, crypto (AES-256-GCM / SHA256 / HMAC), PlatformService
-    ├── storage/               # Turso pool & tx retry, core_store, queue_store, user_db, blob_fs
+    ├── runtime/               # Wasmtime AOT .cwasm runtime, WIT v0.2 host bindings, outbound HTTP
+    ├── storage/               # Turso pool & tx retry, core_store, kv_store, queue_store, user_db, blob_fs
     ├── logs/                  # DailyLogStore (bounded mpsc -> SSE broadcast + micro-batch daily DBs)
     ├── dispatcher/            # Background maintenance & graceful shutdown
     ├── gateway/               # Axum router, static hosting, native Blob API, native TLS/ACME, guard
@@ -85,7 +87,8 @@ ferropod/
 
 | Store | Contents | Concurrency Strategy | Retention & Cleanup |
 | --- | --- | --- | --- |
-| `core.db` | Projects, deployments, routes, encrypted secrets, API tokens, KV, Blob metadata & GC queue, user DB registry | Turso MVCC (`BEGIN CONCURRENT` + backoff retry); hot routing table cached in `Arc<RwLock<HashMap>>` | KV without TTL kept indefinitely; KV with TTL logically filtered on read + deleted in `LIMIT 500` batches |
+| `core.db` | Projects, deployments, routes, encrypted secrets, API tokens, KV namespace ownership, Blob metadata & GC queue, user DB registry, cron jobs | Turso MVCC (`BEGIN CONCURRENT` + backoff retry); hot routing table cached in `Arc<RwLock<HashMap>>` | Retained permanently; consistent backups via `ferropod snapshot` |
+| `kv.db` | User KV entries (`kv_entries`) | Turso MVCC isolated from `core.db` + bounded in-memory ephemeral cache | KV without TTL kept indefinitely; KV with TTL logically filtered on read + deleted in `LIMIT 500` batches |
 | `queue.db` | Queues & jobs | Bounded `mpsc(4096)` micro-batch ingestion (`10ms` or `200` items per tx) + `Notify` wakeup + ordered per-queue `claim_batch` | ACK deletes immediately; pending max retention (`7d`); lease reaper (`60s`); DLQ retained (`7d`) then batch deleted |
 | `dbs/<id>.db` | Per-project isolated Turso databases | MVCC concurrent DML; per-DB `RwLock` write lock for DDL; LRU open-DB cap (`10` on `low-mem`) | Retained permanently; consistent backups via `ferropod snapshot` |
 | `logs/logs_YYYY_MM_DD.db` | Access, runtime, queue, cron, audit, system logs | Non-blocking `try_send` (drops `debug` under backpressure) + 500ms/200-entry batch commit | Default `7` days; expired day files deleted directly via `fs::remove_file` |
@@ -113,6 +116,7 @@ ferropod/
 
 ## 7. M2–M4 Evolution
 
-- **M2**: Add `runtime/wasmtime.rs` implementing `WorkerRuntime` with AOT `.cwasm` mmap loading, `StoreLimits`, `epoch_interruption`, WIT host bindings (`wit/platform.wit`), and Queue/Cron HTTP callback dispatch (`POST /_internal/queue/{name}`, `POST /_internal/cron`).
+- **M2 (Implemented)**: `runtime/wasmtime.rs` implementing `WorkerRuntime` with AOT `.cwasm` mmap loading, precompiled `.cwasm` upload, `StoreLimits`, `epoch_interruption`, strongly-typed WIT host bindings (`ferropod:platform@0.2.0` in `wit/platform.wit`), `wasi:http/outgoing-handler`, and direct Queue/Cron execution (`queue-consumer` / `scheduled` with HTTP fallback).
 - **M3**: Mount `rmcp` `StreamableHttpService` at `/mcp` and `ferropod mcp` stdio mode exposing `deploy_stack`, `deployment_promote`, `deployment_rollback`, `worker_invoke`, `logs_query`, and full resource tools.
 - **M4**: Harden health-check auto-rollback, webhook alerting, release binaries, and optional v2 multi-tenant / distributed trait implementations (Turso Embedded Replicas, NATS/Valkey, RustFS/Garage).
+- **Post-M4 (Optional `--features search`)**: Embedded Tantivy / `turso/fts` full-text search kept opt-in to protect the 512 MiB RAM budget by default.

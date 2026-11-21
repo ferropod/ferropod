@@ -12,7 +12,7 @@
 | **交付形态** | 单 Rust 二进制（`ferropod`）+ 单 `/data` 数据目录，内嵌零构建 Web 面板 `/_panel`（兼容 `/_admin`） |
 | **内存预算** | 空载 RSS ~30–60 MiB；`--profile low-mem` 限制并发、用户库 LRU 句柄数与写缓冲，稳定运行于 **512 MiB RAM** |
 | **存储原则** | 磁盘优先（Turso MVCC + 内容寻址本地 Blob FS），内存仅保留有界队列、热路由表与 OS Page Cache |
-| **架构模式** | **1 Core Service + 3 Thin Adapters**：所有业务逻辑、RBAC 鉴权与审计收敛于 `PlatformService`，统一向 REST/Admin、WIT Host（M2）、MCP（M3）暴露 |
+| **架构模式** | **1 Core Service + 3 Thin Adapters**：所有业务逻辑、RBAC 鉴权与审计收敛于 `PlatformService`，统一向 REST/Admin、WIT Host（M2 已落地）、MCP（M3）暴露 |
 | **演进能力** | 存储与运行时全部面向 `src/core/traits.rs` 抽象，单机引擎可在 M4 无痛切换为分布式后端 |
 
 ---
@@ -28,12 +28,13 @@ flowchart TD
   Web --> Svc["PlatformService (Domain + RBAC + Audit)"]
   Blob --> Svc
   Static --> Svc
-  Svc --> CoreDB["core.db (Turso MVCC)"]
+  Svc --> CoreDB["core.db (Turso MVCC 控制面元数据)"]
+  Svc --> KvDB["kv.db (Turso MVCC 独立 KV 存储)"]
   Svc --> QueueDB["queue.db (Turso MVCC + Micro-Batch)"]
   Svc --> UserDB["dbs/<id>.db (Per-Project Turso)"]
   Svc --> LogDB["logs/logs_YYYY_MM_DD.db (Daily Rotating)"]
   Svc --> BlobFS["blobs/<h0>/<h1>/<sha256> (64KiB Stream)"]
-  Svc -. "规划中 / Mock" .-> SearchFS["search/<proj>/<idx>/ (Embedded Tantivy)"]
+  Svc -. "M4 后可选 feature" .-> SearchFS["search/<proj>/<idx>/ (Embedded Tantivy)"]
 ```
 
 ### 代码结构映射
@@ -43,7 +44,8 @@ flowchart TD
 | `src/main.rs` / `src/lib.rs` | CLI 入口（`serve` / `dev` / `token` / `snapshot` / `install-systemd`）与运行时装配 |
 | `src/config.rs` | 配置与内存档位预设（`LowMem` / `Standard`） |
 | `src/core/` | 领域模型 `model.rs`、抽象接口 `traits.rs`、加解密/签名 `crypto.rs`、业务服务 `service/*.rs` |
-| `src/storage/` | Turso 连接池与事务重试 `tx.rs`、`core_store/`、`queue_store.rs`、`user_db.rs`、`log_store.rs`、`blob_fs.rs` |
+| `src/runtime/` | Wasmtime Component AOT `.cwasm` 运行时、WIT v0.2 Host Bindings、出站 HTTP、Epoch 超时与内存限制 |
+| `src/storage/` | Turso 连接池与事务重试 `tx.rs`、`core_store/`、`kv_store.rs`、`queue_store.rs`、`user_db.rs`、`log_store.rs`、`blob_fs.rs` |
 | `src/gateway/` | Axum 路由与 Gzip `router.rs`、静态站点与 Blob API `blob_api.rs`、鉴权与访问日志 `guard.rs`、TLS `tls.rs` |
 | `src/dispatcher/` | 后台维护循环（KV TTL、Blob GC、队列租约回收、日志过期清理）与优雅停机 |
 | `src/update.rs` | 版本检查、Release 查询与自更新逻辑 |
@@ -58,8 +60,8 @@ flowchart TD
 | 模块 | 后台路由 | 后端状态 | 前端状态 | 项目隔离 | 已知缺口 / 备注 |
 | :--- | :--- | :---: | :---: | :---: | :--- |
 | **概览与实时性能监控** | `#/overview` | ✅ | ✅ | ✅ | 真实 `/proc` 指标（RSS / 宿主机内存 / Load / FD / Uptime）+ 5s SVG 实时折线 |
-| **项目管理 (Workspace)** | `#/projects` | ✅ | ✅ | ✅ | 顶层项目隔离容器（路线 B）：聚合部署版本、可视化资源绑定 (Bindings)、关联域名路由与 Secrets |
-| **运行时 (Runtime)** | `#/runtime` | ✅ / 🟡 | ✅ | ✅ | Wasmtime AOT / 静态站点工作负载总览、独立创建运行时与快捷绑定、在线 Invoke 调试台（Wasm 执行待 M2） |
+| **项目管理 (Workspace)** | `#/projects` | ✅ | ✅ | ✅ | 顶层项目隔离容器（路线 B）：聚合部署版本、可视化资源绑定 (Bindings)、内置 rustls / rustls-acme (TLS-ALPN-01) 域名路由与 Secrets |
+| **运行时 (Runtime)** | `#/runtime` | ✅ | ✅ | ✅ | Wasmtime AOT `.cwasm` 运行时、预编译上传、WIT v0.2 Host Bindings、出站 HTTP 与实时 Invoke 调试台 |
 | **Secrets 密钥** | 项目详情内 | ✅ | ✅ | ✅ | AES-256-GCM 静态加密，按 `project_id` 强隔离 |
 | **KV 存储** | `#/kv` | ✅ | ✅ | ✅ | 命名空间创建/列表/删除 + 键值 CRUD + TTL + 内存临时模式 + 原子自增 |
 | **消息队列** | `#/queues` | ✅ | ✅ | ✅ | 队列创建/列表/修改配置/删除 + 微批入队 + 统计 + 巡检 + DLQ 重放 + 清空 |
@@ -69,7 +71,7 @@ flowchart TD
 | **访问令牌 (Tokens)** | `#/tokens` | ✅ | ✅ | ✅ | 仅 `admin` 可见；SHA-256 哈希存储，支持 `admin` / `readonly` / `project:<id>` |
 | **日志中心** | `#/logs` | ✅ | ✅ / 🟡 | ✅ | 实时 SSE 流 + 历史查询已全栈可用；历史全文索引支持 Mock FTS / 实时接口切换 |
 | **备份与快照** | `#/ops` | ✅ | ✅ | ✅ (`admin`) | 一键一致性 Turso 快照（`/data/backups/`）、列表查看、文件清单与删除 |
-| **定时任务 (Cron)** | `#/ops` | ✅ | ✅ | ✅ | 已持久化至 `core.db` (`cron_jobs`)，支持创建/启停/删除/手动触发并写入 `cron` 日志 |
+| **定时任务 (Cron)** | `#/ops` | ✅ | ✅ | ✅ | 持久化至 `core.db` (`cron_jobs`)，支持标准 5 段表达式与 `@every` 定时调度触发 Worker `scheduled` / HTTP 回调，并写入 `cron` 日志 |
 | **系统更新** | `#/update` | ✅ | ✅ | ✅ (`admin`) | 版本信息、Release 列表检查与自更新触发 |
 
 ---
@@ -123,7 +125,7 @@ flowchart TD
 | **系统与监控** | `GET /_healthz`、`GET /_api/v1/status`、`GET /_api/v1/metrics` | 健康检查、会话/资源统计、实时 `/proc` 性能指标 |
 | **系统更新** | `GET /_api/v1/system/info`、`GET /_api/v1/system/update/check`、`GET /_api/v1/system/releases`、`POST /_api/v1/system/update/apply` | 版本信息、检查更新与应用升级（admin） |
 | **备份快照** | `GET/POST /_api/v1/backups`、`DELETE /_api/v1/backups/{name}` | 一致性 Turso 快照管理（admin） |
-| **项目与路由** | `GET/POST /_api/v1/projects`、`GET/DELETE /_api/v1/projects/{id}`、`POST .../promote` / `rollback`、`GET/POST /_api/v1/routes`、`DELETE /_api/v1/routes/{host}` | 项目、部署版本流转、域名路由 |
+| **项目与路由** | `GET/POST /_api/v1/projects`、`PUT .../artifacts/{*path}`、`POST .../invoke`、`GET/DELETE /_api/v1/projects/{id}`、`POST .../promote` / `rollback`、`GET/POST /_api/v1/routes` | 项目、产物上传与 AOT 预编译、Worker 在线调用、部署版本流转、域名路由 |
 | **Secrets & Tokens** | `GET/POST /_api/v1/projects/{id}/secrets`、`DELETE .../secrets/{key}`、`GET/POST /_api/v1/tokens`、`DELETE /_api/v1/tokens/{id}` | 加密密钥与 RBAC 令牌管理 |
 | **KV 存储** | `GET/POST /_api/v1/kv`、`GET/DELETE /_api/v1/kv/{ns}`、`GET/PUT/DELETE /_api/v1/kv/{ns}/{key}`、`POST .../incr` | 命名空间与键值完整 CRUD |
 | **消息队列** | `GET/POST /_api/v1/queues`、`DELETE /_api/v1/queues/{name}`、`POST .../enqueue`、`GET .../stats`、`GET .../inspect`、`POST .../dlq/replay`、`POST .../purge` | 持久化队列、巡检、删除与死信治理 |
@@ -175,6 +177,7 @@ cargo build --release
 - [ ] **前端 `app.js` 进一步模块化**：将旧版 120 KB 单体 `app.js` 拆为 `core.js` + `views/*.js` 按路由懒加载。
 
 ### 里程碑演进（M2 – M4）
-- **M2（运行时与调度）**：Wasmtime AOT `.cwasm` 运行时 + WIT Host Bindings + 队列/Cron HTTP 回调分发。
-- **M3（AI Native & 搜索后端）**：内置 `rmcp` MCP Server（`/mcp` & stdio）+ 开启 `turso/fts` + 实现 `SearchStore`（嵌入式 Tantivy + `tantivy-jieba`）与按天日志 FTS。
+- [x] **M2（运行时与调度，已完成）**：Wasmtime AOT `.cwasm` 运行时 + 预编译上传 + `ferropod:platform@0.2.0` WIT 强类型 Host Bindings + `wasi:http/outgoing-handler` 出站 HTTP + 队列消费与 Cron 定时调度。
+- **M3（AI Native MCP Server）**：内置 `rmcp` MCP Server（`/mcp` & stdio），聚焦 `deploy_stack`、`worker_invoke`、`logs_query` 等核心原语工具。
 - **M4（高可用与演进）**：健康检查自动回滚、Webhook 告警、发布包自动化，以及多节点 trait 后端（Turso Embedded Replicas / NATS / S3 兼容存储）。
+- **M4+（可选 `--features search`）**：开启 `turso/fts` 与嵌入式 Tantivy + `tantivy-jieba` 全文搜索（作为可选编译 feature 挂载，避免默认占用 512 MiB 内存预算）。

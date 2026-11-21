@@ -1209,7 +1209,7 @@ class FpLogSearchPanel extends HTMLElement {
       request_id: '',
       windowSecs: '86400',
       limit: '100',
-      mockFts: true
+      mockFts: false
     };
   }
 
