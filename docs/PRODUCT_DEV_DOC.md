@@ -65,8 +65,8 @@ flowchart TD
 | **KV 存储** | `#/kv` | ✅ | ✅ | ✅ | 命名空间创建/列表/删除 + 键值 CRUD + TTL + 内存临时模式 + 原子自增 |
 | **消息队列** | `#/queues` | ✅ | ✅ | ✅ | 队列创建/列表/修改配置/删除 + 微批入队 + 统计 + 巡检 + DLQ 重放 + 清空 |
 | **对象存储 (Blob)** | `#/blobs` | ✅ | ✅ | ✅ | 5 端点流式存储 + 公开读 + HMAC 预签名 + 删除空 Bucket |
-| **用户数据库 (Turso)** | `#/dbs` | ✅ | ✅ | ✅ | 每库独立物理文件 + 创建/列表/删除 + SQL 控制台 + Schema；🟡 FTS Tab 为 Mock |
-| **全文搜索 (SearchStore)** | `#/search` | 🗺️ | 🟡 | 🟡 | 前端原生 Web Components + Mock 引擎已支持项目隔离、中英文高亮、BM25 与分面 |
+| **用户数据库 (Turso)** | `#/dbs` | ✅ | ✅ | ✅ | 每库独立物理文件 + 创建/列表/删除 + SQL 控制台 + Schema；搜索配置在查询时扫描所选表 |
+| **全文搜索 (SearchStore)** | `#/search` | ✅ | ✅ | ✅ | 索引与文档持久化到 search.db，按文档扫描评分 |
 | **访问令牌 (Tokens)** | `#/tokens` | ✅ | ✅ | ✅ | 仅 `admin` 可见；SHA-256 哈希存储，支持 `admin` / `readonly` / `project:<id>` |
 | **日志中心** | `#/logs` | ✅ | ✅ / 🟡 | ✅ | 实时 SSE 流 + 历史查询已全栈可用；历史全文索引支持 Mock FTS / 实时接口切换 |
 | **备份与快照** | `#/ops` | ✅ | ✅ | ✅ (`admin`) | 一键一致性 Turso 快照（`/data/backups/`）、列表查看、文件清单与删除 |
