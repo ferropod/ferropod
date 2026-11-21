@@ -218,15 +218,7 @@ impl QueueStore for TursoQueueStore {
                 conn.execute(
                     "INSERT INTO queues (name, project_id, consumer_project_id, max_concurrency, rate_limit_per_sec, batch_size, lease_secs, max_attempts, created_at, resource_group)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-                     ON CONFLICT(name) DO UPDATE SET
-                        project_id = excluded.project_id,
-                        consumer_project_id = excluded.consumer_project_id,
-                        max_concurrency = excluded.max_concurrency,
-                        rate_limit_per_sec = excluded.rate_limit_per_sec,
-                        batch_size = excluded.batch_size,
-                        lease_secs = excluded.lease_secs,
-                        max_attempts = excluded.max_attempts,
-                        resource_group = excluded.resource_group",
+",
                     vec![
                         TursoValue::Text(cfg.name),
                         cfg.project_id.map(TursoValue::Text).unwrap_or(TursoValue::Null),
@@ -244,6 +236,34 @@ impl QueueStore for TursoQueueStore {
             }
         })
         .await?;
+        Ok(())
+    }
+
+    async fn update_queue(&self, cfg: QueueConfig) -> Result<()> {
+        let affected = with_retry(|| {
+            let db = self.db.clone();
+            let cfg = cfg.clone();
+            async move {
+                let conn = db.connect()?;
+                conn.execute(
+                    "UPDATE queues SET max_concurrency = ?1, rate_limit_per_sec = ?2,
+                     batch_size = ?3, lease_secs = ?4, max_attempts = ?5
+                     WHERE name = ?6 AND project_id IS ?7",
+                    vec![
+                        TursoValue::Integer(cfg.max_concurrency),
+                        cfg.rate_limit_per_sec.map(TursoValue::Integer).unwrap_or(TursoValue::Null),
+                        TursoValue::Integer(cfg.batch_size),
+                        TursoValue::Integer(cfg.lease_secs),
+                        TursoValue::Integer(cfg.max_attempts),
+                        TursoValue::Text(cfg.name),
+                        cfg.project_id.map(TursoValue::Text).unwrap_or(TursoValue::Null),
+                    ],
+                ).await
+            }
+        }).await?;
+        if affected == 0 {
+            return Err(FerroError::NotFound("queue no longer exists or ownership changed".into()));
+        }
         Ok(())
     }
 

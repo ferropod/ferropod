@@ -197,6 +197,7 @@ pub trait KvStore: Send + Sync {
 #[async_trait]
 pub trait QueueStore: Send + Sync {
     async fn create_queue(&self, cfg: QueueConfig) -> Result<()>;
+    async fn update_queue(&self, cfg: QueueConfig) -> Result<()>;
     async fn get_queue(&self, name: &str) -> Result<Option<QueueConfig>>;
     async fn list_queues(&self) -> Result<Vec<QueueConfig>>;
     async fn delete_queue(&self, name: &str) -> Result<()>;

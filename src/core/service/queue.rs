@@ -133,7 +133,7 @@ impl PlatformService {
         if let Some(v) = max_attempts {
             cfg.max_attempts = v.max(1);
         }
-        self.queue.create_queue(cfg.clone()).await?;
+        self.queue.update_queue(cfg.clone()).await?;
         self.audit(
             cfg.project_id.as_deref(),
             &caller.actor,
