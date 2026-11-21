@@ -16,12 +16,11 @@
 **AI-Native lightweight self-hosted PaaS in Pure Rust.**  
 Single binary + single `/data` directory. Designed to run comfortably even on a **512 MiB RAM** VPS.
 
-- **Workers & Static Sites**: Wasmtime (`wasi:http/incoming-handler@0.2.0`) with WIT Host Bindings + zero-overhead static asset hosting (SPA fallback, Range, ETag/304).
+- **Apps**. Deploy Wasm Workers on Wasmtime, serve static assets with SPA fallback, or combine both in one app. The built-in gateway can forward a path prefix to an HTTP backend on the same origin.
 - **Turso Database (MVCC + `io_uring`)**: Dedicated isolated databases (`core.db`, `kv.db`, `queue.db`, per-project `dbs/<id>.db`, daily `logs/*.db`).
 - **Native Streaming Blob Storage**: 5-endpoint HTTP Blob API (`PUT`/`GET`/`HEAD`/`DELETE`/`LIST`) with `HMAC-SHA256` presigned URLs, content-addressed files in `/data/blobs`, and async GC.
 - **Persistent Queue & KV**: Disk-backed durability with bounded micro-batch ingestion, backpressure (`429`), lease recovery, exponential backoff, DLQ replay, TTL batch cleanup, and ephemeral in-memory KV mode.
-- **Zero-Build Admin UI & Daily Logs**: Embedded HTML/HTMX dashboard at `/_panel`, SSE live tail, and daily rotating Turso log files.
-- **Native MCP Server (M3)**: Built-in `rmcp` tools/resources so AI agents can deploy, test, inspect logs, and promote/rollback safely.
+- **Zero-Build Admin UI & Daily Logs**. Manage apps, deployments, routes, and resources at `/_panel`. Follow logs live via SSE or query the daily Turso log files.
 
 ## One-Click Install & Update
 
@@ -83,7 +82,7 @@ ferropod serve --profile low-mem \
   --http-redirect-https \
   --data-dir ./data
 
-# Local dev environment (.ferropod-dev)
+# Local dev environment (.ferropod-dev; enables --wasm-allow-private-outbound)
 ferropod dev
 
 # Mint an admin API token
@@ -96,29 +95,51 @@ ferropod snapshot --out ./data/backups/manual
 ferropod install-systemd --data-dir /var/lib/ferropod --bind 0.0.0.0:80 --https-bind 0.0.0.0:443 --acme-domain panel.example.com --http-redirect-https
 ```
 
-## Local Static Site with a Business API
+## Deploy an App
 
-The Ferropod gateway can serve a static app and forward its business API
-requests from the same origin. Start your HTTP API, then start Ferropod with
-the app's hostname, path prefix, and backend IP address and port.
+1. Open `/_panel` and sign in with an admin token. Choose **Apps → New App**.
+2. Open the app and choose **New Deployment**. For a static site, upload the
+   built files to a bucket in **Object Storage** and select it under **Assets
+   Bucket**. Set **Assets Prefix** if the files are under a folder such as
+   `dist/`. For a Worker, use **Upload Worker file** to upload a Wasm component
+   (`.wasm` or `.wat`, up to 64 MiB). A deployment can include both.
+3. Choose **Production environment** to activate the deployment, or select the
+   preview environment to test it first. Under **Routes → Add Route**, bind a
+   hostname to the app and its target environment.
+
+### Serve a Static Site with a Local HTTP API
+
+Ferropod can serve the site and forward API requests from the same origin.
+For example, start your HTTP backend on `127.0.0.1:3000`, then start Ferropod
+with the site's hostname and the path prefix you want to forward.
 
 ```bash
 ferropod serve --bind 127.0.0.1:8080 \
   --local-api-host 127.0.0.1 \
-  --local-api-prefix /api \
+  --local-api-prefix /backend \
   --local-api-upstream 127.0.0.1:3000
 ```
 
-In the Ferropod panel, activate the static deployment and add a route for
-`127.0.0.1` to its active environment. Open `http://127.0.0.1:8080` and call the
-API with relative URLs such as `fetch('/api/users')`. The gateway forwards
-`/api` and its subpaths before SPA fallback. The backend receives the full
-request path (including the prefix) and query string.
+Bind hostname `127.0.0.1` to the app's active environment under **Routes**.
+Open `http://127.0.0.1:8080` and call the backend with a relative URL such
+as `fetch('/backend/users')`. The gateway forwards `/backend` and its
+subpaths before SPA fallback, preserving the full path and query string.
 
-The prefix defaults to `/api`. You can also set `FERROPOD_LOCAL_API_HOST`,
-`FERROPOD_LOCAL_API_PREFIX`, and `FERROPOD_LOCAL_API_UPSTREAM` in the server
-environment. The upstream must be reachable from Ferropod. In a container,
-`127.0.0.1` refers to the container's own network namespace.
+Configure one forwarding rule per Ferropod process with startup flags or
+the equivalent environment variables.
+
+| Flag | Environment variable | Value |
+| --- | --- | --- |
+| `--local-api-host` | `FERROPOD_LOCAL_API_HOST` | Hostname from **Routes**, without a port |
+| `--local-api-prefix` | `FERROPOD_LOCAL_API_PREFIX` | Path prefix, defaults to `/api` |
+| `--local-api-upstream` | `FERROPOD_LOCAL_API_UPSTREAM` | HTTP backend IP address and port |
+
+The upstream must be reachable from Ferropod. In a container, `127.0.0.1`
+refers to the container's own network namespace. For Worker isolation, outbound
+`wasi:http` requests from Wasm Workers block private/loopback/local-network IPs
+(and the `--local-api-upstream` address) by default; pass
+`--wasm-allow-private-outbound` (or `FERROPOD_WASM_ALLOW_PRIVATE_OUTBOUND=true`)
+on `ferropod serve` if Workers intentionally call private-network hosts.
 
 ## Docker Deployment
 
@@ -131,7 +152,7 @@ docker compose up -d --build
 
 - Exposes HTTP (`80`, configurable via `FERROPOD_HTTP_PORT` / `FERROPOD_BIND`) and HTTPS (`443`, configurable via `FERROPOD_HTTPS_PORT` / `FERROPOD_HTTPS_BIND`) with persistent state in `./data:/data` and `--profile low-mem`.
 - **Built-in HTTPS**: configure `FERROPOD_ACME_DOMAINS` + `FERROPOD_ACME_EMAIL` for automatic Let's Encrypt (TLS-ALPN-01, cached under `/data/certs`, automatically including active project route domains), or set `FERROPOD_TLS_CERT` + `FERROPOD_TLS_KEY` for manual PEM certificates. You can also place `ferropod` behind Cloudflare Tunnel / Proxy or an existing reverse proxy if preferred.
-- **Domain Binding**: bind any domain to a project/environment via `/_panel` (Routes) or `POST /_api/v1/routes`.
+- **Domain Binding**: bind a hostname to an app's production or preview environment via **Routes** or `POST /_api/v1/routes`.
 - Note: Docker's default seccomp profile blocks `io_uring` syscalls on some hosts; Turso automatically falls back to standard async file I/O when `io_uring` is restricted, or you can relax seccomp in trusted environments.
 
 ## Documentation & Contracts
@@ -142,25 +163,21 @@ docker compose up -d --build
 ## Roadmap
 
 - **M1 (Done)**: Storage foundation (`turso` MVCC + Blob FS), native Blob API, static site routing, daily logs, maintenance & graceful shutdown, zero-build `/_panel` shell, REST API (`/_api/v1`), CLI.
-- **M2 (Current / Implemented)**: Wasmtime AOT `.cwasm` runtime + server-side Wasm compilation + strongly-typed WIT host bindings (`ferropod:platform@0.2.0`) + `wasi:http/outgoing-handler` + Queue/Cron worker dispatcher.
+- **M2 (Implemented)**: Wasmtime AOT `.cwasm` runtime, server-side Wasm compilation, strongly typed WIT host bindings (`ferropod:platform@0.2.0`), `wasi:http/outgoing-handler`, Queue/Cron worker dispatch, and built-in HTTP API forwarding for apps.
 - **M3**: Native `rmcp` MCP server (`deploy_stack`, `worker_invoke`, `logs_query`, resource tools, audit trail).
 - **M4**: Hardening, automated health checks & rollback, alerting webhooks, release packaging, and optional `--features search` full-text indexing.
 
-## License
-
-Licensed under the [Apache License, Version 2.0](LICENSE).
-
-### Deploy from a Git CI pipeline
+## Deploy from a Git CI Pipeline
 
 The deployment dialog accepts a built `.wasm` or `.wat` component (up to 64 MiB).
 For Git-triggered deployments, let the Git provider run the build and then use
 `scripts/deploy-wasm.py`. The script uses Python 3 and `FERROPOD_TOKEN`; it uploads
 the component with a unique name and creates a deployment, retaining the current
-runtime bindings, environment, static assets and cron declarations. By default it
-deploys to preview; use `--target prod` only when automatic production activation
-is intended, or `--target ready` to create a version without activation.
+app's bindings, environment, static assets, and cron declarations. It deploys to
+preview by default. Use `--target prod` to activate the deployment in production
+or `--target ready` to create a version for later activation.
 
-Create a token scoped to the runtime in the management console and store it as a
+Create a token scoped to the app in the management console and store it as a
 masked CI secret. Never put it in the repository or a command-line argument. The
 Ferropod URL must be reachable by the CI runner over HTTPS (HTTP is accepted only
 for localhost testing). Failed uploads or deployment validation cause a nonzero
@@ -195,7 +212,7 @@ jobs:
         run: >-
           python3 scripts/deploy-wasm.py
           --url '${{ vars.FERROPOD_URL }}'
-          --runtime '${{ vars.FERROPOD_RUNTIME }}'
+          --app '${{ vars.FERROPOD_APP }}'
           --file target/wasm32-wasip2/release/worker.wasm
           --target preview
 ```
@@ -204,6 +221,9 @@ A private GitHub repository can use `actions/checkout` with the workflow's
 read-only `GITHUB_TOKEN` for that repository. If the build needs another private
 repository, configure a read-only deploy key or appropriately scoped CI secret
 for that checkout. Other Git providers can run the same script from their push
-pipeline; Git credentials stay with the provider and are not sent to Ferropod.
-Use the build steps appropriate for your source repository: the artifact must be
-a component compatible with Ferropod's Worker interfaces, not a core Wasm module.
+pipeline. Git credentials stay with the provider. Use your project's build steps
+to produce a Wasm component compatible with Ferropod's Worker interfaces.
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE).
