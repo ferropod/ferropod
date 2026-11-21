@@ -360,11 +360,15 @@ class FpOpsCenter extends HTMLElement {
         headers: this._authHeaders()
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const result = await res.json();
+      if (result.last_status && result.last_status.startsWith('error:')) {
+        throw new Error(result.last_status);
+      }
       emitToast(this, t('ops.cronTriggered', { name: job.name }), 'success');
-      await this.loadCrons();
     } catch (err) {
       emitToast(this, err.message, 'error');
     }
+    await this.loadCrons();
   }
 
   async deleteCron(id) {

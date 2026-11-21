@@ -284,14 +284,26 @@ impl PlatformService {
                                 .with_cron_job(job.clone());
                             if let Err(e) = self.runtime.handle_cron(ctx, &job.schedule).await {
                                 let msg = e.to_string();
-                                status = format!("error: {msg}");
-                                level = "error";
                                 err_msg = Some(msg);
                             }
+                        } else {
+                            err_msg = Some("active deployment has no worker artifact".into());
                         }
+                    } else {
+                        err_msg = Some("active deployment was not found".into());
                     }
+                } else {
+                    err_msg = Some("runtime has no active deployment".into());
                 }
+            } else {
+                err_msg = Some("runtime was not found".into());
             }
+        } else {
+            err_msg = Some("cron job has no runtime".into());
+        }
+        if let Some(msg) = &err_msg {
+            status = format!("error: {msg}");
+            level = "error";
         }
 
         job.last_run_at = Some(now);

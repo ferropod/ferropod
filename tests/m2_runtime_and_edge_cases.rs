@@ -694,4 +694,45 @@ async fn cron_matcher_and_scheduled_worker_execution() {
 
     let triggered = h.svc.trigger_cron_job(&h.admin, &job.id).await.unwrap();
     assert_eq!(triggered.last_status.as_deref(), Some("ok"));
+
+    let no_runtime = h
+        .svc
+        .create_cron_job(&h.admin, "no-runtime", None, "@every 60s", "/task")
+        .await
+        .unwrap();
+    let result = h
+        .svc
+        .trigger_cron_job(&h.admin, &no_runtime.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        result.last_status.as_deref(),
+        Some("error: cron job has no runtime")
+    );
+
+    let empty = h
+        .svc
+        .create_project(&h.admin, "empty-cron", None)
+        .await
+        .unwrap();
+    let no_deployment = h
+        .svc
+        .create_cron_job(
+            &h.admin,
+            "no-deployment",
+            Some(&empty.id),
+            "@every 60s",
+            "/task",
+        )
+        .await
+        .unwrap();
+    let result = h
+        .svc
+        .trigger_cron_job(&h.admin, &no_deployment.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        result.last_status.as_deref(),
+        Some("error: runtime has no active deployment")
+    );
 }
