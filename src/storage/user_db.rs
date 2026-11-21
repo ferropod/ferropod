@@ -9,7 +9,7 @@ use tokio::sync::{Mutex, RwLock};
 use turso::{transaction::TransactionBehavior, Database, Value as TursoValue};
 
 use crate::core::model::{FerroError, QueryResult, Result, SqlValue};
-use crate::core::traits::DbManager;
+use crate::core::traits::{DbManager, RowVisitor};
 use crate::storage::tx::{
     checkpoint_db, connect_db, copy_db_with_sidecars, map_turso_err, open_turso_db,
     sql_value_to_turso, turso_value_to_json, with_retry,
@@ -376,6 +376,25 @@ impl DbManager for TursoUserDbManager {
             columns,
             rows: out_rows,
         })
+    }
+
+    async fn visit_rows(&self, db_id: &str, sql: &str, visitor: &mut RowVisitor<'_>) -> Result<()> {
+        validate_read_only_sql(sql)?;
+        let (db, ddl_lock) = self.get_or_open(db_id).await?;
+        let _read_guard = ddl_lock.read().await;
+        let conn = connect_db(&db)?;
+        let mut rows = conn.query(sql, ()).await.map_err(map_turso_err)?;
+        let columns = rows.column_names();
+        while let Some(row) = rows.next().await.map_err(map_turso_err)? {
+            let mut values = Vec::with_capacity(columns.len());
+            for i in 0..columns.len() {
+                values.push(turso_value_to_json(
+                    row.get_value(i).map_err(map_turso_err)?,
+                ));
+            }
+            visitor(&columns, values);
+        }
+        Ok(())
     }
 
     async fn execute_batch(&self, db_id: &str, stmts: Vec<(String, Vec<SqlValue>)>) -> Result<u64> {

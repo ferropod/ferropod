@@ -275,11 +275,20 @@ pub trait ObjectStore: Send + Sync {
     async fn run_gc_batch(&self, limit: usize) -> Result<u64>;
 }
 
+pub type RowVisitor<'a> = dyn FnMut(&[String], Vec<serde_json::Value>) + Send + 'a;
+
 #[async_trait]
 pub trait DbManager: Send + Sync {
     async fn create_db(&self, db_id: &str) -> Result<()>;
     async fn delete_db(&self, db_id: &str) -> Result<()>;
     async fn query(&self, db_id: &str, sql: &str, params: Vec<SqlValue>) -> Result<QueryResult>;
+    async fn visit_rows(&self, db_id: &str, sql: &str, visitor: &mut RowVisitor<'_>) -> Result<()> {
+        let result = self.query(db_id, sql, Vec::new()).await?;
+        for row in result.rows {
+            visitor(&result.columns, row);
+        }
+        Ok(())
+    }
     async fn execute_batch(&self, db_id: &str, stmts: Vec<(String, Vec<SqlValue>)>) -> Result<u64>;
     async fn schema(&self, db_id: &str) -> Result<String>;
     async fn snapshot_to(&self, db_id: &str, dest_path: &Path) -> Result<()>;

@@ -2145,3 +2145,63 @@ async fn search_considers_all_documents_and_keeps_best_matches() {
     assert_eq!(result["total"], 1);
     assert_eq!(result["hits"][0]["doc"]["id"], "doc-0");
 }
+
+#[tokio::test]
+async fn database_search_scans_beyond_five_hundred_rows() {
+    let h = setup_harness().await;
+    let app = build_router(h.svc.clone());
+    let token = Some(h.admin_token.as_str());
+    let (status, body) = json_req(
+        &app,
+        Method::POST,
+        "/_api/v1/dbs",
+        token,
+        Some(serde_json::json!({"name":"search-large-db"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let db: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let path = format!("/_api/v1/dbs/{}", db["id"].as_str().unwrap());
+    let mut statements = vec![
+        serde_json::json!({"sql":"CREATE TABLE entries (id INTEGER PRIMARY KEY, title TEXT)", "params":[]}),
+    ];
+    for i in 0..505 {
+        let text = if i == 504 {
+            "last-record-marker"
+        } else {
+            "other"
+        };
+        statements.push(serde_json::json!({"sql":"INSERT INTO entries (id, title) VALUES (?1, ?2)", "params":[i, text]}));
+    }
+    let (status, _) = json_req(
+        &app,
+        Method::POST,
+        &format!("{path}/execute"),
+        token,
+        Some(serde_json::json!({"statements":statements})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = json_req(
+        &app,
+        Method::POST,
+        &format!("{path}/fts"),
+        token,
+        Some(serde_json::json!({"name":"entries_fts","table":"entries","columns":["title"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, body) = json_req(
+        &app,
+        Method::POST,
+        &format!("{path}/fts/entries_fts/query"),
+        token,
+        Some(serde_json::json!({"query":"last-record-marker"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(result["rows"].as_array().unwrap().len(), 1);
+    assert_eq!(result["rows"][0]["row"]["id"], 504);
+    assert_eq!(result["index"]["rows_indexed"], 505);
+}

@@ -346,46 +346,49 @@ impl PlatformService {
             )
         };
 
-        let mut hits: Vec<DbFtsHit> = Vec::new();
-        if valid_sql_ident(&idx.table) {
-            let select_sql = format!("SELECT * FROM \"{}\"", idx.table);
-            {
-                let qr = self.db.query(&meta.id, &select_sql, vec![]).await?;
-                idx.rows_indexed = qr.rows.len();
-                for row_vals in qr.rows {
-                    let mut full_obj = serde_json::Map::new();
-                    let mut indexed_parts = Vec::new();
-                    for (col_name, val) in qr.columns.iter().zip(row_vals) {
-                        if idx.columns.iter().any(|c| c.eq_ignore_ascii_case(col_name)) {
-                            match &val {
-                                serde_json::Value::String(s) => indexed_parts.push(s.clone()),
-                                serde_json::Value::Null => {}
-                                other => indexed_parts.push(other.to_string()),
-                            }
-                        }
-                        full_obj.insert(col_name.clone(), val);
-                    }
-                    let score_doc = serde_json::json!({
-                        "title": full_obj.get("title").cloned().unwrap_or(serde_json::Value::Null),
-                        "body": indexed_parts.join(" "),
-                    });
-                    let score = score_json_document(&score_doc, q, false);
-                    if score > 0.0 {
-                        hits.push(DbFtsHit {
-                            row: serde_json::Value::Object(full_obj),
-                            score,
-                        });
-                    }
-                }
-            }
+        if !valid_sql_ident(&idx.table) {
+            return Err(FerroError::InvalidArgument(
+                "invalid FTS table identifier".into(),
+            ));
         }
-
-        hits.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        hits.truncate(20);
+        let mut hits: Vec<DbFtsHit> = Vec::new();
+        let mut rows_indexed = 0usize;
+        let select_sql = format!("SELECT * FROM \"{}\"", idx.table);
+        self.db
+            .visit_rows(&meta.id, &select_sql, &mut |columns, values| {
+                rows_indexed += 1;
+                let mut full_obj = serde_json::Map::new();
+                let mut indexed_parts = Vec::new();
+                for (col_name, val) in columns.iter().zip(values) {
+                    if idx.columns.iter().any(|c| c.eq_ignore_ascii_case(col_name)) {
+                        match &val {
+                            serde_json::Value::String(value) => indexed_parts.push(value.clone()),
+                            serde_json::Value::Null => {}
+                            other => indexed_parts.push(other.to_string()),
+                        }
+                    }
+                    full_obj.insert(col_name.clone(), val);
+                }
+                let score_doc = serde_json::json!({
+                    "title": full_obj.get("title").cloned().unwrap_or(serde_json::Value::Null),
+                    "body": indexed_parts.join(" "),
+                });
+                let score = score_json_document(&score_doc, q, false);
+                if score > 0.0 {
+                    hits.push(DbFtsHit {
+                        row: serde_json::Value::Object(full_obj),
+                        score,
+                    });
+                    hits.sort_by(|a, b| {
+                        b.score
+                            .partial_cmp(&a.score)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    hits.truncate(20);
+                }
+            })
+            .await?;
+        idx.rows_indexed = rows_indexed;
 
         Ok(DbFtsQueryResult {
             index: idx,
