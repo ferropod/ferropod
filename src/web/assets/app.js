@@ -1626,10 +1626,12 @@
 
   async function renderQueues(fetchData) {
     var root = $('view-root');
+    if (state.currentRoute !== 'queues') return;
     if (fetchData) {
       root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
       try {
         var res = await Promise.all([api('/_api/v1/queues'), api('/_api/v1/runtimes')]);
+        if (state.currentRoute !== 'queues') return;
         state.queues = res[0] || [];
         state.projects = res[1] || [];
         if (!state.selectedQueue && state.queues.length) {
@@ -1639,10 +1641,11 @@
           await loadSelectedQueue();
         }
       } catch (e) {
-        root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+        if (state.currentRoute === 'queues') root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
         return;
       }
     }
+    if (state.currentRoute !== 'queues') return;
 
     var qCfg = state.queues.find(function (q) { return q.name === state.selectedQueue; });
     var canWriteQ = qCfg && canWriteResource(qCfg.project_id);
@@ -1836,10 +1839,12 @@
 
   async function loadSelectedQueue() {
     var name = state.selectedQueue;
+    var status = state.queueInspectStatus;
     var res = await Promise.all([
       api('/_api/v1/queues/' + enc(name) + '/stats'),
-      api('/_api/v1/queues/' + enc(name) + '/inspect?status=' + enc(state.queueInspectStatus) + '&limit=50')
+      api('/_api/v1/queues/' + enc(name) + '/inspect?status=' + enc(status) + '&limit=50')
     ]);
+    if (state.selectedQueue !== name || state.queueInspectStatus !== status) return;
     state.queueStats = res[0];
     state.queueJobs = res[1] || [];
   }
