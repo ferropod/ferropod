@@ -2103,3 +2103,45 @@ async fn scoped_queue_creation_cannot_replace_another_project_queue() {
         Some(a.id.as_str())
     );
 }
+
+#[tokio::test]
+async fn search_considers_all_documents_and_keeps_best_matches() {
+    let h = setup_harness().await;
+    let app = build_router(h.svc.clone());
+    let token = Some(h.admin_token.as_str());
+    let (status, bytes) = json_req(
+        &app,
+        Method::POST,
+        "/_api/v1/search",
+        token,
+        Some(serde_json::json!({"name": "large-search"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let index: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let path = format!("/_api/v1/search/{}", index["id"].as_str().unwrap());
+    for i in 0..505 {
+        let title = if i == 0 { "unique-marker" } else { "other" };
+        let (status, _) = json_req(
+            &app,
+            Method::POST,
+            &format!("{path}/docs"),
+            token,
+            Some(serde_json::json!({"id": format!("doc-{i}"), "title": title})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+    let (status, bytes) = json_req(
+        &app,
+        Method::POST,
+        &format!("{path}/query"),
+        token,
+        Some(serde_json::json!({"query": "unique-marker", "limit": 1})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let result: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["total"], 1);
+    assert_eq!(result["hits"][0]["doc"]["id"], "doc-0");
+}

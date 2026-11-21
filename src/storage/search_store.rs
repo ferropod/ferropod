@@ -635,79 +635,89 @@ impl SearchStore for TursoSearchStore {
             .get_index(index_id)
             .await?
             .ok_or_else(|| FerroError::NotFound(format!("search index '{index_id}'")))?;
-        let docs = self.list_docs(&meta.id).await?;
         let limit = input.limit.unwrap_or(20).clamp(1, 200);
-
-        let mut scored: Vec<(serde_json::Value, f64)> = Vec::new();
-        for doc in docs {
-            let s = score_json_document(&doc, &input.query, input.fuzzy);
-            if s > 0.0 {
-                scored.push((doc, s));
-            }
-        }
-
+        let conn = connect_db(&self.db)?;
+        let mut rows = conn
+            .query(
+                "SELECT doc_json FROM search_docs WHERE index_id = ?1 ORDER BY updated_at DESC",
+                [meta.id.as_str()],
+            )
+            .await
+            .map_err(map_turso_err)?;
         let mut facets: HashMap<String, HashMap<String, usize>> = HashMap::new();
-        for field in meta.schema.iter().filter(|f| f.field_type == "facet") {
-            let mut counts: HashMap<String, usize> = HashMap::new();
-            for (doc, _) in &scored {
-                if let Some(val) = doc.get(&field.name) {
-                    let s_opt = match val {
-                        serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
-                        serde_json::Value::Number(n) => Some(n.to_string()),
-                        serde_json::Value::Bool(b) => Some(b.to_string()),
-                        _ => None,
-                    };
-                    if let Some(key) = s_opt {
-                        *counts.entry(key).or_insert(0) += 1;
+        let mut hits: Vec<SearchHit> = Vec::new();
+        let mut total = 0usize;
+
+        while let Some(row) = rows.next().await.map_err(map_turso_err)? {
+            let raw: String = row.get(0).map_err(map_turso_err)?;
+            let doc: serde_json::Value = serde_json::from_str(&raw)
+                .map_err(|e| FerroError::Internal(anyhow::anyhow!("decode search doc: {e}")))?;
+            let score = score_json_document(&doc, &input.query, input.fuzzy);
+            if score <= 0.0 {
+                continue;
+            }
+            for field in meta
+                .schema
+                .iter()
+                .filter(|field| field.field_type == "facet")
+            {
+                let key = match doc.get(&field.name) {
+                    Some(serde_json::Value::String(value)) if !value.is_empty() => {
+                        Some(value.clone())
                     }
+                    Some(serde_json::Value::Number(value)) => Some(value.to_string()),
+                    Some(serde_json::Value::Bool(value)) => Some(value.to_string()),
+                    _ => None,
+                };
+                if let Some(key) = key {
+                    *facets
+                        .entry(field.name.clone())
+                        .or_default()
+                        .entry(key)
+                        .or_default() += 1;
                 }
             }
-            if !counts.is_empty() {
-                facets.insert(field.name.clone(), counts);
+            let matches = input.facets.iter().all(|(key, expected)| {
+                if expected.is_empty() {
+                    return true;
+                }
+                match doc.get(key) {
+                    Some(serde_json::Value::String(value)) => value == expected,
+                    Some(serde_json::Value::Number(value)) => value.to_string() == *expected,
+                    Some(serde_json::Value::Bool(value)) => value.to_string() == *expected,
+                    _ => false,
+                }
+            });
+            if !matches {
+                continue;
             }
-        }
-
-        let mut filtered: Vec<(serde_json::Value, f64)> = scored
-            .into_iter()
-            .filter(|(doc, _)| {
-                input.facets.iter().all(|(k, expected)| {
-                    if expected.is_empty() {
-                        return true;
-                    }
-                    match doc.get(k) {
-                        Some(serde_json::Value::String(s)) => s == expected,
-                        Some(serde_json::Value::Number(n)) => n.to_string() == *expected,
-                        Some(serde_json::Value::Bool(b)) => b.to_string() == *expected,
-                        _ => false,
-                    }
-                })
-            })
-            .collect();
-
-        if input.sort.as_deref() == Some("updated_desc") {
-            filtered.sort_by(|a, b| {
-                let ta = a.0.get("updated_at").and_then(|v| v.as_i64()).unwrap_or(0);
-                let tb = b.0.get("updated_at").and_then(|v| v.as_i64()).unwrap_or(0);
-                tb.cmp(&ta)
+            total += 1;
+            hits.push(SearchHit { doc, score });
+            hits.sort_by(|a, b| {
+                let updated = || {
+                    let a_time = a
+                        .doc
+                        .get("updated_at")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    let b_time = b
+                        .doc
+                        .get("updated_at")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    b_time.cmp(&a_time)
+                };
+                if input.sort.as_deref() == Some("updated_desc") {
+                    updated()
+                } else {
+                    b.score
+                        .partial_cmp(&a.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(updated)
+                }
             });
-        } else {
-            filtered.sort_by(|a, b| {
-                b.1.partial_cmp(&a.1)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| {
-                        let ta = a.0.get("updated_at").and_then(|v| v.as_i64()).unwrap_or(0);
-                        let tb = b.0.get("updated_at").and_then(|v| v.as_i64()).unwrap_or(0);
-                        tb.cmp(&ta)
-                    })
-            });
+            hits.truncate(limit);
         }
-
-        let total = filtered.len();
-        let hits = filtered
-            .into_iter()
-            .take(limit)
-            .map(|(doc, score)| SearchHit { doc, score })
-            .collect();
 
         Ok(SearchQueryResult {
             hits,
