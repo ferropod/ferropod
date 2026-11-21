@@ -125,3 +125,61 @@ docker compose up -d --build
 ## License
 
 Licensed under the [Apache License, Version 2.0](LICENSE).
+
+### Deploy from a Git CI pipeline
+
+The deployment dialog accepts a built `.wasm` or `.wat` component (up to 64 MiB).
+For Git-triggered deployments, let the Git provider run the build and then use
+`scripts/deploy-wasm.py`. The script uses Python 3 and `FERROPOD_TOKEN`; it uploads
+the component with a unique name and creates a deployment, retaining the current
+runtime bindings, environment, static assets and cron declarations. By default it
+deploys to preview; use `--target prod` only when automatic production activation
+is intended, or `--target ready` to create a version without activation.
+
+Create a token scoped to the runtime in the management console and store it as a
+masked CI secret. Never put it in the repository or a command-line argument. The
+Ferropod URL must be reachable by the CI runner over HTTPS (HTTP is accepted only
+for localhost testing). Failed uploads or deployment validation cause a nonzero
+exit status. Uploaded artifacts can remain on disk if a later deployment fails.
+
+For example, copy `scripts/deploy-wasm.py` into the application's repository and
+adapt the build command and artifact path to its Wasm component:
+
+```yaml
+name: Build and deploy
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ferropod-preview
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+      - run: cargo build --release --target wasm32-wasip2
+      - name: Deploy preview
+        env:
+          FERROPOD_TOKEN: ${{ secrets.FERROPOD_TOKEN }}
+        run: >-
+          python3 scripts/deploy-wasm.py
+          --url '${{ vars.FERROPOD_URL }}'
+          --runtime '${{ vars.FERROPOD_RUNTIME }}'
+          --file target/wasm32-wasip2/release/worker.wasm
+          --target preview
+```
+
+A private GitHub repository can use `actions/checkout` with the workflow's
+read-only `GITHUB_TOKEN` for that repository. If the build needs another private
+repository, configure a read-only deploy key or appropriately scoped CI secret
+for that checkout. Other Git providers can run the same script from their push
+pipeline; Git credentials stay with the provider and are not sent to Ferropod.
+Use the build steps appropriate for your source repository: the artifact must be
+a component compatible with Ferropod's Worker interfaces, not a core Wasm module.
