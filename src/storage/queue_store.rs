@@ -75,6 +75,8 @@ fn row_to_queue(row: &turso::Row) -> Result<QueueConfig> {
     })
 }
 
+const MAX_JOB_DELAY_SECS: u64 = 365 * 86_400;
+
 struct IngestItem {
     queue: String,
     payload: Vec<u8>,
@@ -172,8 +174,8 @@ async fn insert_batch_with_retry(db: &Database, batch: &[IngestItem]) -> Result<
             let mut out = Vec::with_capacity(batch.len());
 
             for item in batch {
-                let delay_ms = item.opts.delay_secs.unwrap_or(0) as i64 * 1_000;
-                let run_at = item.created_ms + delay_ms;
+                let delay_secs = item.opts.delay_secs.unwrap_or(0).min(MAX_JOB_DELAY_SECS) as i64;
+                let run_at = item.created_ms.saturating_add(delay_secs * 1_000);
                 let priority = item.opts.priority.unwrap_or(0) as i64;
                 let max_attempts = item.opts.max_attempts.unwrap_or(5) as i64;
                 let dedup = item.opts.dedup_key.clone();
@@ -421,7 +423,8 @@ impl QueueStore for TursoQueueStore {
         err: &str,
     ) -> Result<Option<JobStatus>> {
         let now_ms = Utc::now().timestamp_millis();
-        let next_run_at = now_ms + retry_after_secs as i64 * 1_000;
+        let bounded_secs = retry_after_secs.min(MAX_JOB_DELAY_SECS) as i64;
+        let next_run_at = now_ms.saturating_add(bounded_secs * 1_000);
         let err_s = err.to_string();
         with_retry(|| {
             let db = self.db.clone();

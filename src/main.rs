@@ -324,8 +324,15 @@ async fn async_main(cli: Cli) -> Result<()> {
                 );
                 let svc = init_service(&cfg).await?;
                 let parsed_scope = TokenScope::parse(&scope)?;
-                let expires_at =
-                    expires_in_days.map(|d| chrono::Utc::now().timestamp() + d * 86_400);
+                let expires_at = match expires_in_days {
+                    Some(days) => {
+                        if !(1..=36_500).contains(&days) {
+                            anyhow::bail!("expires_in_days must be between 1 and 36500");
+                        }
+                        Some(chrono::Utc::now().timestamp().saturating_add(days * 86_400))
+                    }
+                    None => None,
+                };
                 let caller = Caller::system("cli");
                 let (meta, raw) = svc
                     .create_token(&caller, &name, parsed_scope, expires_at)

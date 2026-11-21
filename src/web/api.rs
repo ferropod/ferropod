@@ -626,11 +626,19 @@ async fn create_backup(
         )));
     }
     let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
-    let name = match req.label.as_deref().and_then(sanitize_backup_segment) {
+    let base_name = match req.label.as_deref().and_then(sanitize_backup_segment) {
         Some(lbl) => format!("snap_{ts}_{lbl}"),
         None => format!("snap_{ts}"),
     };
     let backups_root = svc.config().data_dir.join("backups");
+    let name = if backups_root.join(&base_name).exists() {
+        format!(
+            "{base_name}_{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..6]
+        )
+    } else {
+        base_name
+    };
     let out_dir = backups_root.join(&name);
     svc.create_snapshot(&caller, &out_dir)
         .await
@@ -668,10 +676,20 @@ async fn delete_backup(
         )));
     }
     let target = svc.config().data_dir.join("backups").join(&name);
-    if !target.exists() {
-        return Err(ApiError(FerroError::NotFound(format!(
-            "backup '{name}' not found"
-        ))));
+    let meta = tokio::fs::symlink_metadata(&target)
+        .await
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => {
+                ApiError(FerroError::NotFound(format!("backup '{name}' not found")))
+            }
+            _ => ApiError(FerroError::Internal(anyhow::anyhow!(
+                "inspect backup '{name}': {e}"
+            ))),
+        })?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return Err(ApiError(FerroError::InvalidArgument(
+            "invalid backup directory".into(),
+        )));
     }
     tokio::fs::remove_dir_all(&target)
         .await
@@ -983,9 +1001,17 @@ async fn create_token(
 ) -> Result<impl IntoResponse, ApiError> {
     let caller = authenticate_caller(&svc, &headers, None).await?;
     let scope = TokenScope::parse(&req.scope).map_err(ApiError)?;
-    let expires_at = req
-        .expires_in_days
-        .map(|d| Utc::now().timestamp() + d * 86_400);
+    let expires_at = match req.expires_in_days {
+        Some(days) => {
+            if !(1..=36_500).contains(&days) {
+                return Err(ApiError(FerroError::InvalidArgument(
+                    "expires_in_days must be between 1 and 36500".into(),
+                )));
+            }
+            Some(Utc::now().timestamp().saturating_add(days * 86_400))
+        }
+        None => None,
+    };
     let (meta, raw) = svc
         .create_token(&caller, &req.name, scope, expires_at)
         .await

@@ -64,7 +64,7 @@ impl ProjectStore for TursoCoreStore {
         let mut rows = conn
             .query(
                 "SELECT id, name, active_deployment_id, preview_deployment_id, max_concurrency, access_policy_json, health_check_path, created_at, updated_at, resource_group
-                 FROM projects WHERE id = ?1 OR name = ?1 LIMIT 1",
+                 FROM projects WHERE id = ?1 OR name = ?1 ORDER BY CASE WHEN id = ?1 THEN 0 ELSE 1 END LIMIT 1",
                 [id_or_name],
             )
             .await
@@ -105,6 +105,11 @@ impl ProjectStore for TursoCoreStore {
                     .await?;
                 tx.execute(
                     "DELETE FROM production_history WHERE project_id = ?1",
+                    [id_s.as_str()],
+                )
+                .await?;
+                tx.execute(
+                    "DELETE FROM cron_jobs WHERE project_id = ?1",
                     [id_s.as_str()],
                 )
                 .await?;

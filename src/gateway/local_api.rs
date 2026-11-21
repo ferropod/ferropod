@@ -26,7 +26,7 @@ pub(super) struct LocalApiProxy {
     client: Client<HttpConnector, Body>,
 }
 
-pub(super) fn has_unsafe_path_segments(path: &str) -> bool {
+pub(crate) fn has_unsafe_path_segments(path: &str) -> bool {
     if !path.starts_with('/') || path.contains('\\') || path.contains('\0') {
         return true;
     }
@@ -155,7 +155,7 @@ fn is_protected_header(name: &HeaderName) -> bool {
     )
 }
 
-fn strip_hop_headers(headers: &mut HeaderMap) {
+pub(super) fn strip_hop_headers(headers: &mut HeaderMap) {
     let connection_headers: Vec<_> = headers
         .get_all(header::CONNECTION)
         .iter()

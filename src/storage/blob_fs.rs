@@ -44,6 +44,11 @@ impl FsBlobStore {
     fn validate_name(name: &str) -> Result<()> {
         if name.is_empty()
             || name.len() > 128
+            || name == "."
+            || name == ".."
+            || name.starts_with('.')
+            || name.ends_with('.')
+            || name.contains("..")
             || !name
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
@@ -55,14 +60,24 @@ impl FsBlobStore {
         Ok(())
     }
 
-    fn normalize_key(key: &str) -> Result<String> {
+    pub(crate) fn validate_object_key(key: &str) -> Result<String> {
         let trimmed = key.trim_start_matches('/');
-        if trimmed.is_empty() || trimmed.contains('\0') || trimmed.split('/').any(|s| s == "..") {
+        if trimmed.is_empty()
+            || trimmed.contains('\0')
+            || trimmed.contains('\\')
+            || trimmed
+                .split('/')
+                .any(|s| s.is_empty() || s == "." || s == "..")
+        {
             return Err(FerroError::InvalidArgument(format!(
                 "invalid object key '{key}'"
             )));
         }
         Ok(trimmed.to_string())
+    }
+
+    fn normalize_key(key: &str) -> Result<String> {
+        Self::validate_object_key(key)
     }
 
     fn disk_path(&self, rel_path: &str) -> PathBuf {

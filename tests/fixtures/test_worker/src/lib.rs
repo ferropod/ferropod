@@ -205,6 +205,26 @@ impl HttpGuest for TestWorker {
             return;
         }
 
+        if path_only == "/api/data" {
+            send_response(response_out, 200, "application/json", b"{\"ok\":true}");
+            return;
+        }
+
+        if path_only == "/api/missing" {
+            send_response(
+                response_out,
+                404,
+                "application/json",
+                b"{\"error\":\"not found\"}",
+            );
+            return;
+        }
+
+        if path_only == "/dashboard" {
+            send_response(response_out, 404, "text/plain", b"not found");
+            return;
+        }
+
         let method = format!("{:?}", request.method());
         let reply = format!("ok:{method}:{path}");
         send_response(response_out, 200, "text/plain", reply.as_bytes());

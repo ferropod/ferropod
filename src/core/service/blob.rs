@@ -234,16 +234,12 @@ impl PlatformService {
                 )));
             }
         }
-        let key = key.trim_start_matches('/');
-        if key.is_empty() {
-            return Err(FerroError::InvalidArgument(
-                "object key cannot be empty".into(),
-            ));
-        }
+        let key = crate::storage::blob_fs::FsBlobStore::validate_object_key(key)?;
         let ttl = expires_secs.clamp(1, 86_400) as i64;
         let expires_at = Utc::now().timestamp() + ttl;
-        let sig = self.crypto.sign_blob_op(&op_norm, bucket, key, expires_at);
-        let url = format!("/_blob/{bucket}/{key}?op={op_norm}&exp={expires_at}&sig={sig}");
+        let sig = self.crypto.sign_blob_op(&op_norm, bucket, &key, expires_at);
+        let encoded_key = encode_url_path_segments(&key);
+        let url = format!("/_blob/{bucket}/{encoded_key}?op={op_norm}&exp={expires_at}&sig={sig}");
         Ok((url, expires_at))
     }
 
@@ -330,4 +326,22 @@ impl PlatformService {
     ) -> Result<Option<(ObjectMeta, ByteStream, u64, Option<(u64, u64)>)>> {
         self.objects.get_stream(bucket, key, range).await
     }
+}
+
+fn encode_url_path_segments(key: &str) -> String {
+    use std::fmt::Write;
+    key.split('/')
+        .map(|seg| {
+            let mut out = String::with_capacity(seg.len());
+            for &b in seg.as_bytes() {
+                if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+                    out.push(b as char);
+                } else {
+                    let _ = write!(&mut out, "%{b:02X}");
+                }
+            }
+            out
+        })
+        .collect::<Vec<_>>()
+        .join("/")
 }

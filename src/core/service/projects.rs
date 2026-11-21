@@ -441,7 +441,11 @@ impl PlatformService {
         target_env: TargetEnv,
     ) -> Result<Route> {
         let norm_host = normalize_host(host);
-        if norm_host.is_empty() || norm_host.contains('/') || norm_host.contains(' ') {
+        if norm_host.is_empty()
+            || norm_host.chars().any(|c| {
+                c.is_whitespace() || c.is_control() || matches!(c, '/' | '\\' | '@' | '?' | '#')
+            })
+        {
             return Err(FerroError::InvalidArgument(format!(
                 "invalid route host '{host}'"
             )));
@@ -594,6 +598,10 @@ impl PlatformService {
         } else {
             format!("/{path}")
         };
+        let path_only = norm_path.split('?').next().unwrap_or("/");
+        if crate::gateway::local_api::has_unsafe_path_segments(path_only) {
+            return Err(FerroError::InvalidArgument("invalid request path".into()));
+        }
 
         let method_upper = method.trim().to_ascii_uppercase();
         if let Some(bucket) = dep.assets_bucket.as_deref() {

@@ -217,7 +217,7 @@ impl KvStore for TursoKvStore {
         ephemeral: bool,
     ) -> Result<()> {
         let now = Utc::now().timestamp();
-        let expires_at = ttl_secs.map(|t| now + t as i64);
+        let expires_at = ttl_secs.map(|t| now.saturating_add(i64::try_from(t).unwrap_or(i64::MAX)));
 
         if ephemeral {
             let mut map = self.ephemeral_kv.write().await;
@@ -305,7 +305,7 @@ impl KvStore for TursoKvStore {
             }
         }
 
-        let expires_at = ttl_secs.map(|t| now + t as i64);
+        let expires_at = ttl_secs.map(|t| now.saturating_add(i64::try_from(t).unwrap_or(i64::MAX)));
         let ns_s = ns.to_string();
         let key_s = key.to_string();
         let val_v = val.to_vec();
@@ -375,7 +375,7 @@ impl KvStore for TursoKvStore {
 
     async fn incr(&self, ns: &str, key: &str, delta: i64, ttl_secs: Option<u64>) -> Result<i64> {
         let now = Utc::now().timestamp();
-        let expires_at = ttl_secs.map(|t| now + t as i64);
+        let expires_at = ttl_secs.map(|t| now.saturating_add(i64::try_from(t).unwrap_or(i64::MAX)));
 
         // Remove any matching ephemeral key so persistent writes are never shadowed.
         {

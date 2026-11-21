@@ -321,6 +321,27 @@ fn is_ddl_or_pragma_sql(sql: &str) -> bool {
     })
 }
 
+/// Reject dangerous control statements (`ATTACH`, `DETACH`, `PRAGMA`) and empty SQL in user DB writes.
+pub fn validate_user_db_write_sql(sql: &str) -> Result<()> {
+    let stmts = tokenize_sql_statements(sql);
+    if stmts.is_empty() {
+        return Err(FerroError::InvalidArgument(
+            "SQL statement must not be empty".into(),
+        ));
+    }
+    for tokens in &stmts {
+        for tok in tokens {
+            let w = tok.word.as_str();
+            if matches!(w, "ATTACH" | "DETACH" | "PRAGMA") {
+                return Err(FerroError::InvalidArgument(format!(
+                    "control keyword '{w}' is not allowed in user database execution"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn contains_ddl_or_pragma(stmts: &[(String, Vec<SqlValue>)]) -> bool {
     stmts.iter().any(|(sql, _)| is_ddl_or_pragma_sql(sql))
 }
@@ -400,6 +421,9 @@ impl DbManager for TursoUserDbManager {
     async fn execute_batch(&self, db_id: &str, stmts: Vec<(String, Vec<SqlValue>)>) -> Result<u64> {
         if stmts.is_empty() {
             return Ok(0);
+        }
+        for (sql, _) in &stmts {
+            validate_user_db_write_sql(sql)?;
         }
         let (db, ddl_lock) = self.get_or_open(db_id).await?;
         let is_ddl = contains_ddl_or_pragma(&stmts);
@@ -542,5 +566,34 @@ mod tests {
             "INSERT INTO a (txt) VALUES ('CREATE TABLE fake; DROP TABLE fake')".into(),
             vec![]
         )]));
+    }
+
+    #[test]
+    fn write_sql_guard_blocks_attach_detach_pragma() {
+        for ok in [
+            "CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, body TEXT)",
+            "INSERT INTO notes (body) VALUES ('ATTACH DATABASE evil; PRAGMA x = 1')",
+            "UPDATE notes SET body = 'ok' WHERE id = 1",
+            "DELETE FROM notes WHERE id = 1",
+        ] {
+            assert!(
+                validate_user_db_write_sql(ok).is_ok(),
+                "expected allowed: {ok}"
+            );
+        }
+
+        for bad in [
+            "",
+            "   -- comment only",
+            "ATTACH DATABASE '/tmp/pwn.db' AS pwn",
+            "DETACH DATABASE pwn",
+            "PRAGMA writable_schema = ON",
+            "INSERT INTO notes (body) VALUES ('x'); /* sneaky */ ATTACH '/tmp/pwn.db' AS pwn",
+        ] {
+            assert!(
+                validate_user_db_write_sql(bad).is_err(),
+                "expected blocked: {bad}"
+            );
+        }
     }
 }

@@ -11,7 +11,7 @@ use bytes::Bytes;
 use chrono::Utc;
 use futures_util::TryStreamExt;
 use http::{header, HeaderMap, HeaderName, HeaderValue, Method, Uri};
-use http_body_util::{BodyExt, StreamBody};
+use http_body_util::{BodyExt, LengthLimitError, Limited, StreamBody};
 use hyper::body::Frame;
 use tokio::sync::{Mutex, Semaphore};
 use uuid::Uuid;
@@ -607,16 +607,19 @@ impl WasmtimeRuntime {
             let resp_opt = match rx.await {
                 Ok(Ok(resp)) => {
                     let (parts, body) = resp.into_parts();
-                    let collected = body
+                    let collected = Limited::new(body, MAX_HTTP_BODY_BYTES)
                         .collect()
                         .await
-                        .map_err(|e| FerroError::Internal(anyhow!("collect worker body: {e}")))?
+                        .map_err(|e| {
+                            if e.is::<LengthLimitError>() {
+                                FerroError::InvalidArgument(
+                                    "worker response body exceeded limit".into(),
+                                )
+                            } else {
+                                FerroError::Internal(anyhow!("collect worker body: {e}"))
+                            }
+                        })?
                         .to_bytes();
-                    if collected.len() > MAX_HTTP_BODY_BYTES {
-                        return Err(FerroError::InvalidArgument(
-                            "worker response body exceeded limit".into(),
-                        ));
-                    }
                     Some(Ok((parts, collected)))
                 }
                 Ok(Err(err_code)) => Some(Err(err_code)),
@@ -1595,7 +1598,7 @@ impl wit_bucket::Host for HostState {
     ) -> std::result::Result<Option<Vec<u8>>, String> {
         let bucket_name = self.resolve_bucket(&binding)?;
         let auth = BlobAuth::Caller(&self.caller);
-        let Some((_meta, mut stream, _len, _)) = self
+        let Some((meta, mut stream, _len, _)) = self
             .svc
             .get_object_stream(&auth, bucket_name, &key, None)
             .await
@@ -1603,8 +1606,15 @@ impl wit_bucket::Host for HostState {
         else {
             return Ok(None);
         };
-        let mut buf = Vec::new();
+        let max_bytes = self.svc.config().wasm_max_memory_bytes;
+        if usize::try_from(meta.size).unwrap_or(usize::MAX) > max_bytes {
+            return Err("bucket object exceeds worker memory limit".into());
+        }
+        let mut buf = Vec::with_capacity(meta.size as usize);
         while let Some(chunk) = stream.try_next().await.map_err(|e| e.to_string())? {
+            if buf.len().saturating_add(chunk.len()) > max_bytes {
+                return Err("bucket object exceeds worker memory limit".into());
+            }
             buf.extend_from_slice(&chunk);
         }
         Ok(Some(buf))
@@ -1625,8 +1635,15 @@ impl wit_bucket::Host for HostState {
         else {
             return Ok(None);
         };
-        let mut buf = Vec::new();
+        let max_bytes = self.svc.config().wasm_max_memory_bytes;
+        if usize::try_from(meta.size).unwrap_or(usize::MAX) > max_bytes {
+            return Err("bucket object exceeds worker memory limit".into());
+        }
+        let mut buf = Vec::with_capacity(meta.size as usize);
         while let Some(chunk) = stream.try_next().await.map_err(|e| e.to_string())? {
+            if buf.len().saturating_add(chunk.len()) > max_bytes {
+                return Err("bucket object exceeds worker memory limit".into());
+            }
             buf.extend_from_slice(&chunk);
         }
         Ok(Some(wit_bucket::ObjectData {

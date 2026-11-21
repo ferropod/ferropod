@@ -1006,3 +1006,170 @@ async fn cross_project_artifact_isolation_cache_invalidation_and_gc() {
         .unwrap();
     assert_eq!(ping_resp.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn gateway_single_permit_body_limit_and_hybrid_spa_routing() {
+    let h = setup_m2_harness(|cfg| {
+        cfg.max_concurrency = 1;
+        cfg.max_blob_upload_bytes = 64;
+    })
+    .await;
+
+    let proj = h
+        .svc
+        .create_project(&h.admin, "hybrid-app", None)
+        .await
+        .unwrap();
+    h.svc
+        .create_bucket(&h.admin, "hybrid-ui", Some(&proj.id), false)
+        .await
+        .unwrap();
+    let admin_auth = ferropod::core::model::BlobAuth::Caller(&h.admin);
+    h.svc
+        .put_object_stream(
+            &admin_auth,
+            "hybrid-ui",
+            "index.html",
+            Box::pin(futures_util::stream::once(async {
+                Ok::<_, std::io::Error>(Bytes::from_static(b"<html>SPA-INDEX</html>"))
+            })),
+            "text/html",
+            None,
+        )
+        .await
+        .unwrap();
+    h.svc
+        .put_object_stream(
+            &admin_auth,
+            "hybrid-ui",
+            "app.js",
+            Box::pin(futures_util::stream::once(async {
+                Ok::<_, std::io::Error>(Bytes::from_static(b"console.log('static');"))
+            })),
+            "application/javascript",
+            None,
+        )
+        .await
+        .unwrap();
+
+    h.svc
+        .create_deployment(
+            &h.admin,
+            &proj.id,
+            CreateDeploymentInput {
+                artifact_path: Some("hybrid.wasm".into()),
+                artifact_bytes: Some(test_worker_wasm_bytes()),
+                assets_bucket: Some("hybrid-ui".into()),
+                assets_prefix: None,
+                spa_fallback: true,
+                bindings: Bindings::default(),
+                crons: vec![],
+                target_env: Some(TargetEnv::Prod),
+            },
+        )
+        .await
+        .unwrap();
+    h.svc
+        .upsert_route(&h.admin, "hybrid.example.test", &proj.id, TargetEnv::Prod)
+        .await
+        .unwrap();
+
+    let app = build_router(h.svc.clone());
+
+    // 1. max_concurrency = 1 works (no double permit deadlock / 429) & static index served
+    let idx_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .header(header::HOST, "hybrid.example.test")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(idx_resp.status(), StatusCode::OK);
+    assert_eq!(
+        idx_resp.into_body().collect().await.unwrap().to_bytes(),
+        b"<html>SPA-INDEX</html>"[..]
+    );
+
+    // 2. Static asset served directly
+    let js_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/app.js")
+                .header(header::HOST, "hybrid.example.test")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(js_resp.status(), StatusCode::OK);
+
+    // 3. Dynamic API route hits Worker and returns JSON 200
+    let api_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/data")
+                .header(header::HOST, "hybrid.example.test")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(api_resp.status(), StatusCode::OK);
+    assert_eq!(
+        api_resp.into_body().collect().await.unwrap().to_bytes(),
+        b"{\"ok\":true}"[..]
+    );
+
+    // 4. Worker JSON 404 is preserved as 404 (not swallowed by SPA fallback)
+    let api_404 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/missing")
+                .header(header::HOST, "hybrid.example.test")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(api_404.status(), StatusCode::NOT_FOUND);
+
+    // 5. Unknown SPA route (/dashboard) falls back from Worker 404 text/plain to static index.html
+    let spa_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/dashboard")
+                .header(header::HOST, "hybrid.example.test")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(spa_resp.status(), StatusCode::OK);
+    assert_eq!(
+        spa_resp.into_body().collect().await.unwrap().to_bytes(),
+        b"<html>SPA-INDEX</html>"[..]
+    );
+
+    // 6. Oversized request body to Worker returns 413 Payload Too Large
+    let big_body = vec![b'x'; 128];
+    let big_resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/data")
+                .header(header::HOST, "hybrid.example.test")
+                .body(Body::from(big_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(big_resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}

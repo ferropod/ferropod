@@ -111,7 +111,7 @@ impl RegistryStore for TursoCoreStore {
         let conn = connect_db(&self.db)?;
         let mut rows = conn
             .query(
-                &format!("{SELECT_USER_DB} WHERE id = ?1 OR name = ?1 LIMIT 1"),
+                &format!("{SELECT_USER_DB} WHERE id = ?1 OR name = ?1 ORDER BY CASE WHEN id = ?1 THEN 0 ELSE 1 END LIMIT 1"),
                 [id_or_name],
             )
             .await

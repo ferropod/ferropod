@@ -13,6 +13,17 @@ use crate::core::model::{BlobAuth, ByteRange, ByteStream, Caller, FerroError};
 use crate::core::service::PlatformService;
 use crate::gateway::guard::{authenticate_caller, extract_bearer_token, ApiError};
 
+const BLOB_CSP_HEADER: &str =
+    "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'";
+
+pub(crate) fn etag_matches(if_none_match: &str, current_etag: &str) -> bool {
+    let target = current_etag.trim().trim_start_matches("W/");
+    if_none_match.split(',').any(|candidate| {
+        let tok = candidate.trim();
+        tok == "*" || tok.trim_start_matches("W/") == target
+    })
+}
+
 #[derive(Debug, Deserialize)]
 pub struct BlobQuery {
     pub op: Option<String>,
@@ -129,10 +140,12 @@ async fn get_object(
         .get(header::IF_NONE_MATCH)
         .and_then(|v| v.to_str().ok())
     {
-        if inm.trim() == etag || inm.trim() == "*" {
+        if etag_matches(inm, &etag) {
             return Ok(Response::builder()
                 .status(StatusCode::NOT_MODIFIED)
                 .header(header::ETAG, etag)
+                .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+                .header(header::CONTENT_SECURITY_POLICY, BLOB_CSP_HEADER)
                 .body(Body::empty())
                 .unwrap());
         }
@@ -167,7 +180,9 @@ async fn get_object(
         .header(header::CONTENT_TYPE, meta.content_type)
         .header(header::CONTENT_LENGTH, len.to_string())
         .header(header::ETAG, etag)
-        .header(header::ACCEPT_RANGES, "bytes");
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .header(header::CONTENT_SECURITY_POLICY, BLOB_CSP_HEADER);
 
     if let Some((start, end)) = span {
         builder = builder.header(
@@ -198,6 +213,8 @@ async fn head_object(
         .header(header::CONTENT_LENGTH, meta.size.to_string())
         .header(header::ETAG, format!("\"{}\"", meta.sha256))
         .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .header(header::CONTENT_SECURITY_POLICY, BLOB_CSP_HEADER)
         .body(Body::empty())
         .unwrap())
 }

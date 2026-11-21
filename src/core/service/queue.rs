@@ -68,6 +68,9 @@ impl PlatformService {
         cfg.consumer_project_id = self
             .resolve_optional_project_id(cfg.consumer_project_id.as_deref())
             .await?;
+        if let Some(ref consumer_pid) = cfg.consumer_project_id {
+            Self::require_project_write(caller, consumer_pid)?;
+        }
 
         self.queue.create_queue(cfg.clone()).await?;
         self.audit(

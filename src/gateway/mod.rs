@@ -2,7 +2,7 @@ use axum::http::{header, Request};
 
 pub mod blob_api;
 pub mod guard;
-mod local_api;
+pub(crate) mod local_api;
 pub mod router;
 pub mod tls;
 

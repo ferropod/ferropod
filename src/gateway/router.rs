@@ -7,7 +7,7 @@ use axum::{
     routing::get,
     Extension, Json, Router,
 };
-use futures_util::TryStreamExt;
+use http_body_util::{BodyExt, LengthLimitError, Limited};
 use serde::Serialize;
 use tower_http::compression::CompressionLayer;
 use tower_http::limit::RequestBodyLimitLayer;
@@ -16,9 +16,9 @@ use uuid::Uuid;
 use crate::core::model::{RequestCtx, WorkerHttpRequest};
 use crate::core::service::PlatformService;
 use crate::gateway::{
-    blob_api,
+    blob_api::{self, etag_matches},
     guard::access_log_middleware,
-    local_api::{has_unsafe_path_segments, LocalApiProxy},
+    local_api::{has_unsafe_path_segments, strip_hop_headers, LocalApiProxy},
 };
 use crate::web;
 
@@ -92,14 +92,17 @@ async fn host_route_handler(
 
     let method = req.method().clone();
     let headers = req.headers().clone();
+    let req_path_owned = req.uri().path().to_string();
+    let has_worker = dep.artifact_path.is_some();
+
     if let Some(bucket) = dep.assets_bucket.as_deref() {
         if method == Method::GET || method == Method::HEAD {
             if let Some(resp) = try_serve_static(
                 &svc,
                 bucket,
                 dep.assets_prefix.as_deref(),
-                dep.spa_fallback,
-                req.uri().path(),
+                if has_worker { false } else { dep.spa_fallback },
+                &req_path_owned,
                 &headers,
                 method == Method::HEAD,
             )
@@ -110,10 +113,18 @@ async fn host_route_handler(
         }
     }
 
-    if dep.artifact_path.is_some() {
-        let Some(_permit) = svc.try_acquire_http_permit() else {
-            return (StatusCode::TOO_MANY_REQUESTS, "server busy").into_response();
-        };
+    if has_worker {
+        let max_worker_req_bytes = svc.config().max_blob_upload_bytes.min(32 * 1024 * 1024);
+        if let Some(content_length) = headers
+            .get(header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.trim().parse::<u64>().ok())
+        {
+            if content_length > max_worker_req_bytes as u64 {
+                return (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response();
+            }
+        }
+
         let uri_str = req
             .uri()
             .path_and_query()
@@ -123,29 +134,84 @@ async fn host_route_handler(
             .iter()
             .map(|(k, v)| (k.as_str().to_string(), v.as_bytes().to_vec()))
             .collect();
-        let body_stream = req
-            .into_body()
-            .into_data_stream()
-            .map_err(std::io::Error::other);
+        let collected_body = match Limited::new(req.into_body(), max_worker_req_bytes)
+            .collect()
+            .await
+        {
+            Ok(collected) => collected.to_bytes(),
+            Err(err) => {
+                if err.is::<LengthLimitError>() {
+                    return (StatusCode::PAYLOAD_TOO_LARGE, "request body too large")
+                        .into_response();
+                }
+                return (StatusCode::BAD_REQUEST, "failed to read request body").into_response();
+            }
+        };
+        let body_stream =
+            futures_util::stream::once(async move { Ok::<_, std::io::Error>(collected_body) });
         let worker_req = WorkerHttpRequest {
             method: method.as_str().to_string(),
             uri: uri_str,
             headers: header_pairs,
             body: Box::pin(body_stream),
         };
-        let request_id = format!("req_{}", Uuid::new_v4().simple());
-        let ctx = RequestCtx::new(route.project_id, request_id, dep);
+        let request_id = headers
+            .get("x-request-id")
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("req_{}", Uuid::new_v4().simple()));
+        let ctx = RequestCtx::new(route.project_id, request_id, dep.clone());
         return match svc.invoke_worker_http(ctx, worker_req).await {
             Ok(resp) => {
                 let status = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK);
-                let mut builder = Response::builder().status(status);
+                let mut resp_headers = HeaderMap::new();
                 for (k, v) in resp.headers {
                     if let (Ok(name), Ok(val)) = (
                         HeaderName::from_bytes(k.as_bytes()),
                         HeaderValue::from_bytes(&v),
                     ) {
-                        builder = builder.header(name, val);
+                        resp_headers.append(name, val);
                     }
+                }
+                let is_json_content = resp_headers
+                    .get(header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .is_some_and(|ct| {
+                        ct.trim()
+                            .to_ascii_lowercase()
+                            .starts_with("application/json")
+                    });
+
+                if status == StatusCode::NOT_FOUND
+                    && dep.spa_fallback
+                    && (method == Method::GET || method == Method::HEAD)
+                    && !req_path_owned.contains('.')
+                    && !is_json_content
+                {
+                    if let Some(bucket) = dep.assets_bucket.as_deref() {
+                        if let Some(spa_resp) = try_serve_static(
+                            &svc,
+                            bucket,
+                            dep.assets_prefix.as_deref(),
+                            false,
+                            "/index.html",
+                            &headers,
+                            method == Method::HEAD,
+                        )
+                        .await
+                        {
+                            return spa_resp;
+                        }
+                    }
+                }
+
+                strip_hop_headers(&mut resp_headers);
+                resp_headers.remove(header::CONTENT_LENGTH);
+                let mut builder = Response::builder().status(status);
+                if let Some(h) = builder.headers_mut() {
+                    *h = resp_headers;
                 }
                 builder
                     .body(Body::from_stream(resp.body))
@@ -219,7 +285,7 @@ async fn try_serve_static(
         .get(header::IF_NONE_MATCH)
         .and_then(|v| v.to_str().ok())
     {
-        if inm.trim() == etag || inm.trim() == "*" {
+        if etag_matches(inm, &etag) {
             return Some(
                 Response::builder()
                     .status(StatusCode::NOT_MODIFIED)

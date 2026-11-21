@@ -7,8 +7,8 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use axum::{
     body::Body,
-    http::{Request, StatusCode},
-    response::{IntoResponse, Redirect, Response},
+    http::{header, HeaderValue, Request, StatusCode},
+    response::{IntoResponse, Response},
     routing::get,
     Json, Router,
 };
@@ -148,12 +148,19 @@ pub fn build_https_redirect_router(https_port: u16) -> Router {
         .fallback(move |req: Request<Body>| async move { redirect_to_https(req, https_port) })
 }
 
+fn is_valid_redirect_host(host: &str) -> bool {
+    !host.is_empty()
+        && !host.chars().any(|c| {
+            c.is_whitespace() || c.is_control() || matches!(c, '/' | '\\' | '@' | '?' | '#')
+        })
+}
+
 fn redirect_to_https(req: Request<Body>, https_port: u16) -> Response {
     let Some(raw_host) = crate::gateway::extract_request_host(&req) else {
         return (StatusCode::BAD_REQUEST, "missing Host header").into_response();
     };
     let host = strip_host_port(raw_host);
-    if host.is_empty() {
+    if !is_valid_redirect_host(host) {
         return (StatusCode::BAD_REQUEST, "invalid Host header").into_response();
     }
     let path_and_query = req
@@ -161,13 +168,23 @@ fn redirect_to_https(req: Request<Body>, https_port: u16) -> Response {
         .path_and_query()
         .map(|pq| pq.as_str())
         .unwrap_or("/");
+    if !path_and_query.starts_with('/') {
+        return (StatusCode::BAD_REQUEST, "invalid request path").into_response();
+    }
 
     let target = if https_port == 443 {
         format!("https://{host}{path_and_query}")
     } else {
         format!("https://{host}:{https_port}{path_and_query}")
     };
-    Redirect::permanent(&target).into_response()
+    let Ok(location) = HeaderValue::try_from(target) else {
+        return (StatusCode::BAD_REQUEST, "invalid redirect location").into_response();
+    };
+    Response::builder()
+        .status(StatusCode::PERMANENT_REDIRECT)
+        .header(header::LOCATION, location)
+        .body(Body::empty())
+        .unwrap_or_else(|_| (StatusCode::BAD_REQUEST, "invalid redirect response").into_response())
 }
 
 /// Install the ring crypto provider for rustls (idempotent).
