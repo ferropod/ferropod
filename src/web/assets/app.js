@@ -709,7 +709,7 @@
       statCard(t('overview.queues'), st.queues, '#/queues') +
       statCard(t('overview.buckets'), st.buckets, '#/blobs') +
       statCard(t('overview.dbs'), st.dbs, '#/dbs') +
-      statCard(t('overview.searchIndexes'), window.FerroSearchMock ? window.FerroSearchMock.listIndexes(getScope()).length : 0, '#/search') +
+      statCard(t('overview.searchIndexes'), st.search_indexes || 0, '#/search') +
       '</div>' +
 
       '<fp-perf-monitor id="overview-perf-monitor"></fp-perf-monitor>' +
@@ -2257,8 +2257,6 @@
         }
         if (state.selectedDbId && state.dbTab === 'schema') {
           await loadDbSchema();
-        } else if (state.dbTab === 'fts') {
-          await ensureSearchBundle();
         }
       } catch (e) {
         root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
@@ -2291,7 +2289,7 @@
 
       var bodyHtml = '';
       if (state.dbTab === 'fts') {
-        bodyHtml = '<fp-db-fts-panel id="db-fts-panel" db-id="' + esc(dbMeta.id) + '" db-name="' + esc(dbMeta.name) + '" can-write="' + (canWriteDb ? 'true' : 'false') + '"></fp-db-fts-panel>';
+        bodyHtml = '<div id="db-fts-panel" class="panel"></div>';
       } else if (state.dbTab === 'schema') {
         bodyHtml =
           '<div class="panel"><div class="panel-header"><h3 class="panel-title mono">' + esc(dbMeta.name) + '</h3>' +
@@ -2370,8 +2368,6 @@
         state.dbTab = btn.getAttribute('data-db-tab');
         if (state.dbTab === 'schema' && dbMeta) {
           try { await loadDbSchema(); } catch (e) { toast(e.message, 'error'); }
-        } else if (state.dbTab === 'fts') {
-          try { await ensureSearchBundle(); } catch (e) { toast(e.message, 'error'); }
         }
         renderDbs(false);
       });
@@ -2422,15 +2418,68 @@
         });
       });
     }
-    if ($('db-fts-panel')) {
-      $('db-fts-panel').addEventListener('fp-open-sql', function (ev) {
-        if (ev.detail && ev.detail.sql) {
-          state.dbSql = ev.detail.sql;
-          state.dbParams = '[]';
-          state.dbTab = 'console';
-          renderDbs(false);
-        }
+    if ($('db-fts-panel') && dbMeta) {
+      renderDbFts(dbMeta, canWriteDb);
+    }
+  }
+
+  async function renderDbFts(db, canWrite) {
+    var panel = $('db-fts-panel');
+    var path = '/_api/v1/dbs/' + enc(db.id) + '/fts';
+    try {
+      var indexes = await api(path);
+      if (!panel.isConnected) return;
+      panel.innerHTML = '<div class="panel-header"><h3 class="panel-title">' + esc(t('dbs.tabFts')) + '</h3></div>' +
+        '<div class="panel-body stack gap-md"><p class="muted text-xs">' + esc(t('dbs.ftsSubtitle')) + '</p>' +
+        (canWrite ? '<form id="fts-create-form" class="stack gap-sm">' +
+        '<input id="fts-name" required placeholder="' + esc(t('dbs.ftsIndexName')) + '">' +
+        '<input id="fts-table" required placeholder="' + esc(t('dbs.ftsTable')) + '">' +
+        '<input id="fts-columns" required placeholder="' + esc(t('dbs.ftsColumns')) + '">' +
+        '<button type="submit" class="btn btn-primary">' + esc(t('dbs.ftsNewIndex')) + '</button></form>' : '') +
+        (indexes.length ? indexes.map(function (idx) {
+          return '<div class="panel"><div class="panel-body stack gap-sm"><strong>' + esc(idx.name) + '</strong>' +
+            '<span class="muted">' + esc(idx.table + ' (' + idx.columns.join(', ') + ')') + '</span>' +
+            '<form class="row" data-fts-query="' + esc(idx.name) + '"><input name="query" required placeholder="' +
+            esc(t('dbs.ftsTestPlaceholder')) + '"><button class="btn" type="submit">' + esc(t('common.search')) + '</button></form>' +
+            '<pre class="code-block hidden" data-fts-result="' + esc(idx.name) + '"></pre>' +
+            (canWrite ? '<button class="btn btn-danger btn-sm" data-fts-delete="' + esc(idx.name) + '">' + esc(t('common.delete')) + '</button>' : '') +
+            '</div></div>';
+        }).join('') : '<div class="empty-state">' + esc(t('dbs.ftsNoIndexes')) + '</div>') + '</div>';
+      if ($('fts-create-form')) $('fts-create-form').addEventListener('submit', async function (event) {
+        event.preventDefault();
+        try {
+          await api(path, { method: 'POST', json: {
+            name: $('fts-name').value.trim(), table: $('fts-table').value.trim(),
+            columns: $('fts-columns').value.split(',').map(function (value) { return value.trim(); }).filter(Boolean)
+          } });
+          renderDbFts(db, canWrite);
+        } catch (e) { toast(e.message, 'error'); }
       });
+      panel.querySelectorAll('[data-fts-query]').forEach(function (form) {
+        form.addEventListener('submit', async function (event) {
+          event.preventDefault();
+          try {
+            var result = await api(path + '/' + enc(form.getAttribute('data-fts-query')) + '/query', {
+              method: 'POST', json: { query: form.elements.query.value }
+            });
+            var output = form.nextElementSibling;
+            output.textContent = JSON.stringify(result.rows, null, 2);
+            output.classList.remove('hidden');
+          } catch (e) { toast(e.message, 'error'); }
+        });
+      });
+      panel.querySelectorAll('[data-fts-delete]').forEach(function (button) {
+        button.addEventListener('click', function () {
+          confirmAction(t('common.confirmDeleteTitle'), async function () {
+            try {
+              await api(path + '/' + enc(button.getAttribute('data-fts-delete')), { method: 'DELETE' });
+              renderDbFts(db, canWrite);
+            } catch (e) { toast(e.message, 'error'); }
+          });
+        });
+      });
+    } catch (e) {
+      if (panel.isConnected) panel.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
     }
   }
 
@@ -2517,28 +2566,110 @@
     });
   }
 
-  // --- 7b. Full-Text Search (Native Web Component + Mock Data) ---
+  var searchState = { indexes: [], selected: '', query: '', result: null };
 
-  async function renderSearch(fetchData) {
+  async function renderSearch() {
     var root = $('view-root');
-    root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
     try {
-      await ensureSearchBundle();
-      if (fetchData && !state.projects.length) {
-        try {
-          state.projects = (await api('/_api/v1/runtimes')) || [];
-        } catch (_) {}
+      var data = await Promise.all([api('/_api/v1/search'), api('/_api/v1/runtimes')]);
+      searchState.indexes = data[0] || [];
+      state.projects = data[1] || [];
+      if (!searchState.indexes.some(function (item) { return item.id === searchState.selected; })) {
+        searchState.selected = searchState.indexes.length ? searchState.indexes[0].id : '';
+        searchState.result = null;
       }
+      var selected = searchState.indexes.find(function (item) { return item.id === searchState.selected; });
+      var docs = selected ? await api('/_api/v1/search/' + enc(selected.id) + '/docs') : [];
+      var writable = selected && canWriteResource(selected.project_id);
+      var options = searchState.indexes.map(function (item) {
+        return '<option value="' + esc(item.id) + '"' + (item.id === searchState.selected ? ' selected' : '') +
+          '>' + esc(item.name) + '</option>';
+      }).join('');
+      root.innerHTML = '<div class="page-head"><h2 class="page-title">' + esc(t('search.title')) + '</h2>' +
+        (!isReadonly() ? '<button class="btn btn-primary" id="search-create-index">' + esc(t('search.newIndex')) + '</button>' : '') + '</div>' +
+        '<div class="panel"><div class="panel-body stack gap-md">' +
+        '<select id="search-index-select">' + options + '</select>' +
+        (selected ? '<form id="real-search-form" class="row"><input id="real-search-query" value="' + esc(searchState.query) +
+          '" placeholder="' + esc(t('search.queryPlaceholder')) + '"><button class="btn" type="submit">' + esc(t('common.search')) + '</button></form>' +
+          (searchState.result ? '<pre class="code-block">' + esc(JSON.stringify(searchState.result, null, 2)) + '</pre>' : '') +
+          (writable ? '<form id="real-search-doc-form" class="stack gap-sm"><label>' + esc(t('search.docJsonLabel')) + '</label>' +
+          '<textarea id="real-search-doc" rows="5" required>{ "id": "", "title": "", "body": "" }</textarea>' +
+          '<button class="btn btn-primary" type="submit">' + esc(t('common.save')) + '</button></form>' : '') +
+          '<div class="stack gap-sm">' + docs.map(function (doc) {
+            return '<div class="panel"><pre class="code-block">' + esc(JSON.stringify(doc, null, 2)) + '</pre>' +
+              (writable && doc.id ? '<button class="btn btn-danger btn-sm" data-search-doc-delete="' + esc(doc.id) + '">' + esc(t('common.delete')) + '</button>' : '') + '</div>';
+          }).join('') + '</div>' +
+          (writable ? '<button class="btn btn-danger" id="search-delete-index">' + esc(t('search.deleteIndex')) + '</button>' : '') : '') +
+        '</div></div>';
+      $('search-index-select').addEventListener('change', function (event) {
+        searchState.selected = event.target.value;
+        searchState.result = null;
+        renderSearch();
+      });
+      if ($('search-create-index')) $('search-create-index').addEventListener('click', function () {
+        openModal({
+          title: t('search.newIndex'),
+          body: '<form id="search-index-form" class="stack gap-md"><div class="field"><label>' + esc(t('common.name')) +
+            '</label><input id="search-index-name" required></div><div class="field"><label>' + esc(t('common.project')) +
+            '</label><select id="search-index-owner">' + renderProjectSelectOptions('', true) + '</select></div></form>',
+          footer: '<button form="search-index-form" class="btn btn-primary" type="submit">' + esc(t('common.create')) + '</button>',
+          onMount: function () {
+            $('search-index-form').addEventListener('submit', async function (event) {
+              event.preventDefault();
+              try {
+                var created = await api('/_api/v1/search', { method: 'POST', json: {
+                  name: $('search-index-name').value.trim(), project_id: $('search-index-owner').value || null
+                } });
+                searchState.selected = created.id;
+                closeModal();
+                renderSearch();
+              } catch (e) { toast(e.message, 'error'); }
+            });
+          }
+        });
+      });
+      if ($('real-search-form')) $('real-search-form').addEventListener('submit', async function (event) {
+        event.preventDefault();
+        searchState.query = $('real-search-query').value;
+        try {
+          searchState.result = await api('/_api/v1/search/' + enc(selected.id) + '/query', {
+            method: 'POST', json: { query: searchState.query }
+          });
+          renderSearch();
+        } catch (e) { toast(e.message, 'error'); }
+      });
+      if ($('real-search-doc-form')) $('real-search-doc-form').addEventListener('submit', async function (event) {
+        event.preventDefault();
+        try {
+          var doc = JSON.parse($('real-search-doc').value);
+          await api('/_api/v1/search/' + enc(selected.id) + '/docs', { method: 'POST', json: doc });
+          searchState.result = null;
+          renderSearch();
+        } catch (e) { toast(e.message, 'error'); }
+      });
+      root.querySelectorAll('[data-search-doc-delete]').forEach(function (button) {
+        button.addEventListener('click', function () {
+          confirmAction(t('common.confirmDeleteTitle'), async function () {
+            try {
+              await api('/_api/v1/search/' + enc(selected.id) + '/docs/' + enc(button.getAttribute('data-search-doc-delete')), { method: 'DELETE' });
+              searchState.result = null;
+              renderSearch();
+            } catch (e) { toast(e.message, 'error'); }
+          });
+        });
+      });
+      if ($('search-delete-index')) $('search-delete-index').addEventListener('click', function () {
+        confirmAction(t('search.deleteIndexConfirm', { name: selected.name }), async function () {
+          try {
+            await api('/_api/v1/search/' + enc(selected.id), { method: 'DELETE' });
+            searchState.selected = '';
+            renderSearch();
+          } catch (e) { toast(e.message, 'error'); }
+        });
+      });
     } catch (e) {
       root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
-      return;
     }
-    root.innerHTML = '';
-    var wb = document.createElement('fp-search-workbench');
-    wb.projects = state.projects;
-    wb.scope = getScope();
-    wb.canWrite = !isReadonly();
-    root.appendChild(wb);
   }
 
   async function renderRuntime() {

@@ -225,6 +225,9 @@ impl PlatformService {
             ));
         }
 
+        let quoted_columns = cols.iter().map(|col| format!("\"{col}\"")).collect::<Vec<_>>().join(", ");
+        self.db.query(&meta.id, &format!("SELECT {quoted_columns} FROM \"{table}\" LIMIT 0"), vec![]).await?;
+
         let mut rows_indexed = 0usize;
         let count_sql = format!("SELECT COUNT(*) FROM \"{table}\"");
         if let Ok(qr) = self.db.query(&meta.id, &count_sql, vec![]).await {
@@ -317,7 +320,8 @@ impl PlatformService {
         let mut hits: Vec<DbFtsHit> = Vec::new();
         if valid_sql_ident(&idx.table) {
             let select_sql = format!("SELECT * FROM \"{}\"", idx.table);
-            if let Ok(qr) = self.db.query(&meta.id, &select_sql, vec![]).await {
+            {
+                let qr = self.db.query(&meta.id, &select_sql, vec![]).await?;
                 idx.rows_indexed = qr.rows.len();
                 for row_vals in qr.rows {
                     let mut full_obj = serde_json::Map::new();
