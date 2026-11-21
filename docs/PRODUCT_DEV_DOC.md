@@ -9,7 +9,7 @@
 
 | 维度 | 核心指标 / 约束 |
 | :--- | :--- |
-| **交付形态** | 单 Rust 二进制（`ferropod`）+ 单 `/data` 数据目录，内嵌零构建 Web 面板 `/_panel`（兼容 `/_admin`） |
+| **交付形态** | 单 Rust 二进制（`ferropod`）+ 单 `/data` 数据目录，内嵌零构建 Web 面板 `/_panel` |
 | **内存预算** | 空载 RSS ~30–60 MiB；`--profile low-mem` 限制并发、用户库 LRU 句柄数与写缓冲，稳定运行于 **512 MiB RAM** |
 | **存储原则** | 磁盘优先（Turso MVCC + 内容寻址本地 Blob FS），内存仅保留有界队列、热路由表与 OS Page Cache |
 | **架构模式** | **1 Core Service + 3 Thin Adapters**：所有业务逻辑、RBAC 鉴权与审计收敛于 `PlatformService`，统一向 REST/Admin、WIT Host（M2 已落地）、MCP（M3）暴露 |
@@ -22,7 +22,7 @@
 ```mermaid
 flowchart TD
   Client["Browsers / APIs / Admin UI / AI Agents"] --> GW["Gateway (axum + tower-http Gzip + Access Log)"]
-  GW --> Web["Web / REST / Admin (/_api/v1, /_admin)"]
+  GW --> Web["Web / REST / Admin (/_api/v1, /_panel)"]
   GW --> Blob["Native Blob API (/_blob)"]
   GW --> Static["Static Site & Host Router"]
   Web --> Svc["PlatformService (Domain + RBAC + Audit)"]

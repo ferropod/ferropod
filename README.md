@@ -20,7 +20,7 @@ Single binary + single `/data` directory. Designed to run comfortably even on a 
 - **Turso Database (MVCC + `io_uring`)**: Dedicated isolated databases (`core.db`, `kv.db`, `queue.db`, per-project `dbs/<id>.db`, daily `logs/*.db`).
 - **Native Streaming Blob Storage**: 5-endpoint HTTP Blob API (`PUT`/`GET`/`HEAD`/`DELETE`/`LIST`) with `HMAC-SHA256` presigned URLs, content-addressed files in `/data/blobs`, and async GC.
 - **Persistent Queue & KV**: Disk-backed durability with bounded micro-batch ingestion, backpressure (`429`), lease recovery, exponential backoff, DLQ replay, TTL batch cleanup, and ephemeral in-memory KV mode.
-- **Zero-Build Admin UI & Daily Logs**: Embedded HTML/HTMX dashboard at `/_admin`, SSE live tail, and daily rotating Turso log files.
+- **Zero-Build Admin UI & Daily Logs**: Embedded HTML/HTMX dashboard at `/_panel`, SSE live tail, and daily rotating Turso log files.
 - **Native MCP Server (M3)**: Built-in `rmcp` tools/resources so AI agents can deploy, test, inspect logs, and promote/rollback safely.
 
 ## One-Click Install & Update
@@ -50,7 +50,7 @@ sudo ferropod update
 curl -fsSL https://raw.githubusercontent.com/ferropod/ferropod/main/scripts/install.sh | sudo bash -s -- --uninstall
 ```
 
-You can also check for updates, browse GitHub Releases, and trigger **one-click self-update & graceful restart** directly from the Admin Console at `/_admin` → **Updates** (`/_admin#/updates`).
+You can also check for updates, browse GitHub Releases, and trigger **one-click self-update & graceful restart** directly from the Admin Console at `/_panel` → **Updates** (`/_panel#/updates`).
 
 ## Quickstart (Build from Source)
 
@@ -107,7 +107,7 @@ docker compose up -d --build
 
 - Exposes HTTP (`80`, configurable via `FERROPOD_HTTP_PORT` / `FERROPOD_BIND`) and HTTPS (`443`, configurable via `FERROPOD_HTTPS_PORT` / `FERROPOD_HTTPS_BIND`) with persistent state in `./data:/data` and `--profile low-mem`.
 - **Built-in HTTPS**: configure `FERROPOD_ACME_DOMAINS` + `FERROPOD_ACME_EMAIL` for automatic Let's Encrypt (TLS-ALPN-01, cached under `/data/certs`, automatically including active project route domains), or set `FERROPOD_TLS_CERT` + `FERROPOD_TLS_KEY` for manual PEM certificates. You can also place `ferropod` behind Cloudflare Tunnel / Proxy or an existing reverse proxy if preferred.
-- **Domain Binding**: bind any domain to a project/environment via `/_admin` (Routes) or `PUT /_api/v1/routes`.
+- **Domain Binding**: bind any domain to a project/environment via `/_panel` (Routes) or `PUT /_api/v1/routes`.
 - Note: Docker's default seccomp profile blocks `io_uring` syscalls on some hosts; Turso automatically falls back to standard async file I/O when `io_uring` is restricted, or you can relax seccomp in trusted environments.
 
 ## Documentation & Contracts

@@ -1445,7 +1445,15 @@ async fn admin_ui_assets_and_enriched_status() {
 
     let app = build_router(h.svc.clone());
 
-    for path in ["/_panel", "/_panel/", "/_admin", "/_admin/"] {
+    for path in ["/_admin", "/_admin/", "/_admin/assets/styles.css"] {
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+    for path in ["/_panel", "/_panel/"] {
         let resp = app
             .clone()
             .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
@@ -1480,7 +1488,6 @@ async fn admin_ui_assets_and_enriched_status() {
         ("/_panel/assets/styles.css", "text/css"),
         ("/_panel/assets/i18n.js", "application/javascript"),
         ("/_panel/assets/app.js", "application/javascript"),
-        ("/_admin/assets/styles.css", "text/css"),
     ] {
         let resp = app
             .clone()
@@ -1509,7 +1516,7 @@ async fn admin_ui_assets_and_enriched_status() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/_admin/assets/missing.js")
+                .uri("/_panel/assets/missing.js")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1731,7 +1738,7 @@ async fn test_manual_https_end_to_end_with_http_redirect() {
     // 1. Verify HTTP redirects to HTTPS with custom port
     http_stream
         .write_all(
-            format!("GET /_admin HTTP/1.1\r\nHost: localhost:{http_port}\r\nConnection: close\r\n\r\n")
+            format!("GET /_panel HTTP/1.1\r\nHost: localhost:{http_port}\r\nConnection: close\r\n\r\n")
                 .as_bytes(),
         )
         .await
@@ -1740,7 +1747,7 @@ async fn test_manual_https_end_to_end_with_http_redirect() {
     http_stream.read_to_string(&mut http_resp).await.unwrap();
     assert!(http_resp.starts_with("HTTP/1.1 308"), "unexpected HTTP response: {http_resp}");
     assert!(
-        http_resp.contains(&format!("location: https://localhost:{https_port}/_admin")),
+        http_resp.contains(&format!("location: https://localhost:{https_port}/_panel")),
         "missing redirect location: {http_resp}"
     );
 

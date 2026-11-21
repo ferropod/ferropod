@@ -12,7 +12,7 @@
 | **Deployment** | One binary (`ferropod`: `serve`, `dev`, `token`, `snapshot`, `install-systemd`) + one `/data` folder. |
 | **Memory Budget** | Idle RSS ~30–60 MiB; `--profile low-mem` caps concurrency, user DB LRU count, and channel sizes to run steadily within **512 MiB RAM**. |
 | **Disk-First Storage** | Disk (`turso` + content-addressed `/data/blobs`) is the source of truth; memory holds only bounded buffers, hot route table, and OS page cache. |
-| **1 Core Service + 3 Thin Adapters** | All business logic, token scope validation, and audit logging live once in `PlatformService`, exposed via `/_api/v1/*` (+ `/_admin`), `/mcp` (M3), and WIT Host Bindings (M2). |
+| **1 Core Service + 3 Thin Adapters** | All business logic, token scope validation, and audit logging live once in `PlatformService`, exposed via `/_api/v1/*` (+ `/_panel`), `/mcp` (M3), and WIT Host Bindings (M2). |
 | **Evolvability** | Every subsystem operates behind `core::traits` (`MetaStore`, `BlobMetaStore`, `KvStore`, `QueueStore`, `ObjectStore`, `DbManager`, `LogStore`, `WorkerRuntime`) so single-node engines can later swap to distributed backends without breaking Workers or APIs. |
 
 ---
@@ -39,7 +39,7 @@
 │              ┌──────────────────────────┼──────────────────────────┐                            │
 │              ▼                          ▼                          ▼                            │
 │     Web / REST / Admin           MCP Server (M3)           Dispatcher & Maintenance             │
-│     /_api/v1/* + /_admin         rmcp HTTP & stdio         Queue batch ingest + worker,         │
+│     /_api/v1/* + /_panel         rmcp HTTP & stdio         Queue batch ingest + worker,         │
 │     (HTMX/HTML zero-build)                                 Cron, TTL/DLQ/Blob/Log cleanup       │
 │              │                          │                          │                            │
 │              └──────────────────────────┼──────────────────────────┘                            │
@@ -78,7 +78,7 @@ ferropod/
     ├── logs/                  # DailyLogStore (bounded mpsc -> SSE broadcast + micro-batch daily DBs)
     ├── dispatcher/            # Background maintenance & graceful shutdown
     ├── gateway/               # Axum router, static hosting, native Blob API, native TLS/ACME, guard
-    └── web/                   # /_api/v1 REST/SSE & zero-build /_admin dashboard
+    └── web/                   # /_api/v1 REST/SSE & zero-build /_panel dashboard
 ```
 
 ---

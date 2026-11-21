@@ -36,9 +36,6 @@ pub fn build_router(svc: PlatformService) -> Router {
         .route("/_panel", get(web::admin_index))
         .route("/_panel/", get(web::admin_index))
         .route("/_panel/assets/{file}", get(web::admin_asset))
-        .route("/_admin", get(web::admin_index))
-        .route("/_admin/", get(web::admin_index))
-        .route("/_admin/assets/{file}", get(web::admin_asset))
         .fallback(host_route_handler)
         .layer(CompressionLayer::new())
         .layer(middleware::from_fn_with_state(

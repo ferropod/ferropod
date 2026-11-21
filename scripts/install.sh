@@ -296,7 +296,7 @@ check_health() {
   for i in 1 2 3 4 5 6 7 8 9 10; do
     if curl -fsS "$url" >/dev/null 2>&1; then
       ok "Health check passed: ${url}"
-      ok "Admin UI: http://<your-server-ip>:${port}/_admin"
+      ok "Admin UI: http://<your-server-ip>:${port}/_panel"
       return 0
     fi
     sleep 1
