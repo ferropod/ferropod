@@ -300,9 +300,9 @@ impl WasmtimeRuntime {
 
         let (precompiled, component) = match Engine::detect_precompiled(&bytes) {
             Some(Precompiled::Component) => {
-                Self::write_file_atomic(&cwasm_disk, &bytes).await?;
-                let comp = self.mmap_deserialize_component(&cwasm_disk)?;
-                (true, comp)
+                return Err(FerroError::InvalidArgument(
+                    "precompiled uploads are not accepted; upload a Wasm component".into(),
+                ));
             }
             Some(Precompiled::Module) => {
                 return Err(FerroError::InvalidArgument(

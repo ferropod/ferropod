@@ -118,7 +118,7 @@ docker compose up -d --build
 ## Roadmap
 
 - **M1 (Done)**: Storage foundation (`turso` MVCC + Blob FS), native Blob API, static site routing, daily logs, maintenance & graceful shutdown, zero-build `/_panel` shell, REST API (`/_api/v1`), CLI.
-- **M2 (Current / Implemented)**: Wasmtime AOT `.cwasm` runtime + precompiled `.cwasm` upload + strongly-typed WIT host bindings (`ferropod:platform@0.2.0`) + `wasi:http/outgoing-handler` + Queue/Cron worker dispatcher.
+- **M2 (Current / Implemented)**: Wasmtime AOT `.cwasm` runtime + server-side Wasm compilation + strongly-typed WIT host bindings (`ferropod:platform@0.2.0`) + `wasi:http/outgoing-handler` + Queue/Cron worker dispatcher.
 - **M3**: Native `rmcp` MCP server (`deploy_stack`, `worker_invoke`, `logs_query`, resource tools, audit trail).
 - **M4**: Hardening, automated health checks & rollback, alerting webhooks, release packaging, and optional `--features search` full-text indexing.
 

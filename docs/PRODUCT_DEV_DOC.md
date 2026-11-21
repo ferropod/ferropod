@@ -60,7 +60,7 @@ flowchart TD
 | 模块 | 后台路由 | 后端状态 | 前端状态 | 项目隔离 | 已知缺口 / 备注 |
 | :--- | :--- | :---: | :---: | :---: | :--- |
 | **概览与实时性能监控** | `#/overview` | ✅ | ✅ | ✅ | 真实 `/proc` 指标（RSS / 宿主机内存 / Load / FD / Uptime）+ 5s SVG 实时折线 |
-| **运行时 (Runtime)** | `#/runtime` | ✅ | ✅ | ✅ | Wasmtime AOT `.cwasm` 运行时、预编译上传、WIT v0.2 Host Bindings、出站 HTTP 与实时 Invoke 调试台 |
+| **运行时 (Runtime)** | `#/runtime` | ✅ | ✅ | ✅ | Wasmtime AOT `.cwasm` 运行时、服务端 Wasm 编译、WIT v0.2 Host Bindings、出站 HTTP 与实时 Invoke 调试台 |
 | **Secrets 密钥** | 项目详情内 | ✅ | ✅ | ✅ | AES-256-GCM 静态加密，按 `project_id` 强隔离 |
 | **KV 存储** | `#/kv` | ✅ | ✅ | ✅ | 命名空间创建/列表/删除 + 键值 CRUD + TTL + 内存临时模式 + 原子自增 |
 | **消息队列** | `#/queues` | ✅ | ✅ | ✅ | 队列创建/列表/修改配置/删除 + 微批入队 + 统计 + 巡检 + DLQ 重放 + 清空 |
@@ -180,7 +180,7 @@ cargo build --release
 - [ ] **前端 `app.js` 进一步模块化**：将旧版 120 KB 单体 `app.js` 拆为 `core.js` + `views/*.js` 按路由懒加载。
 
 ### 里程碑演进（M2 – M4）
-- [x] **M2（运行时与调度，已完成）**：Wasmtime AOT `.cwasm` 运行时 + 预编译上传 + `ferropod:platform@0.2.0` WIT 强类型 Host Bindings + `wasi:http/outgoing-handler` 出站 HTTP + 队列消费与 Cron 定时调度。
+- [x] **M2（运行时与调度，已完成）**：Wasmtime AOT `.cwasm` 运行时 + 服务端 Wasm 编译 + `ferropod:platform@0.2.0` WIT 强类型 Host Bindings + `wasi:http/outgoing-handler` 出站 HTTP + 队列消费与 Cron 定时调度。
 - **M3（AI Native MCP Server）**：内置 `rmcp` MCP Server（`/mcp` & stdio），聚焦 `deploy_stack`、`worker_invoke`、`logs_query` 等核心原语工具。
 - **M4（高可用与演进）**：健康检查自动回滚、Webhook 告警、发布包自动化，以及多节点 trait 后端（Turso Embedded Replicas / NATS / S3 兼容存储）。
 - **M4+（可选 `--features search`）**：开启 `turso/fts` 与嵌入式 Tantivy + `tantivy-jieba` 全文搜索（作为可选编译 feature 挂载，避免默认占用 512 MiB 内存预算）。

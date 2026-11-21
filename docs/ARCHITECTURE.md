@@ -116,7 +116,7 @@ ferropod/
 
 ## 7. M2–M4 Evolution
 
-- **M2 (Implemented)**: `runtime/wasmtime.rs` implementing `WorkerRuntime` with AOT `.cwasm` mmap loading, precompiled `.cwasm` upload, `StoreLimits`, `epoch_interruption`, strongly-typed WIT host bindings (`ferropod:platform@0.2.0` in `wit/platform.wit`), `wasi:http/outgoing-handler`, and direct Queue/Cron execution (`queue-consumer` / `scheduled` with HTTP fallback).
+- **M2 (Implemented)**: `runtime/wasmtime.rs` implementing `WorkerRuntime` with AOT `.cwasm` mmap loading, server-side Wasm compilation, `StoreLimits`, `epoch_interruption`, strongly-typed WIT host bindings (`ferropod:platform@0.2.0` in `wit/platform.wit`), `wasi:http/outgoing-handler`, and direct Queue/Cron execution (`queue-consumer` / `scheduled` with HTTP fallback).
 - **M3**: Mount `rmcp` `StreamableHttpService` at `/mcp` and `ferropod mcp` stdio mode exposing `deploy_stack`, `deployment_promote`, `deployment_rollback`, `worker_invoke`, `logs_query`, and full resource tools.
 - **M4**: Harden health-check auto-rollback, webhook alerting, release binaries, and optional v2 multi-tenant / distributed trait implementations (Turso Embedded Replicas, NATS/Valkey, RustFS/Garage).
 - **Post-M4 (Optional `--features search`)**: Embedded Tantivy / `turso/fts` full-text search kept opt-in to protect the 512 MiB RAM budget by default.

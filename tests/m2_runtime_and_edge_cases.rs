@@ -395,7 +395,7 @@ async fn precompiled_cwasm_upload_limits_and_epoch_timeout() {
     let cwasm_bytes =
         Bytes::from(std::fs::read(h.tmp.path().join("artifacts").join(&stored_path)).unwrap());
 
-    // 2. Upload precompiled .cwasm bytes via HTTP -> precompiled == true
+    // Uploading precompiled native code is rejected.
     let up_req = Request::builder()
         .method(Method::PUT)
         .uri(format!("/_api/v1/projects/{}/artifacts/pre.cwasm", proj.id))
@@ -403,11 +403,8 @@ async fn precompiled_cwasm_upload_limits_and_epoch_timeout() {
         .body(Body::from(cwasm_bytes))
         .unwrap();
     let up_resp = app.clone().oneshot(up_req).await.unwrap();
-    assert_eq!(up_resp.status(), StatusCode::CREATED);
-    let up_json: serde_json::Value =
-        serde_json::from_slice(&up_resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    assert_eq!(up_json["precompiled"], true);
-    let pre_path = up_json["artifact_path"].as_str().unwrap().to_string();
+    assert_eq!(up_resp.status(), StatusCode::BAD_REQUEST);
+    let pre_path = stored_path;
 
     // Invalid artifact is rejected cleanly with 400 Bad Request
     let bad_req = Request::builder()
