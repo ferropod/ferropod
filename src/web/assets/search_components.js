@@ -1260,11 +1260,11 @@ class FpLogSearchPanel extends HTMLElement {
       entries = res.entries;
       summaryText = t('logs.ftsHitsSummary', { total: res.total, ms: res.took_ms, index: res.index_name });
     } else {
-      const qLower = f.q.trim().toLowerCase();
+      const terms = f.q.trim().toLowerCase().split(/\s+/).filter(Boolean);
       entries = this._liveEntries.filter((e) => {
-        if (!qLower) return true;
-        return String(e.message || '').toLowerCase().includes(qLower) ||
-          String(e.meta_json || '').toLowerCase().includes(qLower);
+        const fields = [e.message, e.meta_json, e.request_id]
+          .map((value) => String(value || '').toLowerCase());
+        return terms.every((term) => fields.some((value) => value.includes(term)));
       });
       summaryText = `${entries.length} · ${t('logs.ftsLiveMode')}`;
     }
