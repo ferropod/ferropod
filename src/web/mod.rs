@@ -17,6 +17,7 @@ const ADMIN_SEARCH_MOCK: &str = include_str!("assets/search_mock.js");
 const ADMIN_SEARCH_COMPONENTS: &str = include_str!("assets/search_components.js");
 const ADMIN_PERF_COMPONENT: &str = include_str!("assets/perf_component.js");
 const ADMIN_OPS_COMPONENT: &str = include_str!("assets/ops_component.js");
+const ADMIN_RUNTIME_COMPONENT: &str = include_str!("assets/runtime_component.js");
 const ADMIN_UPDATE_COMPONENT: &str = include_str!("assets/update_component.js");
 const ADMIN_JS: &str = include_str!("assets/app.js");
 
@@ -31,6 +32,7 @@ fn asset_etags() -> &'static HashMap<&'static str, String> {
             ("search_components.js", ADMIN_SEARCH_COMPONENTS),
             ("perf_component.js", ADMIN_PERF_COMPONENT),
             ("ops_component.js", ADMIN_OPS_COMPONENT),
+            ("runtime_component.js", ADMIN_RUNTIME_COMPONENT),
             ("update_component.js", ADMIN_UPDATE_COMPONENT),
             ("app.js", ADMIN_JS),
         ];
@@ -117,6 +119,11 @@ pub async fn admin_asset(Path(file): Path<String>, headers: HeaderMap) -> Respon
             "ops_component.js",
             "application/javascript; charset=utf-8",
             ADMIN_OPS_COMPONENT,
+        ),
+        "runtime_component.js" => (
+            "runtime_component.js",
+            "application/javascript; charset=utf-8",
+            ADMIN_RUNTIME_COMPONENT,
         ),
         "update_component.js" => (
             "update_component.js",

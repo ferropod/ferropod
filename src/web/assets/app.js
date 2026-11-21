@@ -13,6 +13,7 @@
     'overview',
     'projects',
     'routes',
+    'runtime',
     'kv',
     'queues',
     'blobs',
@@ -524,6 +525,7 @@
       return state.projectId ? renderProjectDetail(state.projectId, fetchData) : renderProjects(fetchData);
     }
     if (state.currentRoute === 'routes') return renderRoutes(fetchData);
+    if (state.currentRoute === 'runtime') return renderRuntime(fetchData);
     if (state.currentRoute === 'kv') return renderKv(fetchData);
     if (state.currentRoute === 'queues') return renderQueues(fetchData);
     if (state.currentRoute === 'blobs') return renderBlobs(fetchData);
@@ -570,6 +572,17 @@
       });
     }
     return opsModulePromise;
+  }
+
+  var runtimeModulePromise = null;
+  function ensureRuntimeComponent() {
+    if (!runtimeModulePromise) {
+      runtimeModulePromise = import('/_panel/assets/runtime_component.js').catch(function (err) {
+        runtimeModulePromise = null;
+        throw err;
+      });
+    }
+    return runtimeModulePromise;
   }
 
   var updateModulePromise = null;
@@ -649,7 +662,7 @@
 
       '<div class="stats-grid">' +
       statCard(t('overview.projects'), st.projects, '#/projects') +
-      statCard(t('overview.routes'), st.routes, '#/routes') +
+      statCard(t('overview.routes'), st.routes, '#/projects') +
       statCard(t('overview.kvNamespaces'), st.kv_namespaces, '#/kv') +
       statCard(t('overview.queues'), st.queues, '#/queues') +
       statCard(t('overview.buckets'), st.buckets, '#/blobs') +
@@ -665,7 +678,7 @@
         ? '<div class="table-wrap"><table class="data-table stack-mobile"><thead><tr><th>' + esc(t('common.name')) + '</th><th>' + esc(t('projects.activeDeployment')) + '</th><th>' + esc(t('projects.previewDeployment')) + '</th></tr></thead><tbody>' + projRows + '</tbody></table></div>'
         : '<div class="empty-state">' + esc(t('common.empty')) + '</div>') +
       '</div>' +
-      '<div class="panel"><div class="panel-header"><h3 class="panel-title">' + esc(t('overview.recentRoutes')) + '</h3><a href="#/routes" class="btn btn-ghost btn-sm">' + esc(t('common.view')) + '</a></div>' +
+      '<div class="panel"><div class="panel-header"><h3 class="panel-title">' + esc(t('overview.recentRoutes')) + '</h3><a href="#/projects" class="btn btn-ghost btn-sm">' + esc(t('common.view')) + '</a></div>' +
       (routeRows
         ? '<div class="table-wrap"><table class="data-table stack-mobile"><thead><tr><th>' + esc(t('routes.host')) + '</th><th>' + esc(t('routes.project')) + '</th><th>' + esc(t('routes.targetEnv')) + '</th></tr></thead><tbody>' + routeRows + '</tbody></table></div>'
         : '<div class="empty-state">' + esc(t('common.empty')) + '</div>') +
@@ -693,7 +706,12 @@
     if (fetchData) {
       root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
       try {
-        state.projects = (await api('/_api/v1/projects')) || [];
+        var res = await Promise.all([
+          api('/_api/v1/projects'),
+          api('/_api/v1/routes').catch(function () { return []; })
+        ]);
+        state.projects = res[0] || [];
+        state.routes = res[1] || [];
       } catch (e) {
         root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
         return;
@@ -703,15 +721,21 @@
     var q = state.projectSearch.trim().toLowerCase();
     var filtered = state.projects.filter(function (p) {
       if (!q) return true;
-      return p.name.toLowerCase().indexOf(q) !== -1 || p.id.toLowerCase().indexOf(q) !== -1;
+      var pRoutes = state.routes.filter(function (r) { return r.project_id === p.id; });
+      var hostMatch = pRoutes.some(function (r) { return r.host.toLowerCase().indexOf(q) !== -1; });
+      return p.name.toLowerCase().indexOf(q) !== -1 || p.id.toLowerCase().indexOf(q) !== -1 || hostMatch;
     });
 
     var rows = filtered.map(function (p) {
       var canDel = canWriteProject(p.id);
+      var pRoutes = state.routes.filter(function (r) { return r.project_id === p.id; });
+      var routesBadges = pRoutes.length
+        ? pRoutes.map(function (r) { return '<span class="badge badge-info mono">' + esc(r.host) + '</span>'; }).join(' ')
+        : '<span class="muted text-xs">-</span>';
       return '<tr>' +
         '<td data-label="' + esc(t('common.name')) + '"><a href="#/projects/' + enc(p.id) + '" class="text-strong">' + esc(p.name) + '</a><div class="muted mono text-xs">' + esc(p.id) + '</div></td>' +
+        '<td data-label="' + esc(t('nav.routes')) + '"><div class="row gap-xs">' + routesBadges + '</div></td>' +
         '<td data-label="' + esc(t('projects.activeDeployment')) + '" class="mono text-xs">' + esc(p.active_deployment_id || '-') + '</td>' +
-        '<td data-label="' + esc(t('projects.previewDeployment')) + '" class="mono text-xs">' + esc(p.preview_deployment_id || '-') + '</td>' +
         '<td data-label="' + esc(t('common.createdAt')) + '" class="text-xs muted">' + esc(formatTime(p.created_at)) + '</td>' +
         '<td class="cell-actions-td"><div class="cell-actions">' +
         '<a href="#/projects/' + enc(p.id) + '" class="btn btn-sm">' + esc(t('common.detail')) + '</a>' +
@@ -729,7 +753,7 @@
       '<div class="toolbar-filters"><input type="search" id="proj-search-input" style="max-width:300px;" value="' + esc(state.projectSearch) + '" placeholder="' + esc(t('projects.searchPlaceholder')) + '"></div>' +
       '</div></div>' +
       (rows
-        ? '<div class="table-wrap"><table class="data-table stack-mobile"><thead><tr><th>' + esc(t('common.name')) + '</th><th>' + esc(t('projects.activeDeployment')) + '</th><th>' + esc(t('projects.previewDeployment')) + '</th><th>' + esc(t('common.createdAt')) + '</th><th class="th-actions">' + esc(t('common.actions')) + '</th></tr></thead><tbody>' + rows + '</tbody></table></div>'
+        ? '<div class="table-wrap"><table class="data-table stack-mobile"><thead><tr><th>' + esc(t('common.name')) + '</th><th>' + esc(t('nav.routes')) + '</th><th>' + esc(t('projects.activeDeployment')) + '</th><th>' + esc(t('common.createdAt')) + '</th><th class="th-actions">' + esc(t('common.actions')) + '</th></tr></thead><tbody>' + rows + '</tbody></table></div>'
         : '<div class="empty-state">' + esc(t('projects.empty')) + '</div>') +
       '</div>';
 
@@ -860,12 +884,15 @@
     var tabsHtml =
       '<div class="tabs">' +
       '<button type="button" class="tab-btn' + (state.projectTab === 'deployments' ? ' active' : '') + '" data-pd-tab="deployments">' + esc(t('projectDetail.tabDeployments')) + ' (' + deps.length + ')</button>' +
+      '<button type="button" class="tab-btn' + (state.projectTab === 'bindings' ? ' active' : '') + '" data-pd-tab="bindings">' + esc(t('projectDetail.tabBindings')) + '</button>' +
       '<button type="button" class="tab-btn' + (state.projectTab === 'secrets' ? ' active' : '') + '" data-pd-tab="secrets">' + esc(t('projectDetail.tabSecrets')) + '</button>' +
       '<button type="button" class="tab-btn' + (state.projectTab === 'routes' ? ' active' : '') + '" data-pd-tab="routes">' + esc(t('projectDetail.tabRoutes')) + ' (' + projRoutes.length + ')</button>' +
       '</div>';
 
     var bodyHtml = '';
-    if (state.projectTab === 'deployments') {
+    if (state.projectTab === 'bindings') {
+      bodyHtml = '<fp-project-bindings id="pd-bindings-panel"></fp-project-bindings>';
+    } else if (state.projectTab === 'deployments') {
       var depRows = deps.map(function (d) {
         var src = d.assets_bucket
           ? 'bucket://' + d.assets_bucket + (d.assets_prefix ? '/' + d.assets_prefix : '')
@@ -943,6 +970,32 @@
         renderProjectDetail(p.id, false);
       });
     });
+
+    if ($('pd-bindings-panel')) {
+      var bp = $('pd-bindings-panel');
+      var activeDep = deps.find(function (d) { return d.id === p.active_deployment_id; }) || deps[0] || null;
+      Promise.all([
+        ensureRuntimeComponent(),
+        api('/_api/v1/dbs').catch(function () { return []; }),
+        api('/_api/v1/kv').catch(function () { return []; }),
+        api('/_api/v1/queues').catch(function () { return []; }),
+        api('/_api/v1/buckets').catch(function () { return []; })
+      ]).then(function (res) {
+        bp.token = state.token || readStoredToken();
+        bp.canWrite = writable;
+        bp.project = p;
+        bp.activeDeployment = activeDep;
+        bp.resources = {
+          dbs: res[1] || [],
+          kvNamespaces: res[2] || [],
+          queues: res[3] || [],
+          buckets: res[4] || []
+        };
+      }).catch(function (e) { toast(e.message, 'error'); });
+      bp.addEventListener('fp-bindings-saved', function () {
+        renderProjectDetail(p.id, true);
+      });
+    }
 
     if ($('pd-new-dep')) $('pd-new-dep').addEventListener('click', function () { openNewDeploymentModal(p); });
     if ($('pd-promote-preview')) {
@@ -2447,6 +2500,46 @@
     root.appendChild(wb);
   }
 
+  async function renderRuntime(fetchData) {
+    var root = $('view-root');
+    root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
+    var resources = { dbs: [], kvNamespaces: [], queues: [], buckets: [] };
+    try {
+      await ensureRuntimeComponent();
+      var res = await Promise.all([
+        fetchData || !state.projects.length ? api('/_api/v1/projects') : Promise.resolve(state.projects),
+        fetchData || !state.routes.length ? api('/_api/v1/routes').catch(function () { return []; }) : Promise.resolve(state.routes),
+        api('/_api/v1/dbs').catch(function () { return []; }),
+        api('/_api/v1/kv').catch(function () { return []; }),
+        api('/_api/v1/queues').catch(function () { return []; }),
+        api('/_api/v1/buckets').catch(function () { return []; })
+      ]);
+      state.projects = res[0] || [];
+      state.routes = res[1] || [];
+      resources = {
+        dbs: res[2] || [],
+        kvNamespaces: res[3] || [],
+        queues: res[4] || [],
+        buckets: res[5] || []
+      };
+    } catch (e) {
+      root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+      return;
+    }
+    root.innerHTML = '';
+    var rp = document.createElement('fp-runtime-panel');
+    rp.token = state.token || readStoredToken();
+    rp.canWrite = !isReadonly();
+    rp.status = state.status;
+    rp.projects = state.projects;
+    rp.routes = state.routes;
+    rp.resources = resources;
+    rp.addEventListener('fp-runtime-created', function () {
+      renderRuntime(true);
+    });
+    root.appendChild(rp);
+  }
+
   async function renderOps(fetchData) {
     var root = $('view-root');
     root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
@@ -2885,6 +2978,15 @@
     document.addEventListener('fp-toast', function (ev) {
       if (ev.detail && ev.detail.message) {
         toast(ev.detail.message, ev.detail.kind || 'info');
+      }
+    });
+
+    document.addEventListener('fp-navigate', function (ev) {
+      if (ev.detail && ev.detail.hash) {
+        if (ev.detail.projectTab) {
+          state.projectTab = ev.detail.projectTab;
+        }
+        navigate(ev.detail.hash);
       }
     });
 
