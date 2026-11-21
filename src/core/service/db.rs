@@ -355,7 +355,7 @@ impl PlatformService {
                 for row_vals in qr.rows {
                     let mut full_obj = serde_json::Map::new();
                     let mut indexed_parts = Vec::new();
-                    for (col_name, val) in qr.columns.iter().zip(row_vals.into_iter()) {
+                    for (col_name, val) in qr.columns.iter().zip(row_vals) {
                         if idx.columns.iter().any(|c| c.eq_ignore_ascii_case(col_name)) {
                             match &val {
                                 serde_json::Value::String(s) => indexed_parts.push(s.clone()),

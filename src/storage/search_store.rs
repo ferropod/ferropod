@@ -314,11 +314,10 @@ pub fn score_json_document(doc: &serde_json::Value, query: &str, fuzzy: bool) ->
             && term
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            && ascii_words.iter().any(|w| edit_distance_one(term, w))
         {
-            if ascii_words.iter().any(|w| edit_distance_one(term, w)) {
-                score += 1.25;
-                hit = true;
-            }
+            score += 1.25;
+            hit = true;
         }
         if hit {
             matched_primary += 1;

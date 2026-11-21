@@ -118,7 +118,7 @@ async fn run_batch_ingestor(db: Database, mut rx: mpsc::Receiver<IngestItem>, no
         let mut any_ok = false;
         match results {
             Ok(ids) => {
-                for (item, id_res) in batch.drain(..).zip(ids.into_iter()) {
+                for (item, id_res) in batch.drain(..).zip(ids) {
                     if id_res.is_ok() {
                         any_ok = true;
                     }

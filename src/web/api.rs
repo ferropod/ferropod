@@ -610,7 +610,7 @@ async fn list_backups(
             }
         }
     }
-    items.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms));
+    items.sort_by_key(|item| std::cmp::Reverse(item.created_at_ms));
     Ok(Json(items))
 }
 
