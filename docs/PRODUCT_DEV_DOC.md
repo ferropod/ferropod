@@ -58,8 +58,8 @@ flowchart TD
 | 模块 | 后台路由 | 后端状态 | 前端状态 | 项目隔离 | 已知缺口 / 备注 |
 | :--- | :--- | :---: | :---: | :---: | :--- |
 | **概览与实时性能监控** | `#/overview` | ✅ | ✅ | ✅ | 真实 `/proc` 指标（RSS / 宿主机内存 / Load / FD / Uptime）+ 5s SVG 实时折线 |
-| **项目管理 & 部署** | `#/projects` | ✅ | ✅ | ✅ | 支持 Active / Preview 切换与回滚；Worker 执行待 M2 Wasmtime |
-| **域名路由** | `#/routes` | ✅ | ✅ | ✅ | 支持主机名映射、Prod/Preview 指向、Caddy On-Demand TLS 校验 |
+| **项目管理 (Workspace)** | `#/projects` | ✅ | ✅ | ✅ | 顶层项目隔离容器（路线 B）：聚合部署版本、可视化资源绑定 (Bindings)、关联域名路由与 Secrets |
+| **运行时 (Runtime)** | `#/runtime` | ✅ / 🟡 | ✅ | ✅ | Wasmtime AOT / 静态站点工作负载总览、独立创建运行时与快捷绑定、在线 Invoke 调试台（Wasm 执行待 M2） |
 | **Secrets 密钥** | 项目详情内 | ✅ | ✅ | ✅ | AES-256-GCM 静态加密，按 `project_id` 强隔离 |
 | **KV 存储** | `#/kv` | ✅ | ✅ | ✅ | 命名空间创建/列表/删除 + 键值 CRUD + TTL + 内存临时模式 + 原子自增 |
 | **消息队列** | `#/queues` | ✅ | ✅ | ✅ | 队列创建/列表/修改配置/删除 + 微批入队 + 统计 + 巡检 + DLQ 重放 + 清空 |
@@ -107,7 +107,8 @@ flowchart TD
 | `perf_component.js` | `<fp-perf-monitor>` 实时性能监控（SVG 折线） | **ESM 动态 `import()` 懒加载**（`#/overview`） |
 | `search_mock.js` / `search_components.js` | `<fp-search-workbench>`、`<fp-db-fts-panel>`、`<fp-log-search-panel>` | **ESM 动态 `import()` 懒加载**（`#/search`、`#/dbs` FTS、`#/logs`） |
 | `ops_component.js` | `<fp-ops-center>` 备份快照 + 定时任务中心 | **ESM 动态 `import()` 懒加载**（`#/ops`） |
-| `update_component.js` | 系统版本与更新中心组件 | 按需加载 |
+| `runtime_component.js` | `<fp-runtime-panel>` 运行时工作台 + `<fp-project-bindings>` 可视化资源绑定 | **ESM 动态 `import()` 懒加载**（`#/runtime`、`#/projects/:id`） |
+| `update_component.js` | 系统版本与更新中心组件 | **ESM 动态 `import()` 懒加载**（`#/updates`） |
 
 ### 5.3 传输与缓存优化
 - **Gzip 压缩**：`src/gateway/router.rs` 挂载 `tower_http::compression::CompressionLayer`，`app.js` 实测从 **124 KB → 21 KB**（压缩率 ~83%）。
