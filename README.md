@@ -1,8 +1,8 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/ferropod/.github/main/assets/banner-dark.svg" />
-    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/ferropod/.github/main/assets/banner-light.svg" />
-    <img alt="ferropod — AI-Native PaaS in Pure Rust" src="https://raw.githubusercontent.com/ferropod/.github/main/assets/banner-dark.svg" width="100%" />
+    <source media="(prefers-color-scheme: dark)" srcset="assets/banner-dark.svg" />
+    <source media="(prefers-color-scheme: light)" srcset="assets/banner-light.svg" />
+    <img alt="ferropod — AI-Native PaaS in Pure Rust" src="assets/banner-dark.svg" width="100%" />
   </picture>
 </p>
 

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 220" width="880" height="220" fill="none">
+  <rect width="880" height="220" rx="16" fill="#0F172A"/>
+  <g transform="translate(88, 22) scale(0.34375)">
+    <path d="M233.5 101 Q256 88 278.5 101 L379 159 Q401.5 172 401.5 198 L401.5 314 Q401.5 340 379 353 L278.5 411 Q256 424 233.5 411 L133 353 Q110.5 340 110.5 314 L110.5 198 Q110.5 172 133 159 Z" stroke="#F8FAFC" stroke-width="32" stroke-linejoin="round"/>
+    <path d="M256 192 L274 238 L320 256 L274 274 L256 320 L238 274 L192 256 L238 238 Z" fill="#EA580C"/>
+  </g>
+  <text x="272" y="114" fill="#F8FAFC" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Helvetica, Arial, sans-serif" font-size="68" font-weight="700" letter-spacing="-1.5">ferropod</text>
+  <text x="275" y="156" fill="#94A3B8" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Helvetica, Arial, sans-serif" font-size="24" font-weight="400" letter-spacing="0.2">AI-Native PaaS in Pure Rust</text>
+</svg>
