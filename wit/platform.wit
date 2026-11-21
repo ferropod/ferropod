@@ -1,34 +1,141 @@
-package ferropod:platform@0.1.0;
+package ferropod:platform@0.2.0;
+
+interface log {
+    enum level {
+        trace,
+        debug,
+        info,
+        warn,
+        error,
+    }
+
+    emit: func(level: level, message: string, meta-json: option<string>);
+}
 
 interface kv {
+    record entry {
+        value: list<u8>,
+        metadata: option<string>,
+        expires-at: option<s64>,
+        updated-at: s64,
+    }
+
+    record key-meta {
+        key: string,
+        size: u64,
+        metadata: option<string>,
+        expires-at: option<s64>,
+        updated-at: s64,
+    }
+
+    record list-page {
+        keys: list<key-meta>,
+        cursor: option<string>,
+    }
+
     get: func(binding: string, key: string) -> result<option<list<u8>>, string>;
-    put: func(binding: string, key: string, value: list<u8>, ttl-secs: option<u64>, ephemeral: bool) -> result<_, string>;
-    put-if-absent: func(binding: string, key: string, value: list<u8>, ttl-secs: option<u64>) -> result<bool, string>;
+    get-entry: func(binding: string, key: string) -> result<option<entry>, string>;
+    put: func(
+        binding: string,
+        key: string,
+        value: list<u8>,
+        metadata: option<string>,
+        ttl-secs: option<u64>,
+        ephemeral: bool
+    ) -> result<_, string>;
+    put-if-absent: func(
+        binding: string,
+        key: string,
+        value: list<u8>,
+        metadata: option<string>,
+        ttl-secs: option<u64>
+    ) -> result<bool, string>;
     incr: func(binding: string, key: string, delta: s64, ttl-secs: option<u64>) -> result<s64, string>;
     delete: func(binding: string, key: string) -> result<_, string>;
-    list: func(binding: string, prefix: option<string>, limit: u32) -> result<list<string>, string>;
+    %list: func(
+        binding: string,
+        prefix: option<string>,
+        cursor: option<string>,
+        limit: u32
+    ) -> result<list-page, string>;
 }
 
 interface db {
-    query: func(binding: string, sql: string, params-json: string) -> result<string, string>;
-    execute: func(binding: string, sql: string, params-json: string) -> result<u64, string>;
+    variant sql-value {
+        null,
+        boolean(bool),
+        integer(s64),
+        real(f64),
+        text(string),
+        blob(list<u8>),
+    }
+
+    record row {
+        values: list<sql-value>,
+    }
+
+    record query-result {
+        columns: list<string>,
+        rows: list<row>,
+    }
+
+    query: func(binding: string, sql: string, params: list<sql-value>) -> result<query-result, string>;
+    execute: func(binding: string, sql: string, params: list<sql-value>) -> result<u64, string>;
 }
 
 interface queue {
+    record enqueue-options {
+        delay-secs: option<u64>,
+        priority: option<s32>,
+        dedup-key: option<string>,
+        max-attempts: option<s32>,
+    }
+
     enqueue: func(
         binding: string,
         payload: list<u8>,
-        delay-secs: option<u64>,
-        priority: option<s32>,
-        dedup-key: option<string>
+        options: option<enqueue-options>
     ) -> result<s64, string>;
 }
 
 interface bucket {
+    record object-meta {
+        bucket: string,
+        key: string,
+        sha256: string,
+        size: u64,
+        content-type: string,
+        custom-meta: option<string>,
+        updated-at: s64,
+    }
+
+    record object-data {
+        meta: object-meta,
+        body: list<u8>,
+    }
+
+    record list-page {
+        objects: list<object-meta>,
+        cursor: option<string>,
+    }
+
     get: func(binding: string, key: string) -> result<option<list<u8>>, string>;
-    put: func(binding: string, key: string, body: list<u8>, content-type: option<string>) -> result<string, string>;
-    delete: func(binding: string, key: string) -> result<_, string>;
-    list: func(binding: string, prefix: option<string>, limit: u32) -> result<string, string>;
+    get-object: func(binding: string, key: string) -> result<option<object-data>, string>;
+    head: func(binding: string, key: string) -> result<option<object-meta>, string>;
+    put: func(
+        binding: string,
+        key: string,
+        body: list<u8>,
+        content-type: option<string>,
+        custom-meta: option<string>
+    ) -> result<object-meta, string>;
+    delete: func(binding: string, key: string) -> result<bool, string>;
+    %list: func(
+        binding: string,
+        prefix: option<string>,
+        cursor: option<string>,
+        limit: u32
+    ) -> result<list-page, string>;
     presign-url: func(binding: string, key: string, method: string, expires-secs: u64) -> result<string, string>;
 }
 
@@ -37,12 +144,68 @@ interface env {
     secret: func(key: string) -> option<string>;
 }
 
-world worker {
+interface queue-consumer {
+    record queue-job {
+        id: s64,
+        queue: string,
+        payload: list<u8>,
+        attempts: s32,
+        max-attempts: s32,
+        dedup-key: option<string>,
+        created-at: s64,
+    }
+
+    record retry-directive {
+        delay-secs: u64,
+        error: string,
+    }
+
+    variant job-outcome {
+        ack,
+        retry(retry-directive),
+        dead(string),
+    }
+
+    handle-batch: func(queue: string, jobs: list<queue-job>) -> list<job-outcome>;
+}
+
+interface scheduled {
+    record cron-event {
+        cron-id: string,
+        name: string,
+        schedule: string,
+        target: string,
+        scheduled-time-ms: s64,
+    }
+
+    handle-cron: func(event: cron-event) -> result<_, string>;
+}
+
+world host-imports {
+    import log;
     import kv;
     import db;
     import queue;
     import bucket;
     import env;
+}
 
-    export wasi:http/incoming-handler@0.2.0;
+world queue-worker {
+    include host-imports;
+    export queue-consumer;
+}
+
+world scheduled-worker {
+    include host-imports;
+    export scheduled;
+}
+
+world worker {
+    include host-imports;
+    import wasi:http/types@0.2.12;
+    import wasi:http/outgoing-handler@0.2.12;
+
+    export wasi:http/incoming-handler@0.2.12;
+    export queue-consumer;
+    export scheduled;
 }
