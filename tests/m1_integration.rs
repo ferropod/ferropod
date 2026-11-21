@@ -2132,6 +2132,24 @@ async fn search_considers_all_documents_and_keeps_best_matches() {
         .await;
         assert_eq!(status, StatusCode::CREATED);
     }
+    let mut ids = std::collections::HashSet::new();
+    for offset in (0..505).step_by(100) {
+        let (status, page) = json_req(
+            &app,
+            Method::GET,
+            &format!("{path}/docs?limit=100&offset={offset}"),
+            token,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let docs: Vec<serde_json::Value> = serde_json::from_slice(&page).unwrap();
+        assert!(docs.len() <= 100);
+        for doc in docs {
+            assert!(ids.insert(doc["id"].as_str().unwrap().to_string()));
+        }
+    }
+    assert_eq!(ids.len(), 505);
     let (status, bytes) = json_req(
         &app,
         Method::POST,

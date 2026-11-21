@@ -533,6 +533,31 @@ impl SearchStore for TursoSearchStore {
         Ok(out)
     }
 
+    async fn list_docs_page(
+        &self,
+        index_id: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<serde_json::Value>> {
+        let limit = limit.clamp(1, 200) as i64;
+        let offset = i64::try_from(offset)
+            .map_err(|_| FerroError::InvalidArgument("offset is too large".into()))?;
+        let conn = connect_db(&self.db)?;
+        let mut rows = conn.query(
+            "SELECT doc_json FROM search_docs WHERE index_id = ?1 ORDER BY updated_at DESC, doc_id ASC LIMIT ?2 OFFSET ?3",
+            (index_id, limit, offset),
+        ).await.map_err(map_turso_err)?;
+        let mut docs = Vec::new();
+        while let Some(row) = rows.next().await.map_err(map_turso_err)? {
+            let raw: String = row.get(0).map_err(map_turso_err)?;
+            docs.push(
+                serde_json::from_str(&raw)
+                    .map_err(|e| FerroError::Internal(anyhow::anyhow!("decode search doc: {e}")))?,
+            );
+        }
+        Ok(docs)
+    }
+
     async fn upsert_doc(
         &self,
         index_id: &str,

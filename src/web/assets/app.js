@@ -780,8 +780,16 @@
     });
   }
 
+  var detailRequestSequence = 0;
+
   async function renderProjectDetail(id, fetchData) {
     var root = $('view-root');
+    var requestToken = state.token;
+    var requestSequence = ++detailRequestSequence;
+    function isCurrentDetail() {
+      return state.currentRoute === 'runtime' && state.projectId === id &&
+        state.token === requestToken && detailRequestSequence === requestSequence;
+    }
     if (fetchData) {
       root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
       try {
@@ -792,25 +800,26 @@
           api('/_api/v1/buckets')
         ];
         var res = await Promise.all(reqs);
+        if (!isCurrentDetail()) return;
+        var secrets = [];
+        if (canWriteProject(res[0].id)) {
+          try {
+            secrets = (await api('/_api/v1/runtimes/' + enc(id) + '/secrets')) || [];
+          } catch (_) {}
+        }
+        if (!isCurrentDetail()) return;
         state.detailProject = res[0];
         state.detailDeployments = res[1] || [];
         state.routes = res[2] || [];
         state.buckets = res[3] || [];
-        if (canWriteProject(state.detailProject.id)) {
-          try {
-            state.detailSecrets = (await api('/_api/v1/runtimes/' + enc(id) + '/secrets')) || [];
-          } catch (_) {
-            state.detailSecrets = [];
-          }
-        } else {
-          state.detailSecrets = [];
-        }
+        state.detailSecrets = secrets;
       } catch (e) {
-        root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+        if (isCurrentDetail()) root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
         return;
       }
     }
 
+    if (!isCurrentDetail()) return;
     var p = state.detailProject;
     if (!p) return;
     var writable = canWriteProject(p.id);
@@ -2566,7 +2575,7 @@
     });
   }
 
-  var searchState = { indexes: [], selected: '', query: '', result: null };
+  var searchState = { indexes: [], selected: '', query: '', result: null, offset: 0 };
 
   async function renderSearch() {
     var root = $('view-root');
@@ -2579,7 +2588,12 @@
         searchState.result = null;
       }
       var selected = searchState.indexes.find(function (item) { return item.id === searchState.selected; });
-      var docs = selected ? await api('/_api/v1/search/' + enc(selected.id) + '/docs') : [];
+      if (selected && searchState.offset >= selected.doc_count) {
+        searchState.offset = Math.max(0, Math.ceil(selected.doc_count / 100) * 100 - 100);
+      }
+      var docs = selected ? await api('/_api/v1/search/' + enc(selected.id) + '/docs?limit=101&offset=' + searchState.offset) : [];
+      var hasMoreDocs = docs.length > 100;
+      docs = docs.slice(0, 100);
       var writable = selected && canWriteResource(selected.project_id);
       var options = searchState.indexes.map(function (item) {
         return '<option value="' + esc(item.id) + '"' + (item.id === searchState.selected ? ' selected' : '') +
@@ -2599,11 +2613,22 @@
             return '<div class="panel"><pre class="code-block">' + esc(JSON.stringify(doc, null, 2)) + '</pre>' +
               (writable && doc.id ? '<button class="btn btn-danger btn-sm" data-search-doc-delete="' + esc(doc.id) + '">' + esc(t('common.delete')) + '</button>' : '') + '</div>';
           }).join('') + '</div>' +
+          '<div class="row gap-xs"><button class="btn btn-sm" id="search-prev"' + (searchState.offset === 0 ? ' disabled' : '') + '>' + esc(t('search.previousPage')) + '</button>' +
+          '<button class="btn btn-sm" id="search-next"' + (!hasMoreDocs ? ' disabled' : '') + '>' + esc(t('search.nextPage')) + '</button></div>' +
           (writable ? '<button class="btn btn-danger" id="search-delete-index">' + esc(t('search.deleteIndex')) + '</button>' : '') : '') +
         '</div></div>';
       $('search-index-select').addEventListener('change', function (event) {
         searchState.selected = event.target.value;
+        searchState.offset = 0;
         searchState.result = null;
+        renderSearch();
+      });
+      if ($('search-prev')) $('search-prev').addEventListener('click', function () {
+        searchState.offset = Math.max(0, searchState.offset - 100);
+        renderSearch();
+      });
+      if ($('search-next')) $('search-next').addEventListener('click', function () {
+        searchState.offset += 100;
         renderSearch();
       });
       if ($('search-create-index')) $('search-create-index').addEventListener('click', function () {
@@ -2621,6 +2646,7 @@
                   name: $('search-index-name').value.trim(), project_id: $('search-index-owner').value || null
                 } });
                 searchState.selected = created.id;
+                searchState.offset = 0;
                 closeModal();
                 renderSearch();
               } catch (e) { toast(e.message, 'error'); }
@@ -2644,6 +2670,7 @@
           var doc = JSON.parse($('real-search-doc').value);
           await api('/_api/v1/search/' + enc(selected.id) + '/docs', { method: 'POST', json: doc });
           searchState.result = null;
+          searchState.offset = 0;
           renderSearch();
         } catch (e) { toast(e.message, 'error'); }
       });

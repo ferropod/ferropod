@@ -122,6 +122,24 @@ impl PlatformService {
         self.search.list_docs(&meta.id).await
     }
 
+    pub async fn list_search_docs_page(
+        &self,
+        caller: &Caller,
+        id_or_name: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<serde_json::Value>> {
+        let meta = self.resolve_search_index(id_or_name).await?;
+        Self::require_resource_read(
+            caller,
+            meta.project_id.as_deref(),
+            &format!("search index '{}'", meta.name),
+        )?;
+        self.search
+            .list_docs_page(&meta.id, limit.clamp(1, 200), offset)
+            .await
+    }
+
     pub async fn upsert_search_doc(
         &self,
         caller: &Caller,

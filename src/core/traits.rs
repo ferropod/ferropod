@@ -341,6 +341,20 @@ pub trait SearchStore: Send + Sync {
     async fn delete_index(&self, id: &str) -> Result<()>;
     async fn commit_index(&self, id: &str) -> Result<SearchIndexMeta>;
     async fn list_docs(&self, index_id: &str) -> Result<Vec<serde_json::Value>>;
+    async fn list_docs_page(
+        &self,
+        index_id: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<serde_json::Value>> {
+        Ok(self
+            .list_docs(index_id)
+            .await?
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .collect())
+    }
     async fn upsert_doc(&self, index_id: &str, doc: serde_json::Value)
         -> Result<serde_json::Value>;
     async fn delete_doc(&self, index_id: &str, doc_id: &str) -> Result<bool>;

@@ -1644,13 +1644,31 @@ async fn search_commit_index(
     Ok(Json(updated))
 }
 
+#[derive(Debug, Deserialize)]
+struct SearchDocsQuery {
+    limit: Option<usize>,
+    offset: Option<usize>,
+}
+
 async fn search_list_docs(
     State(svc): State<PlatformService>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    Query(query): Query<SearchDocsQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     let caller = authenticate_caller(&svc, &headers, None).await?;
-    let docs = svc.list_search_docs(&caller, &id).await.map_err(ApiError)?;
+    let docs = if query.limit.is_some() || query.offset.is_some() {
+        svc.list_search_docs_page(
+            &caller,
+            &id,
+            query.limit.unwrap_or(100),
+            query.offset.unwrap_or(0),
+        )
+        .await
+    } else {
+        svc.list_search_docs(&caller, &id).await
+    }
+    .map_err(ApiError)?;
     Ok(Json(docs))
 }
 
