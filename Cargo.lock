@@ -1181,7 +1181,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "mime_guess",
- "rand 0.8.8",
+ "rand 0.10.4",
  "rcgen 0.14.10",
  "reqwest",
  "rustls",
