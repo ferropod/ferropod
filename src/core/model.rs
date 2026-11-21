@@ -452,6 +452,10 @@ pub struct QueueConfig {
     pub retry_backoff_secs: i64,
     #[serde(default)]
     pub dlq_retention_secs: Option<i64>,
+    #[serde(default)]
+    pub ephemeral: bool,
+    #[serde(default)]
+    pub max_pending_jobs: Option<i64>,
     pub created_at: i64,
 }
 

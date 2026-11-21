@@ -192,6 +192,9 @@ struct CreateQueueReq {
     max_attempts: Option<i64>,
     retry_backoff_secs: Option<i64>,
     dlq_retention_secs: Option<i64>,
+    #[serde(default)]
+    ephemeral: bool,
+    max_pending_jobs: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1326,6 +1329,11 @@ async fn queue_create(
     Json(req): Json<CreateQueueReq>,
 ) -> Result<impl IntoResponse, ApiError> {
     let caller = authenticate_caller(&svc, &headers, None).await?;
+    let max_pending_jobs = req.max_pending_jobs.filter(|v| *v > 0).or(if req.ephemeral {
+        Some(10_000)
+    } else {
+        None
+    });
     let cfg = QueueConfig {
         group: req.group,
         name: req.name,
@@ -1339,6 +1347,8 @@ async fn queue_create(
         max_attempts: req.max_attempts.unwrap_or(5),
         retry_backoff_secs: req.retry_backoff_secs.unwrap_or(5).max(1),
         dlq_retention_secs: req.dlq_retention_secs.filter(|v| *v > 0),
+        ephemeral: req.ephemeral,
+        max_pending_jobs,
         created_at: Utc::now().timestamp(),
     };
     let saved = svc.queue_create(&caller, cfg).await.map_err(ApiError)?;
@@ -1370,6 +1380,9 @@ struct UpdateQueueReq {
     retry_backoff_secs: Option<i64>,
     dlq_retention_secs: Option<i64>,
     clear_dlq_retention: Option<bool>,
+    ephemeral: Option<bool>,
+    max_pending_jobs: Option<i64>,
+    clear_max_pending_jobs: Option<bool>,
 }
 
 async fn queue_update(
@@ -1394,6 +1407,11 @@ async fn queue_update(
     } else {
         req.dlq_retention_secs.map(Some)
     };
+    let max_pending_opt = if req.clear_max_pending_jobs.unwrap_or(false) {
+        Some(None)
+    } else {
+        req.max_pending_jobs.map(Some)
+    };
     let updated = svc
         .queue_update_full(
             &caller,
@@ -1408,6 +1426,8 @@ async fn queue_update(
             req.max_attempts,
             req.retry_backoff_secs,
             dlq_opt,
+            req.ephemeral,
+            max_pending_opt,
         )
         .await
         .map_err(ApiError)?;

@@ -189,6 +189,8 @@ async fn http_worker_and_all_wit_v2_host_bindings() {
                 max_attempts: 3,
                 retry_backoff_secs: 5,
                 dlq_retention_secs: None,
+                ephemeral: false,
+                max_pending_jobs: None,
                 created_at: 0,
             },
         )
@@ -665,6 +667,8 @@ async fn queue_consumer_ack_retry_dead_and_dlq_replay() {
                 max_attempts: 3,
                 retry_backoff_secs: 5,
                 dlq_retention_secs: None,
+                ephemeral: false,
+                max_pending_jobs: None,
                 created_at: 0,
             },
         )

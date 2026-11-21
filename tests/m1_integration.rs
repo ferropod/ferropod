@@ -274,6 +274,8 @@ async fn queue_microbatch_claim_ack_nack_dlq_and_lease_reap() {
                 max_attempts: 2,
                 retry_backoff_secs: 5,
                 dlq_retention_secs: None,
+                ephemeral: false,
+                max_pending_jobs: None,
                 created_at: Utc::now().timestamp(),
             },
         )
@@ -746,6 +748,8 @@ async fn multi_project_rbac_and_isolation() {
                 max_attempts: 3,
                 retry_backoff_secs: 5,
                 dlq_retention_secs: None,
+                ephemeral: false,
+                max_pending_jobs: None,
                 created_at: Utc::now().timestamp(),
             },
         )
@@ -767,6 +771,8 @@ async fn multi_project_rbac_and_isolation() {
                 max_attempts: 3,
                 retry_backoff_secs: 5,
                 dlq_retention_secs: None,
+                ephemeral: false,
+                max_pending_jobs: None,
                 created_at: Utc::now().timestamp(),
             },
         )
@@ -3101,6 +3107,8 @@ async fn security_hardening_regression_checks() {
                 max_attempts: 3,
                 retry_backoff_secs: 5,
                 dlq_retention_secs: None,
+                ephemeral: false,
+                max_pending_jobs: None,
                 created_at: Utc::now().timestamp(),
             },
         )
@@ -3569,4 +3577,79 @@ async fn extended_creation_options_mandatory_kv_ttl_and_patch_endpoints() {
     let si_patched = parse_json(si_patched_bytes);
     assert_eq!(si_patched["writer_budget_mb"], 32);
     assert_eq!(si_patched["description"], "Updated catalog search");
+
+    // 6. Ephemeral in-memory Queue with max_pending_jobs backpressure cap
+    let (st_eq, eq_meta_bytes) = json_req(
+        &app,
+        Method::POST,
+        "/_api/v1/queues",
+        tok,
+        Some(serde_json::json!({
+            "name": "mem-events",
+            "group": "realtime",
+            "ephemeral": true,
+            "max_pending_jobs": 2
+        })),
+    )
+    .await;
+    assert_eq!(st_eq, StatusCode::CREATED);
+    let eq_meta = parse_json(eq_meta_bytes);
+    assert_eq!(eq_meta["ephemeral"], true);
+    assert_eq!(eq_meta["max_pending_jobs"], 2);
+
+    let (st_enq1, enq1_bytes) = json_req(
+        &app,
+        Method::POST,
+        "/_api/v1/queues/mem-events/enqueue",
+        tok,
+        Some(serde_json::json!({
+            "payload": { "ev": 1 },
+            "dedup_key": "ev-1"
+        })),
+    )
+    .await;
+    assert_eq!(st_enq1, StatusCode::ACCEPTED);
+    let job1_id = parse_json(enq1_bytes)["job_id"].as_i64().unwrap();
+    assert!(job1_id >= 1_000_000_000);
+
+    // Dedup key returns existing in-memory job ID without consuming extra slot
+    let (st_enq_dup, enq_dup_bytes) = json_req(
+        &app,
+        Method::POST,
+        "/_api/v1/queues/mem-events/enqueue",
+        tok,
+        Some(serde_json::json!({
+            "payload": { "ev": 1 },
+            "dedup_key": "ev-1"
+        })),
+    )
+    .await;
+    assert_eq!(st_enq_dup, StatusCode::ACCEPTED);
+    assert_eq!(parse_json(enq_dup_bytes)["job_id"].as_i64().unwrap(), job1_id);
+
+    let (st_enq2, _) = json_req(
+        &app,
+        Method::POST,
+        "/_api/v1/queues/mem-events/enqueue",
+        tok,
+        Some(serde_json::json!({ "payload": { "ev": 2 } })),
+    )
+    .await;
+    assert_eq!(st_enq2, StatusCode::ACCEPTED);
+
+    // 3rd distinct job hits max_pending_jobs (2) -> 429 Too Many Requests
+    let (st_enq3, _) = json_req(
+        &app,
+        Method::POST,
+        "/_api/v1/queues/mem-events/enqueue",
+        tok,
+        Some(serde_json::json!({ "payload": { "ev": 3 } })),
+    )
+    .await;
+    assert_eq!(st_enq3, StatusCode::TOO_MANY_REQUESTS);
+
+    let (st_qstats, qstats_bytes) =
+        json_req(&app, Method::GET, "/_api/v1/queues/mem-events/stats", tok, None).await;
+    assert_eq!(st_qstats, StatusCode::OK);
+    assert_eq!(parse_json(qstats_bytes)["pending"], 2);
 }

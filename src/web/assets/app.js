@@ -1911,7 +1911,9 @@
       ? groupedMenu(state.queues, function (q) {
           return '<button type="button" class="list-menu-item' + (q.name === state.selectedQueue ? ' active' : '') + '" data-select-queue="' + esc(q.name) + '">' +
             '<span class="truncate">' + esc(q.name) + '</span>' +
-            '<span class="badge badge-neutral text-xs">c:' + esc(q.max_concurrency) + '</span></button>';
+            '<span class="row gap-xs" style="flex-wrap:nowrap;">' +
+            (q.ephemeral ? '<span class="badge badge-info text-xs">' + esc(t('queues.ephemeralBadge')) + '</span>' : '') +
+            '<span class="badge badge-neutral text-xs">c:' + esc(q.max_concurrency) + '</span></span></button>';
         })
       : '<div class="empty-state" style="padding:20px 10px;">' + esc(t('queues.empty')) + '</div>';
 
@@ -1946,6 +1948,8 @@
         '<div class="panel"><div class="panel-header"><div class="toolbar">' +
         '<div class="row">' +
         '<h3 class="panel-title mono">' + esc(qCfg.name) + '</h3>' +
+        (qCfg.ephemeral ? '<span class="badge badge-info">' + esc(t('queues.ephemeralBadge')) + '</span>' : '') +
+        (qCfg.max_pending_jobs ? '<span class="badge badge-neutral text-xs">max:' + esc(qCfg.max_pending_jobs) + '</span>' : '') +
         '<select id="queue-inspect-status" style="width:auto;min-width:150px;">' +
         '<option value="dead"' + (state.queueInspectStatus === 'dead' ? ' selected' : '') + '>' + esc(t('queues.statusDead')) + '</option>' +
         '<option value="pending"' + (state.queueInspectStatus === 'pending' ? ' selected' : '') + '>' + esc(t('queues.statusPending')) + '</option>' +
@@ -2071,7 +2075,11 @@
         '<div class="field"><label>' + esc(t('queues.maxAttempts')) + '</label><input type="number" id="eq-att" min="1" value="' + esc(qCfg.max_attempts) + '"></div>' +
         '<div class="field"><label>' + esc(t('queues.retryBackoffSecs')) + '</label><input type="number" id="eq-backoff" min="1" value="' + esc(qCfg.retry_backoff_secs || 5) + '"></div>' +
         '</div>' +
+        '<div class="grid-2">' +
         '<div class="field"><label>' + esc(t('queues.dlqRetentionSecs')) + '</label><input type="number" id="eq-dlq" min="0" value="' + esc(qCfg.dlq_retention_secs || '') + '" placeholder="' + esc(t('common.unlimited')) + '"></div>' +
+        '<div class="field"><label>' + esc(t('queues.maxPendingJobs')) + '</label><input type="number" id="eq-max-pend" min="0" value="' + esc(qCfg.max_pending_jobs || '') + '" placeholder="10000"></div>' +
+        '</div>' +
+        '<label class="checkbox-row"><input type="checkbox" id="eq-eph"' + (qCfg.ephemeral ? ' checked' : '') + '> ' + esc(t('queues.ephemeral')) + '</label>' +
         '</form>',
       footer:
         '<button type="button" class="btn" id="eq-cancel">' + esc(t('common.cancel')) + '</button>' +
@@ -2083,6 +2091,7 @@
           ev.preventDefault();
           var rateRaw = $('eq-rate').value.trim();
           var dlqRaw = $('eq-dlq').value.trim();
+          var maxPendRaw = $('eq-max-pend').value.trim();
           var cproj = $('eq-cproj').value;
           var body = {
             group: $('resource-group').value.trim(),
@@ -2091,7 +2100,8 @@
             batch_size: Number($('eq-batch').value) || 20,
             lease_secs: Number($('eq-lease').value) || 60,
             max_attempts: Number($('eq-att').value) || 5,
-            retry_backoff_secs: Number($('eq-backoff').value) || 5
+            retry_backoff_secs: Number($('eq-backoff').value) || 5,
+            ephemeral: $('eq-eph').checked
           };
           if (!cproj) {
             body.clear_consumer_project = true;
@@ -2107,6 +2117,11 @@
             body.clear_dlq_retention = true;
           } else {
             body.dlq_retention_secs = Number(dlqRaw);
+          }
+          if (maxPendRaw === '' || Number(maxPendRaw) <= 0) {
+            body.clear_max_pending_jobs = true;
+          } else {
+            body.max_pending_jobs = Number(maxPendRaw);
           }
           try {
             await api('/_api/v1/queues/' + enc(qCfg.name), { method: 'PATCH', json: body });
@@ -2142,6 +2157,7 @@
         '<div class="field"><label>' + esc(t('queues.producerProject')) + '</label><select id="cq-proj">' + renderProjectSelectOptions('', true) + '</select></div>' +
         '<div class="field"><label>' + esc(t('queues.consumerProject')) + '</label><select id="cq-cproj">' + renderProjectSelectOptions('', true) + '</select></div>' +
         '</div>' +
+        '<label class="checkbox-row"><input type="checkbox" id="cq-eph"> ' + esc(t('queues.ephemeral')) + '</label>' +
         '<details class="adv-options"><summary>' + esc(t('common.advancedOptions')) + '</summary>' +
         '<div class="adv-options-body stack gap-sm">' +
         '<div class="field"><label>' + esc(t('common.description')) + '</label><input type="text" id="cq-desc" placeholder="' + esc(t('common.descriptionPlaceholder')) + '"></div>' +
@@ -2152,7 +2168,8 @@
         '<div class="field"><label>' + esc(t('queues.leaseSecs')) + '</label><input type="number" id="cq-lease" value="60" min="1"></div>' +
         '<div class="field"><label>' + esc(t('queues.maxAttempts')) + '</label><input type="number" id="cq-attempts" value="5" min="1"></div>' +
         '<div class="field"><label>' + esc(t('queues.retryBackoffSecs')) + '</label><input type="number" id="cq-backoff" value="5" min="1"></div>' +
-        '<div class="field span-2"><label>' + esc(t('queues.dlqRetentionSecs')) + '</label><input type="number" id="cq-dlq" min="1" placeholder="' + esc(t('common.unlimited')) + '"></div>' +
+        '<div class="field"><label>' + esc(t('queues.dlqRetentionSecs')) + '</label><input type="number" id="cq-dlq" min="1" placeholder="' + esc(t('common.unlimited')) + '"></div>' +
+        '<div class="field"><label>' + esc(t('queues.maxPendingJobs')) + '</label><input type="number" id="cq-max-pend" min="1" placeholder="10000"></div>' +
         '</div></div></details>' +
         '</form>',
       footer:
@@ -2166,6 +2183,7 @@
           var name = $('cq-name').value.trim();
           var rateRaw = $('cq-rate').value.trim();
           var dlqRaw = $('cq-dlq').value.trim();
+          var maxPendRaw = $('cq-max-pend').value.trim();
           var descRaw = $('cq-desc').value.trim();
           try {
             await api('/_api/v1/queues', {
@@ -2182,7 +2200,9 @@
                 lease_secs: Number($('cq-lease').value || 60),
                 max_attempts: Number($('cq-attempts').value || 5),
                 retry_backoff_secs: Number($('cq-backoff').value || 5),
-                dlq_retention_secs: dlqRaw ? Number(dlqRaw) : null
+                dlq_retention_secs: dlqRaw ? Number(dlqRaw) : null,
+                ephemeral: $('cq-eph').checked,
+                max_pending_jobs: maxPendRaw ? Number(maxPendRaw) : null
               }
             });
             closeModal();

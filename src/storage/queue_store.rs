@@ -1,5 +1,6 @@
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -32,7 +33,9 @@ CREATE TABLE IF NOT EXISTS queues (
     resource_group TEXT,
     description TEXT,
     retry_backoff_secs INTEGER NOT NULL DEFAULT 5,
-    dlq_retention_secs INTEGER
+    dlq_retention_secs INTEGER,
+    ephemeral INTEGER NOT NULL DEFAULT 0,
+    max_pending_jobs INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS jobs (
@@ -60,7 +63,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_dedup
 
 const SELECT_QUEUE: &str =
     "SELECT name, project_id, consumer_project_id, max_concurrency, rate_limit_per_sec, \
-     batch_size, lease_secs, max_attempts, created_at, resource_group, description, retry_backoff_secs, dlq_retention_secs \
+     batch_size, lease_secs, max_attempts, created_at, resource_group, description, \
+     retry_backoff_secs, dlq_retention_secs, ephemeral, max_pending_jobs \
      FROM queues";
 
 fn row_to_queue(row: &turso::Row) -> Result<QueueConfig> {
@@ -78,10 +82,22 @@ fn row_to_queue(row: &turso::Row) -> Result<QueueConfig> {
         description: opt_text(row, 10)?,
         retry_backoff_secs: opt_i64(row, 11)?.unwrap_or(5).max(1),
         dlq_retention_secs: opt_i64(row, 12)?,
+        ephemeral: opt_i64(row, 13)?.unwrap_or(0) != 0,
+        max_pending_jobs: opt_i64(row, 14)?.filter(|v| *v > 0),
     })
 }
 
 const MAX_JOB_DELAY_SECS: u64 = 365 * 86_400;
+const DEFAULT_EPHEMERAL_MAX_PENDING_JOBS: i64 = 10_000;
+const MEM_JOB_ID_START: i64 = 1_000_000_000;
+
+#[derive(Default)]
+struct MemQueueState {
+    /// queue_name -> (ephemeral, max_pending_jobs, default_max_attempts)
+    configs: HashMap<String, (bool, Option<i64>, i32)>,
+    next_id: i64,
+    jobs: BTreeMap<i64, Job>,
+}
 
 struct IngestItem {
     queue: String,
@@ -91,12 +107,13 @@ struct IngestItem {
     reply: oneshot::Sender<Result<i64>>,
 }
 
-/// Turso MVCC queue reservoir (`queue.db`) with bounded micro-batch ingestion and backpressure.
+/// Turso MVCC queue reservoir (`queue.db`) with bounded micro-batch ingestion, in-memory ephemeral queues, and backpressure.
 #[derive(Clone)]
 pub struct TursoQueueStore {
     db: Database,
     db_path: PathBuf,
     ingest_tx: mpsc::Sender<IngestItem>,
+    mem: Arc<StdMutex<MemQueueState>>,
     pub notify: Arc<Notify>,
 }
 
@@ -113,8 +130,30 @@ impl TursoQueueStore {
             ("description", "TEXT"),
             ("retry_backoff_secs", "INTEGER NOT NULL DEFAULT 5"),
             ("dlq_retention_secs", "INTEGER"),
+            ("ephemeral", "INTEGER NOT NULL DEFAULT 0"),
+            ("max_pending_jobs", "INTEGER"),
         ] {
             ensure_column(&conn, "queues", col, def).await?;
+        }
+
+        let mut mem_state = MemQueueState {
+            configs: HashMap::new(),
+            next_id: MEM_JOB_ID_START,
+            jobs: BTreeMap::new(),
+        };
+        if let Ok(mut rows) = conn.query(SELECT_QUEUE, ()).await {
+            while let Ok(Some(row)) = rows.next().await {
+                if let Ok(cfg) = row_to_queue(&row) {
+                    mem_state.configs.insert(
+                        cfg.name,
+                        (
+                            cfg.ephemeral,
+                            cfg.max_pending_jobs,
+                            cfg.max_attempts.max(1) as i32,
+                        ),
+                    );
+                }
+            }
         }
 
         let (ingest_tx, ingest_rx) = mpsc::channel::<IngestItem>(4_096);
@@ -125,12 +164,21 @@ impl TursoQueueStore {
             db,
             db_path: path.to_path_buf(),
             ingest_tx,
+            mem: Arc::new(StdMutex::new(mem_state)),
             notify,
         })
     }
 
     pub async fn checkpoint(&self) {
         checkpoint_db(&self.db).await;
+    }
+
+    fn is_ephemeral_queue(&self, queue: &str) -> bool {
+        self.mem
+            .lock()
+            .ok()
+            .and_then(|g| g.configs.get(queue).map(|(eph, _, _)| *eph))
+            .unwrap_or(false)
     }
 }
 
@@ -242,14 +290,18 @@ async fn insert_batch_with_retry(db: &Database, batch: &[IngestItem]) -> Result<
 #[async_trait]
 impl QueueStore for TursoQueueStore {
     async fn create_queue(&self, cfg: QueueConfig) -> Result<()> {
+        let name_for_mem = cfg.name.clone();
+        let eph = cfg.ephemeral;
+        let max_pend = cfg.max_pending_jobs.filter(|v| *v > 0);
+        let def_att = cfg.max_attempts.max(1) as i32;
         with_retry(|| {
             let db = self.db.clone();
             let cfg = cfg.clone();
             async move {
                 let conn = db.connect()?;
                 conn.execute(
-                    "INSERT INTO queues (name, project_id, consumer_project_id, max_concurrency, rate_limit_per_sec, batch_size, lease_secs, max_attempts, created_at, resource_group, description, retry_backoff_secs, dlq_retention_secs)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                    "INSERT INTO queues (name, project_id, consumer_project_id, max_concurrency, rate_limit_per_sec, batch_size, lease_secs, max_attempts, created_at, resource_group, description, retry_backoff_secs, dlq_retention_secs, ephemeral, max_pending_jobs)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
 ",
                     vec![
                         TursoValue::Text(cfg.name),
@@ -267,16 +319,30 @@ impl QueueStore for TursoQueueStore {
                         cfg.dlq_retention_secs
                             .map(TursoValue::Integer)
                             .unwrap_or(TursoValue::Null),
+                        TursoValue::Integer(if cfg.ephemeral { 1 } else { 0 }),
+                        cfg.max_pending_jobs
+                            .filter(|v| *v > 0)
+                            .map(TursoValue::Integer)
+                            .unwrap_or(TursoValue::Null),
                     ],
                 )
                 .await
             }
         })
         .await?;
+        if let Ok(mut guard) = self.mem.lock() {
+            guard
+                .configs
+                .insert(name_for_mem, (eph, max_pend, def_att));
+        }
         Ok(())
     }
 
     async fn update_queue(&self, cfg: QueueConfig) -> Result<()> {
+        let name_for_mem = cfg.name.clone();
+        let eph = cfg.ephemeral;
+        let max_pend = cfg.max_pending_jobs.filter(|v| *v > 0);
+        let def_att = cfg.max_attempts.max(1) as i32;
         let affected = with_retry(|| {
             let db = self.db.clone();
             let cfg = cfg.clone();
@@ -286,8 +352,9 @@ impl QueueStore for TursoQueueStore {
                     "UPDATE queues SET max_concurrency = ?1, rate_limit_per_sec = ?2,
                      batch_size = ?3, lease_secs = ?4, max_attempts = ?5,
                      resource_group = ?6, description = ?7, consumer_project_id = ?8,
-                     retry_backoff_secs = ?9, dlq_retention_secs = ?10
-                     WHERE name = ?11 AND project_id IS ?12",
+                     retry_backoff_secs = ?9, dlq_retention_secs = ?10,
+                     ephemeral = ?11, max_pending_jobs = ?12
+                     WHERE name = ?13 AND project_id IS ?14",
                     vec![
                         TursoValue::Integer(cfg.max_concurrency),
                         cfg.rate_limit_per_sec
@@ -301,6 +368,11 @@ impl QueueStore for TursoQueueStore {
                         opt_text_param(cfg.consumer_project_id),
                         TursoValue::Integer(cfg.retry_backoff_secs.max(1)),
                         cfg.dlq_retention_secs
+                            .map(TursoValue::Integer)
+                            .unwrap_or(TursoValue::Null),
+                        TursoValue::Integer(if cfg.ephemeral { 1 } else { 0 }),
+                        cfg.max_pending_jobs
+                            .filter(|v| *v > 0)
                             .map(TursoValue::Integer)
                             .unwrap_or(TursoValue::Null),
                         TursoValue::Text(cfg.name),
@@ -317,6 +389,11 @@ impl QueueStore for TursoQueueStore {
             return Err(FerroError::NotFound(
                 "queue no longer exists or ownership changed".into(),
             ));
+        }
+        if let Ok(mut guard) = self.mem.lock() {
+            guard
+                .configs
+                .insert(name_for_mem, (eph, max_pend, def_att));
         }
         Ok(())
     }
@@ -348,6 +425,79 @@ impl QueueStore for TursoQueueStore {
     }
 
     async fn enqueue(&self, queue: &str, payload: Bytes, opts: EnqueueOpts) -> Result<i64> {
+        let cfg_entry = self
+            .mem
+            .lock()
+            .ok()
+            .and_then(|g| g.configs.get(queue).copied());
+        if let Some((true, max_pend, def_max_att)) = cfg_entry {
+            let cap = max_pend
+                .filter(|v| *v > 0)
+                .unwrap_or(DEFAULT_EPHEMERAL_MAX_PENDING_JOBS) as usize;
+            let now_ms = Utc::now().timestamp_millis();
+            let delay_secs = opts.delay_secs.unwrap_or(0).min(MAX_JOB_DELAY_SECS) as i64;
+            let run_at = now_ms.saturating_add(delay_secs * 1_000);
+            let priority = opts.priority.unwrap_or(0);
+            let max_attempts = opts.max_attempts.unwrap_or(def_max_att).max(1);
+            let id = {
+                let mut guard = self.mem.lock().map_err(|_| {
+                    FerroError::Internal(anyhow::anyhow!("ephemeral queue lock poisoned"))
+                })?;
+                if let Some(ref dk) = opts.dedup_key {
+                    if let Some(existing) = guard.jobs.values().find(|j| {
+                        j.queue == queue
+                            && j.status != JobStatus::Dead
+                            && j.dedup_key.as_deref() == Some(dk.as_str())
+                    }) {
+                        return Ok(existing.id);
+                    }
+                }
+                let active_count = guard
+                    .jobs
+                    .values()
+                    .filter(|j| j.queue == queue && j.status != JobStatus::Dead)
+                    .count();
+                if active_count >= cap {
+                    return Err(FerroError::RateLimited(format!(
+                        "ephemeral queue '{queue}' reached max_pending_jobs limit ({cap})"
+                    )));
+                }
+                let id = guard.next_id;
+                guard.next_id += 1;
+                guard.jobs.insert(
+                    id,
+                    Job {
+                        id,
+                        queue: queue.to_string(),
+                        payload: payload.to_vec(),
+                        status: JobStatus::Pending,
+                        priority,
+                        run_at,
+                        lease_until: 0,
+                        attempts: 0,
+                        max_attempts,
+                        dedup_key: opts.dedup_key,
+                        last_error: None,
+                        created_at: now_ms,
+                    },
+                );
+                id
+            };
+            self.notify.notify_waiters();
+            return Ok(id);
+        }
+
+        if let Some((false, Some(cap), _)) = cfg_entry {
+            if cap > 0 {
+                let st = self.stats(queue).await?;
+                if st.pending.saturating_add(st.running) >= cap {
+                    return Err(FerroError::RateLimited(format!(
+                        "queue '{queue}' reached max_pending_jobs limit ({cap})"
+                    )));
+                }
+            }
+        }
+
         let (tx, rx) = oneshot::channel();
         let item = IngestItem {
             queue: queue.to_string(),
@@ -371,8 +521,42 @@ impl QueueStore for TursoQueueStore {
     async fn claim_batch(&self, queue: &str, limit: usize, lease_secs: i64) -> Result<Vec<Job>> {
         let now_ms = Utc::now().timestamp_millis();
         let lease_until = now_ms + lease_secs * 1_000;
+        let mut mem_claimed = Vec::new();
+        let is_eph = {
+            let mut guard = self.mem.lock().map_err(|_| {
+                FerroError::Internal(anyhow::anyhow!("ephemeral queue lock poisoned"))
+            })?;
+            let is_eph = guard
+                .configs
+                .get(queue)
+                .map(|(eph, _, _)| *eph)
+                .unwrap_or(false);
+            let mut candidate_ids: Vec<(i32, i64, i64)> = guard
+                .jobs
+                .values()
+                .filter(|j| {
+                    j.queue == queue && j.status == JobStatus::Pending && j.run_at <= now_ms
+                })
+                .map(|j| (j.priority, j.run_at, j.id))
+                .collect();
+            candidate_ids.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+            for (_, _, id) in candidate_ids.into_iter().take(limit) {
+                if let Some(job) = guard.jobs.get_mut(&id) {
+                    job.status = JobStatus::Running;
+                    job.attempts += 1;
+                    job.lease_until = lease_until;
+                    mem_claimed.push(job.clone());
+                }
+            }
+            is_eph
+        };
+        if is_eph || mem_claimed.len() >= limit {
+            return Ok(mem_claimed);
+        }
+
+        let rem = limit - mem_claimed.len();
         let q = queue.to_string();
-        with_retry(|| {
+        let mut db_claimed = with_retry(|| {
             let db = self.db.clone();
             let q = q.clone();
             async move {
@@ -387,7 +571,7 @@ impl QueueStore for TursoQueueStore {
                          WHERE queue = ?1 AND status = 'pending' AND run_at <= ?2
                          ORDER BY priority DESC, run_at ASC, id ASC
                          LIMIT ?3",
-                        (q.as_str(), now_ms, limit as i64),
+                        (q.as_str(), now_ms, rem as i64),
                     )
                     .await?;
 
@@ -418,17 +602,31 @@ impl QueueStore for TursoQueueStore {
                 Ok(claimed)
             }
         })
-        .await
+        .await?;
+        mem_claimed.append(&mut db_claimed);
+        Ok(mem_claimed)
     }
 
     async fn ack_batch(&self, job_ids: &[i64]) -> Result<()> {
         if job_ids.is_empty() {
             return Ok(());
         }
-        let ids = job_ids.to_vec();
+        let mut db_ids = Vec::new();
+        if let Ok(mut guard) = self.mem.lock() {
+            for &id in job_ids {
+                if guard.jobs.remove(&id).is_none() && id < MEM_JOB_ID_START {
+                    db_ids.push(id);
+                }
+            }
+        } else {
+            db_ids.extend_from_slice(job_ids);
+        }
+        if db_ids.is_empty() {
+            return Ok(());
+        }
         with_retry(|| {
             let db = self.db.clone();
-            let ids = ids.clone();
+            let ids = db_ids.clone();
             async move {
                 let mut conn = db.connect()?;
                 let tx = conn
@@ -452,6 +650,23 @@ impl QueueStore for TursoQueueStore {
         let now_ms = Utc::now().timestamp_millis();
         let bounded_secs = retry_after_secs.min(MAX_JOB_DELAY_SECS) as i64;
         let next_run_at = now_ms.saturating_add(bounded_secs * 1_000);
+        if let Ok(mut guard) = self.mem.lock() {
+            if let Some(job) = guard.jobs.get_mut(&job_id) {
+                job.lease_until = 0;
+                job.last_error = Some(err.to_string());
+                if job.attempts >= job.max_attempts {
+                    job.status = JobStatus::Dead;
+                    return Ok(Some(JobStatus::Dead));
+                } else {
+                    job.status = JobStatus::Pending;
+                    job.run_at = next_run_at;
+                    return Ok(Some(JobStatus::Pending));
+                }
+            }
+            if job_id >= MEM_JOB_ID_START {
+                return Ok(None);
+            }
+        }
         let err_s = err.to_string();
         with_retry(|| {
             let db = self.db.clone();
@@ -498,6 +713,17 @@ impl QueueStore for TursoQueueStore {
     }
 
     async fn mark_dead(&self, job_id: i64, err: &str) -> Result<()> {
+        if let Ok(mut guard) = self.mem.lock() {
+            if let Some(job) = guard.jobs.get_mut(&job_id) {
+                job.status = JobStatus::Dead;
+                job.lease_until = 0;
+                job.last_error = Some(err.to_string());
+                return Ok(());
+            }
+            if job_id >= MEM_JOB_ID_START {
+                return Ok(());
+            }
+        }
         let err_s = err.to_string();
         with_retry(|| {
             let db = self.db.clone();
@@ -517,7 +743,23 @@ impl QueueStore for TursoQueueStore {
 
     async fn reap_expired(&self) -> Result<u64> {
         let now_ms = Utc::now().timestamp_millis();
-        with_retry(|| {
+        let mut mem_reaped = 0u64;
+        if let Ok(mut guard) = self.mem.lock() {
+            for job in guard.jobs.values_mut() {
+                if job.status == JobStatus::Running && job.lease_until < now_ms {
+                    job.lease_until = 0;
+                    job.last_error = Some("lease expired".to_string());
+                    if job.attempts >= job.max_attempts {
+                        job.status = JobStatus::Dead;
+                    } else {
+                        job.status = JobStatus::Pending;
+                        job.run_at = now_ms;
+                    }
+                    mem_reaped += 1;
+                }
+            }
+        }
+        let db_reaped = with_retry(|| {
             let db = self.db.clone();
             async move {
                 let mut conn = db.connect()?;
@@ -561,20 +803,45 @@ impl QueueStore for TursoQueueStore {
                 Ok(count)
             }
         })
-        .await
+        .await?;
+        Ok(mem_reaped + db_reaped)
     }
 
     async fn inspect(&self, queue: &str, status: JobStatus, limit: usize) -> Result<Vec<Job>> {
+        let cap = limit.min(500);
+        let mut out = Vec::new();
+        let is_eph = {
+            if let Ok(guard) = self.mem.lock() {
+                for job in guard.jobs.values() {
+                    if job.queue == queue && job.status == status {
+                        out.push(job.clone());
+                        if out.len() >= cap {
+                            break;
+                        }
+                    }
+                }
+                guard
+                    .configs
+                    .get(queue)
+                    .map(|(eph, _, _)| *eph)
+                    .unwrap_or(false)
+            } else {
+                false
+            }
+        };
+        if is_eph || out.len() >= cap {
+            return Ok(out);
+        }
+        let rem = cap - out.len();
         let conn = connect_db(&self.db)?;
         let mut rows = conn
             .query(
                 "SELECT id, queue, payload, status, priority, run_at, lease_until, attempts, max_attempts, dedup_key, last_error, created_at
                  FROM jobs WHERE queue = ?1 AND status = ?2 ORDER BY id ASC LIMIT ?3",
-                (queue, status.as_str(), limit.min(500) as i64),
+                (queue, status.as_str(), rem as i64),
             )
             .await
             .map_err(map_turso_err)?;
-        let mut out = Vec::new();
         while let Some(row) = rows.next().await.map_err(map_turso_err)? {
             out.push(row_to_job(&row)?);
         }
@@ -583,9 +850,30 @@ impl QueueStore for TursoQueueStore {
 
     async fn dlq_replay(&self, queue: &str, job_ids: Option<&[i64]>) -> Result<u64> {
         let now_ms = Utc::now().timestamp_millis();
+        let mut mem_replayed = 0u64;
+        if let Ok(mut guard) = self.mem.lock() {
+            for job in guard.jobs.values_mut() {
+                if job.queue == queue
+                    && job.status == JobStatus::Dead
+                    && job_ids.map(|ids| ids.contains(&job.id)).unwrap_or(true)
+                {
+                    job.status = JobStatus::Pending;
+                    job.attempts = 0;
+                    job.run_at = now_ms;
+                    job.lease_until = 0;
+                    mem_replayed += 1;
+                }
+            }
+        }
+        if mem_replayed > 0 {
+            self.notify.notify_waiters();
+        }
+        if self.is_ephemeral_queue(queue) {
+            return Ok(mem_replayed);
+        }
         let q = queue.to_string();
         let ids_owned = job_ids.map(|s| s.to_vec());
-        with_retry(|| {
+        let db_replayed = with_retry(|| {
             let db = self.db.clone();
             let q = q.clone();
             let ids_owned = ids_owned.clone();
@@ -619,12 +907,29 @@ impl QueueStore for TursoQueueStore {
                 Ok(updated)
             }
         })
-        .await
+        .await?;
+        Ok(mem_replayed + db_replayed)
     }
 
     async fn purge(&self, queue: &str) -> Result<u64> {
+        let mut mem_purged = 0u64;
+        if let Ok(mut guard) = self.mem.lock() {
+            let ids: Vec<i64> = guard
+                .jobs
+                .iter()
+                .filter(|(_, j)| j.queue == queue)
+                .map(|(&id, _)| id)
+                .collect();
+            mem_purged = ids.len() as u64;
+            for id in ids {
+                guard.jobs.remove(&id);
+            }
+        }
+        if self.is_ephemeral_queue(queue) {
+            return Ok(mem_purged);
+        }
         let q = queue.to_string();
-        with_retry(|| {
+        let db_purged = with_retry(|| {
             let db = self.db.clone();
             let q = q.clone();
             async move {
@@ -632,10 +937,15 @@ impl QueueStore for TursoQueueStore {
                 conn.execute("DELETE FROM jobs WHERE queue = ?1", [q]).await
             }
         })
-        .await
+        .await?;
+        Ok(mem_purged + db_purged)
     }
 
     async fn delete_queue(&self, name: &str) -> Result<()> {
+        if let Ok(mut guard) = self.mem.lock() {
+            guard.configs.remove(name);
+            guard.jobs.retain(|_, j| j.queue != name);
+        }
         let q = name.to_string();
         with_retry(|| {
             let db = self.db.clone();
@@ -661,7 +971,16 @@ impl QueueStore for TursoQueueStore {
         let now_ms = Utc::now().timestamp_millis();
         let pending_cutoff = now_ms - pending_max_age_secs * 1_000;
         let dlq_cutoff = now_ms - dlq_max_age_secs * 1_000;
-        with_retry(|| {
+        let mut mem_deleted = 0u64;
+        if let Ok(mut guard) = self.mem.lock() {
+            let before = guard.jobs.len();
+            guard.jobs.retain(|_, j| {
+                !((j.status == JobStatus::Pending && j.created_at < pending_cutoff)
+                    || (j.status == JobStatus::Dead && j.created_at < dlq_cutoff))
+            });
+            mem_deleted = (before - guard.jobs.len()) as u64;
+        }
+        let db_deleted = with_retry(|| {
             let db = self.db.clone();
             async move {
                 let mut conn = db.connect()?;
@@ -691,10 +1010,38 @@ impl QueueStore for TursoQueueStore {
                 Ok(deleted)
             }
         })
-        .await
+        .await?;
+        Ok(mem_deleted + db_deleted)
     }
 
     async fn stats(&self, queue: &str) -> Result<QueueStats> {
+        let mut stats = QueueStats {
+            queue: queue.to_string(),
+            ..Default::default()
+        };
+        let is_eph = {
+            if let Ok(guard) = self.mem.lock() {
+                for job in guard.jobs.values() {
+                    if job.queue == queue {
+                        match job.status {
+                            JobStatus::Pending => stats.pending += 1,
+                            JobStatus::Running => stats.running += 1,
+                            JobStatus::Dead => stats.dead += 1,
+                        }
+                    }
+                }
+                guard
+                    .configs
+                    .get(queue)
+                    .map(|(eph, _, _)| *eph)
+                    .unwrap_or(false)
+            } else {
+                false
+            }
+        };
+        if is_eph {
+            return Ok(stats);
+        }
         let conn = connect_db(&self.db)?;
         let mut rows = conn
             .query(
@@ -703,17 +1050,13 @@ impl QueueStore for TursoQueueStore {
             )
             .await
             .map_err(map_turso_err)?;
-        let mut stats = QueueStats {
-            queue: queue.to_string(),
-            ..Default::default()
-        };
         while let Some(row) = rows.next().await.map_err(map_turso_err)? {
             let st: String = row.get(0).map_err(map_turso_err)?;
             let cnt: i64 = row.get(1).map_err(map_turso_err)?;
             match st.as_str() {
-                "pending" => stats.pending = cnt,
-                "running" => stats.running = cnt,
-                "dead" => stats.dead = cnt,
+                "pending" => stats.pending += cnt,
+                "running" => stats.running += cnt,
+                "dead" => stats.dead += cnt,
                 _ => {}
             }
         }

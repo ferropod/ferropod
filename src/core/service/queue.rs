@@ -129,6 +129,8 @@ impl PlatformService {
             max_attempts,
             None,
             None,
+            None,
+            None,
         )
         .await
     }
@@ -148,6 +150,8 @@ impl PlatformService {
         max_attempts: Option<i64>,
         retry_backoff_secs: Option<i64>,
         dlq_retention_secs: Option<Option<i64>>,
+        ephemeral: Option<bool>,
+        max_pending_jobs: Option<Option<i64>>,
     ) -> Result<QueueConfig> {
         let mut cfg = self.require_queue_write(caller, queue).await?;
         if let Some(g) = group {
@@ -189,6 +193,12 @@ impl PlatformService {
         if let Some(v) = dlq_retention_secs {
             cfg.dlq_retention_secs = v.filter(|n| *n > 0);
         }
+        if let Some(eph) = ephemeral {
+            cfg.ephemeral = eph;
+        }
+        if let Some(mp) = max_pending_jobs {
+            cfg.max_pending_jobs = mp.filter(|n| *n > 0);
+        }
         self.queue.update_queue(cfg.clone()).await?;
         self.audit(
             cfg.project_id.as_deref(),
@@ -198,6 +208,8 @@ impl PlatformService {
                 "name": cfg.name,
                 "max_concurrency": cfg.max_concurrency,
                 "rate_limit_per_sec": cfg.rate_limit_per_sec,
+                "ephemeral": cfg.ephemeral,
+                "max_pending_jobs": cfg.max_pending_jobs,
             }),
         );
         Ok(cfg)
