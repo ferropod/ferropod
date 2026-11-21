@@ -4,11 +4,12 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use http::uri::Authority;
 use tokio::sync::watch;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use ferropod::config::{Config, Profile, TlsConfig};
+use ferropod::config::{Config, LocalApiConfig, Profile, TlsConfig};
 use ferropod::core::model::{Caller, TokenScope};
 use ferropod::core::service::{PlatformDeps, PlatformService};
 use ferropod::dispatcher::{maintenance::run_maintenance_loop, shutdown::shutdown_signal};
@@ -60,6 +61,19 @@ enum Commands {
         /// Redirect HTTP requests on `--bind` to HTTPS (`308 Permanent Redirect`), keeping `/_healthz` on HTTP.
         #[arg(long, env = "FERROPOD_HTTP_REDIRECT_HTTPS", default_value_t = false)]
         http_redirect_https: bool,
+        /// Site hostname whose API requests are forwarded to the local backend.
+        #[arg(long, env = "FERROPOD_LOCAL_API_HOST", requires = "local_api_upstream")]
+        local_api_host: Option<Authority>,
+        /// HTTP backend address (e.g. 127.0.0.1:3000).
+        #[arg(long, env = "FERROPOD_LOCAL_API_UPSTREAM", requires = "local_api_host")]
+        local_api_upstream: Option<SocketAddr>,
+        /// Path prefix to forward, preserving the full request path and query.
+        #[arg(
+            long,
+            env = "FERROPOD_LOCAL_API_PREFIX",
+            requires = "local_api_upstream"
+        )]
+        local_api_prefix: Option<String>,
         #[arg(long, env = "FERROPOD_DATA_DIR", default_value = "./data")]
         data_dir: PathBuf,
         #[arg(
@@ -234,6 +248,9 @@ async fn async_main(cli: Cli) -> Result<()> {
             acme_email,
             acme_staging,
             http_redirect_https,
+            local_api_host,
+            local_api_upstream,
+            local_api_prefix,
             data_dir,
             master_key,
         } => {
@@ -247,6 +264,46 @@ async fn async_main(cli: Cli) -> Result<()> {
                 acme_staging,
                 http_redirect_https,
             };
+            if let Some((host, upstream)) = local_api_host.zip(local_api_upstream) {
+                anyhow::ensure!(
+                    host.as_str() == host.host() && !host.host().trim_end_matches('.').is_empty(),
+                    "--local-api-host must be a hostname without a port"
+                );
+                anyhow::ensure!(
+                    upstream.port() != 0 && !upstream.ip().is_unspecified(),
+                    "--local-api-upstream requires a backend IP address and nonzero port"
+                );
+                anyhow::ensure!(
+                    ![Some(bind), https_bind]
+                        .into_iter()
+                        .flatten()
+                        .any(|listener| {
+                            listener.port() == upstream.port()
+                                && (listener.ip() == upstream.ip()
+                                    || listener.ip().is_unspecified())
+                        }),
+                    "--local-api-upstream must differ from the Ferropod listen addresses"
+                );
+                let prefix = local_api_prefix
+                    .as_deref()
+                    .unwrap_or("/api")
+                    .trim_end_matches('/');
+                anyhow::ensure!(
+                    prefix.starts_with('/')
+                        && prefix[1..].split('/').all(|segment| {
+                            !segment.is_empty()
+                                && segment.bytes().all(|byte| {
+                                    byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'
+                                })
+                        }),
+                    "--local-api-prefix must be a non-root path such as /api or /backend/v1"
+                );
+                cfg.local_api = Some(LocalApiConfig {
+                    host: host.host().trim_end_matches('.').to_ascii_lowercase(),
+                    prefix: prefix.to_owned(),
+                    upstream,
+                });
+            }
             run_server(cfg, false).await?;
         }
         Commands::Dev { bind, data_dir } => {

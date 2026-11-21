@@ -48,6 +48,7 @@ wasmtime-wasi-http = "51"
 http = "1"
 http-body-util = "0.1"
 hyper = "1"
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 base64 = "0.22"
 
 [dev-dependencies]

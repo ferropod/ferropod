@@ -5,7 +5,7 @@ use axum::{
     middleware,
     response::{IntoResponse, Response},
     routing::get,
-    Json, Router,
+    Extension, Json, Router,
 };
 use futures_util::TryStreamExt;
 use serde::Serialize;
@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::core::model::{RequestCtx, WorkerHttpRequest};
 use crate::core::service::PlatformService;
-use crate::gateway::{blob_api, guard::access_log_middleware};
+use crate::gateway::{blob_api, guard::access_log_middleware, local_api::LocalApiProxy};
 use crate::web;
 
 #[derive(Debug, Serialize)]
@@ -29,6 +29,7 @@ pub fn build_router(svc: PlatformService) -> Router {
     let blob_router = blob_api::router().layer(RequestBodyLimitLayer::new(
         svc.config().max_blob_upload_bytes,
     ));
+    let local_api = svc.config().local_api.as_ref().map(LocalApiProxy::new);
 
     Router::new()
         .route(
@@ -41,6 +42,7 @@ pub fn build_router(svc: PlatformService) -> Router {
         .route("/_panel/", get(web::admin_index))
         .route("/_panel/assets/{file}", get(web::admin_asset))
         .fallback(host_route_handler)
+        .layer(Extension(local_api))
         .layer(CompressionLayer::new())
         .layer(middleware::from_fn_with_state(
             svc.clone(),
@@ -49,15 +51,18 @@ pub fn build_router(svc: PlatformService) -> Router {
         .with_state(svc)
 }
 
-async fn host_route_handler(State(svc): State<PlatformService>, req: Request<Body>) -> Response {
+async fn host_route_handler(
+    State(svc): State<PlatformService>,
+    Extension(local_api): Extension<Option<LocalApiProxy>>,
+    req: Request<Body>,
+) -> Response {
     let req_path = req.uri().path();
     if req_path == "/_internal" || req_path.starts_with("/_internal/") {
         return (StatusCode::FORBIDDEN, "internal path forbidden").into_response();
     }
 
-    let method = req.method().clone();
-    let headers = req.headers().clone();
-    let host = headers
+    let host = req
+        .headers()
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
@@ -74,6 +79,12 @@ async fn host_route_handler(State(svc): State<PlatformService>, req: Request<Bod
             .into_response();
     };
 
+    if let Some(proxy) = local_api.filter(|proxy| proxy.matches(&route.host, req_path)) {
+        return proxy.forward(req).await;
+    }
+
+    let method = req.method().clone();
+    let headers = req.headers().clone();
     if let Some(bucket) = dep.assets_bucket.as_deref() {
         if method == Method::GET || method == Method::HEAD {
             if let Some(resp) = try_serve_static(

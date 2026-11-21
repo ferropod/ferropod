@@ -36,6 +36,14 @@ pub struct TlsConfig {
     pub http_redirect_https: bool,
 }
 
+/// A path on a routed site that is served by a configured HTTP backend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalApiConfig {
+    pub host: String,
+    pub prefix: String,
+    pub upstream: SocketAddr,
+}
+
 /// Runtime configuration for the single-binary `ferropod` server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -45,6 +53,8 @@ pub struct Config {
     /// Master key material used to derive AES-256-GCM and HMAC-SHA256 keys.
     pub master_key: String,
     pub tls: TlsConfig,
+    #[serde(default)]
+    pub local_api: Option<LocalApiConfig>,
     pub tokio_worker_threads: usize,
     pub max_concurrency: usize,
     pub queue_concurrency: usize,
@@ -80,6 +90,7 @@ impl Config {
                 data_dir,
                 master_key,
                 tls: TlsConfig::default(),
+                local_api: None,
                 tokio_worker_threads: 2,
                 max_concurrency: 32,
                 queue_concurrency: 4,
@@ -105,6 +116,7 @@ impl Config {
                 data_dir,
                 master_key,
                 tls: TlsConfig::default(),
+                local_api: None,
                 tokio_worker_threads: std::thread::available_parallelism()
                     .map(|n| n.get())
                     .unwrap_or(4),

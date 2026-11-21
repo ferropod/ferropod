@@ -96,6 +96,30 @@ ferropod snapshot --out ./data/backups/manual
 ferropod install-systemd --data-dir /var/lib/ferropod --bind 0.0.0.0:80 --https-bind 0.0.0.0:443 --acme-domain panel.example.com --http-redirect-https
 ```
 
+## Local Static Site with a Business API
+
+The Ferropod gateway can serve a static app and forward its business API
+requests from the same origin. Start your HTTP API, then start Ferropod with
+the app's hostname, path prefix, and backend IP address and port.
+
+```bash
+ferropod serve --bind 127.0.0.1:8080 \
+  --local-api-host 127.0.0.1 \
+  --local-api-prefix /api \
+  --local-api-upstream 127.0.0.1:3000
+```
+
+In the Ferropod panel, activate the static deployment and add a route for
+`127.0.0.1` to its active environment. Open `http://127.0.0.1:8080` and call the
+API with relative URLs such as `fetch('/api/users')`. The gateway forwards
+`/api` and its subpaths before SPA fallback. The backend receives the full
+request path (including the prefix) and query string.
+
+The prefix defaults to `/api`. You can also set `FERROPOD_LOCAL_API_HOST`,
+`FERROPOD_LOCAL_API_PREFIX`, and `FERROPOD_LOCAL_API_UPSTREAM` in the server
+environment. The upstream must be reachable from Ferropod. In a container,
+`127.0.0.1` refers to the container's own network namespace.
+
 ## Docker Deployment
 
 Single-container deployment with native HTTP/HTTPS ports:

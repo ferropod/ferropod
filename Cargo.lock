@@ -1179,6 +1179,7 @@ dependencies = [
  "http",
  "http-body-util",
  "hyper",
+ "hyper-util",
  "mime_guess",
  "rand 0.8.8",
  "rcgen 0.14.10",
