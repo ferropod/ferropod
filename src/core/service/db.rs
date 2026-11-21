@@ -351,40 +351,50 @@ impl PlatformService {
                 "invalid FTS table identifier".into(),
             ));
         }
+        let has_title_col = idx.columns.iter().any(|c| c.eq_ignore_ascii_case("title"));
         let mut hits: Vec<DbFtsHit> = Vec::new();
         let mut rows_indexed = 0usize;
         let select_sql = format!("SELECT * FROM \"{}\"", idx.table);
         self.db
             .visit_rows(&meta.id, &select_sql, &mut |columns, values| {
                 rows_indexed += 1;
-                let mut full_obj = serde_json::Map::new();
+                let mut title_val = serde_json::Value::Null;
                 let mut indexed_parts = Vec::new();
-                for (col_name, val) in columns.iter().zip(values) {
+                for (col_name, val) in columns.iter().zip(values.iter()) {
                     if idx.columns.iter().any(|c| c.eq_ignore_ascii_case(col_name)) {
-                        match &val {
+                        if has_title_col && col_name.eq_ignore_ascii_case("title") {
+                            title_val = val.clone();
+                        }
+                        match val {
                             serde_json::Value::String(value) => indexed_parts.push(value.clone()),
                             serde_json::Value::Null => {}
                             other => indexed_parts.push(other.to_string()),
                         }
                     }
-                    full_obj.insert(col_name.clone(), val);
                 }
                 let score_doc = serde_json::json!({
-                    "title": full_obj.get("title").cloned().unwrap_or(serde_json::Value::Null),
+                    "title": title_val,
                     "body": indexed_parts.join(" "),
                 });
                 let score = score_json_document(&score_doc, q, false);
                 if score > 0.0 {
-                    hits.push(DbFtsHit {
-                        row: serde_json::Value::Object(full_obj),
-                        score,
-                    });
-                    hits.sort_by(|a, b| {
-                        b.score
-                            .partial_cmp(&a.score)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    });
-                    hits.truncate(20);
+                    let should_insert =
+                        hits.len() < 20 || hits.last().is_some_and(|last| score > last.score);
+                    if should_insert {
+                        let mut full_obj = serde_json::Map::with_capacity(columns.len());
+                        for (col_name, val) in columns.iter().zip(values.iter()) {
+                            full_obj.insert(col_name.clone(), val.clone());
+                        }
+                        let pos = hits.partition_point(|h| h.score >= score);
+                        hits.insert(
+                            pos,
+                            DbFtsHit {
+                                row: serde_json::Value::Object(full_obj),
+                                score,
+                            },
+                        );
+                        hits.truncate(20);
+                    }
                 }
             })
             .await?;

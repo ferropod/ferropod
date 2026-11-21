@@ -588,6 +588,25 @@ impl ProjectStore for TursoCoreStore {
         Ok(entries)
     }
 
+    async fn list_referenced_artifact_paths(&self) -> Result<Vec<(String, String)>> {
+        let conn = connect_db(&self.db)?;
+        let mut rows = conn
+            .query(
+                "SELECT DISTINCT project_id, artifact_path FROM deployments WHERE artifact_path IS NOT NULL",
+                (),
+            )
+            .await
+            .map_err(map_turso_err)?;
+        let mut paths = Vec::new();
+        while let Some(row) = rows.next().await.map_err(map_turso_err)? {
+            let pid: String = row.get(0).map_err(map_turso_err)?;
+            if let Some(path) = opt_text(&row, 1)? {
+                paths.push((pid, path));
+            }
+        }
+        Ok(paths)
+    }
+
     async fn checkpoint(&self) -> Result<()> {
         checkpoint_db(&self.db).await;
         Ok(())

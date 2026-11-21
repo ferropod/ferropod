@@ -25,13 +25,21 @@ pub struct CreateDeploymentInput {
     pub target_env: Option<TargetEnv>,
 }
 
-fn normalize_host(raw: &str) -> String {
+pub(crate) fn normalize_host(raw: &str) -> String {
     let trimmed = raw.trim();
-    let without_port = match trimmed.rsplit_once(':') {
-        Some((host, port)) if !host.contains(']') && port.chars().all(|c| c.is_ascii_digit()) => {
-            host
+    let without_port = if let Some(rest) = trimmed.strip_prefix('[') {
+        if let Some(end) = rest.find(']') {
+            &trimmed[..=end + 1]
+        } else {
+            trimmed
         }
-        _ => trimmed,
+    } else {
+        match trimmed.rsplit_once(':') {
+            Some((host, port)) if !host.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => {
+                host
+            }
+            _ => trimmed,
+        }
     };
     without_port.trim_end_matches('.').to_ascii_lowercase()
 }
@@ -132,6 +140,7 @@ impl PlatformService {
         let proj = self.get_project_internal(id_or_name).await?;
         self.secrets.delete_project_secrets(&proj.id).await?;
         self.projects.delete_project(&proj.id).await?;
+        self.runtime.delete_project_artifacts(&proj.id).await?;
         self.refresh_routes().await?;
         self.audit(
             Some(&proj.id),
@@ -158,6 +167,13 @@ impl PlatformService {
                 .get_bucket(bucket)
                 .await?
                 .ok_or_else(|| FerroError::NotFound(format!("bucket '{bucket}'")))?;
+            if let Some(owner) = meta.project_id.as_deref() {
+                if owner != proj.id {
+                    return Err(FerroError::Forbidden(format!(
+                        "bucket '{bucket}' belongs to a different app"
+                    )));
+                }
+            }
             Self::require_resource_read(
                 caller,
                 meta.project_id.as_deref(),

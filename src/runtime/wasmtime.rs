@@ -1,8 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use anyhow::anyhow;
 use async_trait::async_trait;
@@ -95,6 +96,7 @@ const MAX_HTTP_BODY_BYTES: usize = 32 * 1024 * 1024;
 
 struct CachedComponent {
     component: Component,
+    artifact_key: Option<String>,
     last_used: u64,
 }
 
@@ -209,7 +211,7 @@ impl WasmtimeRuntime {
         }
     }
 
-    async fn insert_cached(&self, key: String, component: Component) {
+    async fn insert_cached(&self, key: String, component: Component, artifact_key: Option<String>) {
         let tick = self.seq.fetch_add(1, Ordering::Relaxed);
         let max_entries = self.config.wasm_cache_max_compiled.max(1);
         let mut guard = self.cache.lock().await;
@@ -226,9 +228,51 @@ impl WasmtimeRuntime {
             key,
             CachedComponent {
                 component,
+                artifact_key,
                 last_used: tick,
             },
         );
+    }
+
+    async fn invalidate_artifact_cache(&self, artifact_key: &str) {
+        let mut guard = self.cache.lock().await;
+        guard.retain(|k, v| k != artifact_key && v.artifact_key.as_deref() != Some(artifact_key));
+    }
+
+    async fn invalidate_project_cache(&self, project_id: &str) {
+        let prefix = format!("{project_id}/");
+        let mut guard = self.cache.lock().await;
+        guard.retain(|k, v| {
+            !k.starts_with(&prefix)
+                && !v
+                    .artifact_key
+                    .as_deref()
+                    .is_some_and(|a| a.starts_with(&prefix))
+        });
+    }
+
+    fn resolve_project_artifact_paths(
+        &self,
+        project_id: &str,
+        raw_path: &str,
+    ) -> Result<(String, PathBuf, String, PathBuf)> {
+        let clean_rel = Self::sanitize_rel_path(raw_path)?;
+        let artifacts_dir = self.config.artifacts_dir();
+        let effective_rel = if clean_rel.contains('/') {
+            let prefix = format!("{project_id}/");
+            if !clean_rel.starts_with(&prefix) {
+                return Err(FerroError::Forbidden(format!(
+                    "artifact path '{clean_rel}' does not belong to app '{project_id}'"
+                )));
+            }
+            clean_rel
+        } else {
+            format!("{project_id}/{clean_rel}")
+        };
+        let disk_path = artifacts_dir.join(&effective_rel);
+        let cwasm_rel = Self::to_cwasm_rel_path(&effective_rel);
+        let cwasm_disk = artifacts_dir.join(&cwasm_rel);
+        Ok((effective_rel, disk_path, cwasm_rel, cwasm_disk))
     }
 
     async fn get_cached(&self, key: &str) -> Option<Component> {
@@ -327,33 +371,35 @@ impl WasmtimeRuntime {
             }
         };
 
-        self.insert_cached(cwasm_rel.clone(), component.clone())
-            .await;
+        self.invalidate_artifact_cache(&cwasm_rel).await;
+        self.insert_cached(
+            cwasm_rel.clone(),
+            component.clone(),
+            Some(cwasm_rel.clone()),
+        )
+        .await;
         Ok((cwasm_rel, precompiled, component))
     }
 
     async fn get_or_load_component(&self, deployment: &Deployment) -> Result<Component> {
-        if let Some(comp) = self.get_cached(&deployment.id).await {
-            return Ok(comp);
-        }
-
         let raw_path = deployment.artifact_path.as_deref().ok_or_else(|| {
             FerroError::InvalidArgument(format!(
                 "deployment '{}' has no artifact_path",
                 deployment.id
             ))
         })?;
-        let clean_rel = Self::sanitize_rel_path(raw_path)?;
-        if let Some(comp) = self.get_cached(&clean_rel).await {
-            self.insert_cached(deployment.id.clone(), comp.clone())
-                .await;
+        let (clean_rel, disk_path, cwasm_rel, cwasm_disk) =
+            self.resolve_project_artifact_paths(&deployment.project_id, raw_path)?;
+
+        if let Some(comp) = self.get_cached(&deployment.id).await {
             return Ok(comp);
         }
 
-        let artifacts_dir = self.config.artifacts_dir();
-        let disk_path = artifacts_dir.join(&clean_rel);
-        let cwasm_rel = Self::to_cwasm_rel_path(&clean_rel);
-        let cwasm_disk = artifacts_dir.join(&cwasm_rel);
+        if let Some(comp) = self.get_cached(&cwasm_rel).await {
+            self.insert_cached(deployment.id.clone(), comp.clone(), Some(cwasm_rel))
+                .await;
+            return Ok(comp);
+        }
 
         let component = if cwasm_disk.exists()
             && matches!(
@@ -380,8 +426,13 @@ impl WasmtimeRuntime {
             )));
         };
 
-        self.insert_cached(cwasm_rel, component.clone()).await;
-        self.insert_cached(deployment.id.clone(), component.clone())
+        self.insert_cached(
+            cwasm_rel.clone(),
+            component.clone(),
+            Some(cwasm_rel.clone()),
+        )
+        .await;
+        self.insert_cached(deployment.id.clone(), component.clone(), Some(cwasm_rel))
             .await;
         Ok(component)
     }
@@ -413,7 +464,10 @@ impl WasmtimeRuntime {
         let state = HostState {
             wasi: wasi_builder.build(),
             http: WasiHttpCtx::new(),
-            hooks: FerroHttpHooks,
+            hooks: FerroHttpHooks {
+                blocked_upstream: self.config.local_api.as_ref().map(|c| c.upstream),
+                allow_private_outbound: self.config.wasm_allow_private_outbound,
+            },
             table: ResourceTable::new(),
             limits,
             svc,
@@ -633,18 +687,159 @@ impl WorkerRuntime for WasmtimeRuntime {
             .artifact_path
             .as_deref()
             .unwrap_or("worker.cwasm");
-        let (_, _, comp) = self
+        let (cwasm_rel, _, comp) = self
             .compile_or_store_artifact(&deployment.project_id, raw_rel, artifact)
             .await?;
-        self.insert_cached(deployment.id.clone(), comp).await;
+        self.insert_cached(deployment.id.clone(), comp, Some(cwasm_rel))
+            .await;
         Ok(())
     }
 
     async fn preload_deployment(&self, deployment: &Deployment) -> Result<()> {
-        if deployment.artifact_path.is_some() {
+        if let Some(raw_path) = deployment.artifact_path.as_deref() {
+            let (_, disk_path, _, cwasm_disk) =
+                self.resolve_project_artifact_paths(&deployment.project_id, raw_path)?;
+            let has_disk = tokio::fs::try_exists(&cwasm_disk).await.unwrap_or(false)
+                || tokio::fs::try_exists(&disk_path).await.unwrap_or(false);
+            if !has_disk {
+                return Err(FerroError::NotFound(format!(
+                    "artifact '{raw_path}' not found under artifacts directory"
+                )));
+            }
             let _ = self.get_or_load_component(deployment).await?;
         }
         Ok(())
+    }
+
+    async fn delete_project_artifacts(&self, project_id: &str) -> Result<()> {
+        if project_id.is_empty()
+            || project_id == "."
+            || project_id == ".."
+            || project_id.contains('/')
+            || project_id.contains('\\')
+        {
+            return Err(FerroError::InvalidArgument(format!(
+                "invalid project id '{project_id}'"
+            )));
+        }
+        self.invalidate_project_cache(project_id).await;
+        let dir = self.config.artifacts_dir().join(project_id);
+        match tokio::fs::remove_dir_all(&dir).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(FerroError::Internal(anyhow!(
+                "remove project artifacts '{}': {e}",
+                dir.display()
+            ))),
+        }
+    }
+
+    async fn gc_unreferenced_artifacts(
+        &self,
+        referenced_paths: &HashSet<String>,
+        grace_secs: u64,
+    ) -> Result<usize> {
+        let artifacts_dir = self.config.artifacts_dir();
+        if !tokio::fs::try_exists(&artifacts_dir).await.unwrap_or(false) {
+            return Ok(0);
+        }
+
+        let mut keep_rel = HashSet::with_capacity(referenced_paths.len() * 2);
+        for raw in referenced_paths {
+            if let Ok(clean) = Self::sanitize_rel_path(raw) {
+                keep_rel.insert(Self::to_cwasm_rel_path(&clean));
+                keep_rel.insert(clean);
+            }
+        }
+
+        let mut stack = vec![artifacts_dir.clone()];
+        let mut subdirs = Vec::new();
+        let mut removed_rels = Vec::new();
+        let now = SystemTime::now();
+
+        while let Some(dir) = stack.pop() {
+            let mut entries = match tokio::fs::read_dir(&dir).await {
+                Ok(rd) => rd,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    return Err(FerroError::Internal(anyhow!(
+                        "read artifacts dir '{}': {e}",
+                        dir.display()
+                    )))
+                }
+            };
+            while let Some(entry) = entries.next_entry().await.map_err(|e| {
+                FerroError::Internal(anyhow!("iterate artifacts dir '{}': {e}", dir.display()))
+            })? {
+                let path = entry.path();
+                let meta = match entry.metadata().await {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                if meta.is_dir() {
+                    subdirs.push(path.clone());
+                    stack.push(path);
+                    continue;
+                }
+                if !meta.is_file() {
+                    continue;
+                }
+                let fname = entry.file_name();
+                let fname_lossy = fname.to_string_lossy();
+                let effective_grace = if fname_lossy.contains(".tmp.") {
+                    grace_secs.max(60)
+                } else {
+                    grace_secs
+                };
+                if effective_grace > 0 {
+                    if let Ok(modified) = meta.modified() {
+                        if now.duration_since(modified).unwrap_or_default()
+                            < Duration::from_secs(effective_grace)
+                        {
+                            continue;
+                        }
+                    }
+                }
+                let Ok(rel) = path.strip_prefix(&artifacts_dir) else {
+                    continue;
+                };
+                let rel_str = rel
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                if !keep_rel.contains(&rel_str) {
+                    match tokio::fs::remove_file(&path).await {
+                        Ok(()) => removed_rels.push(rel_str),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(e) => {
+                            return Err(FerroError::Internal(anyhow!(
+                                "remove unreferenced artifact '{}': {e}",
+                                path.display()
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+
+        for subdir in subdirs.into_iter().rev() {
+            let _ = tokio::fs::remove_dir(&subdir).await;
+        }
+
+        let removed = removed_rels.len();
+        if !removed_rels.is_empty() {
+            let removed_set: HashSet<String> = removed_rels.into_iter().collect();
+            let mut guard = self.cache.lock().await;
+            guard.retain(|k, v| {
+                !removed_set.contains(k)
+                    && !v
+                        .artifact_key
+                        .as_deref()
+                        .is_some_and(|a| removed_set.contains(a))
+            });
+        }
+        Ok(removed)
     }
 
     async fn handle_http(
@@ -805,14 +1000,14 @@ impl WorkerRuntime for WasmtimeRuntime {
         }
 
         // HTTP fallback for workers that only export `wasi:http/incoming-handler`.
-        let target = cron_job
+        let raw_target = cron_job
             .as_ref()
             .map(|c| c.target.as_str())
-            .filter(|t| t.starts_with('/'))
             .unwrap_or("/_internal/cron");
+        let (method, path) = parse_cron_http_target(raw_target);
         let req = WorkerHttpRequest {
-            method: "POST".into(),
-            uri: target.to_string(),
+            method,
+            uri: path,
             headers: vec![
                 ("host".into(), b"localhost".to_vec()),
                 ("x-ferropod-cron".into(), expr.as_bytes().to_vec()),
@@ -831,7 +1026,109 @@ impl WorkerRuntime for WasmtimeRuntime {
     }
 }
 
-struct FerroHttpHooks;
+fn parse_cron_http_target(raw_target: &str) -> (String, String) {
+    let trimmed = raw_target.trim();
+    match trimmed.split_once(char::is_whitespace) {
+        Some((m, p)) => {
+            let method = Method::from_bytes(m.trim().as_bytes())
+                .ok()
+                .filter(|m| {
+                    matches!(
+                        *m,
+                        Method::GET
+                            | Method::POST
+                            | Method::PUT
+                            | Method::DELETE
+                            | Method::PATCH
+                            | Method::HEAD
+                    )
+                })
+                .map(|m| m.to_string())
+                .unwrap_or_else(|| "POST".into());
+            let p = p.trim();
+            let path = if p.starts_with('/') {
+                p
+            } else {
+                "/_internal/cron"
+            };
+            (method, path.to_string())
+        }
+        None => (
+            "POST".into(),
+            if trimmed.starts_with('/') {
+                trimmed.to_string()
+            } else {
+                "/_internal/cron".to_string()
+            },
+        ),
+    }
+}
+
+fn canonical_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => v6
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(v6)),
+        v4 @ IpAddr::V4(_) => v4,
+    }
+}
+
+fn is_prohibited_outbound_ip(ip: IpAddr) -> bool {
+    match canonical_ip(ip) {
+        IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            let is_cgnat = octets[0] == 100 && (octets[1] & 0b1100_0000) == 64;
+            let is_this_net = octets[0] == 0;
+            let is_benchmark = octets[0] == 198 && matches!(octets[1], 18 | 19);
+            let is_reserved = octets[0] >= 240;
+            v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || v4.is_unspecified()
+                || v4.is_multicast()
+                || is_cgnat
+                || is_this_net
+                || is_benchmark
+                || is_reserved
+        }
+        IpAddr::V6(v6) => {
+            let segs = v6.segments();
+            let is_link_local = (segs[0] & 0xffc0) == 0xfe80;
+            let is_unique_local = (segs[0] & 0xfe00) == 0xfc00;
+            let is_documentation = segs[0] == 0x2001 && segs[1] == 0x0db8;
+            let is_ipv4_compat =
+                segs[..6] == [0, 0, 0, 0, 0, 0] && !v6.is_loopback() && !v6.is_unspecified();
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || is_link_local
+                || is_unique_local
+                || is_documentation
+                || is_ipv4_compat
+        }
+    }
+}
+
+fn is_blocked_socket_addr(
+    addr: SocketAddr,
+    blocked_upstream: Option<SocketAddr>,
+    allow_private_outbound: bool,
+) -> bool {
+    if let Some(blocked) = blocked_upstream {
+        if addr.port() == blocked.port() && canonical_ip(addr.ip()) == canonical_ip(blocked.ip()) {
+            return true;
+        }
+    }
+    !allow_private_outbound && is_prohibited_outbound_ip(addr.ip())
+}
+
+struct FerroHttpHooks {
+    blocked_upstream: Option<SocketAddr>,
+    allow_private_outbound: bool,
+}
 
 impl WasiHttpHooks for FerroHttpHooks {
     fn default_scheme(&mut self) -> Option<http::uri::Scheme> {
@@ -840,7 +1137,7 @@ impl WasiHttpHooks for FerroHttpHooks {
 
     fn send_request(
         &mut self,
-        request: http::Request<WasiBody>,
+        mut request: http::Request<WasiBody>,
         options: Option<RequestOptions>,
         _fut: Box<
             dyn std::future::Future<Output = std::result::Result<(), wasmtime_wasi_http::Error>>
@@ -861,7 +1158,74 @@ impl WasiHttpHooks for FerroHttpHooks {
                 >,
             > + Send,
     > {
+        let blocked_upstream = self.blocked_upstream;
+        let allow_private_outbound = self.allow_private_outbound;
         Box::new(async move {
+            let Some(authority) = request.uri().authority().cloned() else {
+                return Err(wasmtime_wasi_http::Error::HttpRequestUriInvalid);
+            };
+            let is_https = request.uri().scheme() == Some(&http::uri::Scheme::HTTPS);
+            let port = authority
+                .port_u16()
+                .unwrap_or(if is_https { 443 } else { 80 });
+            let raw_host = authority.host();
+            let host = raw_host
+                .strip_prefix('[')
+                .and_then(|s| s.strip_suffix(']'))
+                .unwrap_or(raw_host);
+
+            if let Ok(ip) = host.parse::<IpAddr>() {
+                if is_blocked_socket_addr(
+                    SocketAddr::new(ip, port),
+                    blocked_upstream,
+                    allow_private_outbound,
+                ) {
+                    return Err(wasmtime_wasi_http::Error::DestinationIpProhibited);
+                }
+            } else {
+                let host_lower = host.trim_end_matches('.').to_ascii_lowercase();
+                if !allow_private_outbound
+                    && (host_lower == "localhost"
+                        || host_lower.ends_with(".localhost")
+                        || host_lower.ends_with(".internal"))
+                {
+                    return Err(wasmtime_wasi_http::Error::DestinationIpProhibited);
+                }
+                let resolved: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
+                    .await
+                    .map_err(|_| wasmtime_wasi_http::Error::DestinationNotFound)?
+                    .collect();
+                if resolved.is_empty() {
+                    return Err(wasmtime_wasi_http::Error::DestinationNotFound);
+                }
+                if resolved.iter().any(|addr| {
+                    is_blocked_socket_addr(*addr, blocked_upstream, allow_private_outbound)
+                }) {
+                    return Err(wasmtime_wasi_http::Error::DestinationIpProhibited);
+                }
+                // For plaintext HTTP, pin the validated resolved address to prevent DNS rebinding
+                // while preserving the original Host header for virtual hosting.
+                if !is_https {
+                    if !request.headers().contains_key(header::HOST) {
+                        if let Ok(hv) = HeaderValue::from_str(authority.as_str()) {
+                            request.headers_mut().insert(header::HOST, hv);
+                        }
+                    }
+                    let pinned = resolved
+                        .iter()
+                        .find(|addr| addr.is_ipv4())
+                        .copied()
+                        .unwrap_or(resolved[0]);
+                    if let Ok(pinned_auth) = pinned.to_string().parse::<http::uri::Authority>() {
+                        let mut parts = request.uri().clone().into_parts();
+                        parts.authority = Some(pinned_auth);
+                        if let Ok(pinned_uri) = Uri::from_parts(parts) {
+                            *request.uri_mut() = pinned_uri;
+                        }
+                    }
+                }
+            }
+
             let (res, io) = wasmtime_wasi_http::default_send_request(request, options).await?;
             Ok((
                 res.map(BodyExt::boxed_unsync),
@@ -1451,5 +1815,68 @@ impl wit_search::Host for HostState {
             .delete_search_doc(&self.caller, index_ref, &doc_id)
             .await
             .map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cron_http_target_parses_method_and_path() {
+        assert_eq!(
+            parse_cron_http_target("GET /custom-cron?full=1"),
+            ("GET".into(), "/custom-cron?full=1".into())
+        );
+        assert_eq!(
+            parse_cron_http_target("post /_internal/cron"),
+            ("POST".into(), "/_internal/cron".into())
+        );
+        assert_eq!(
+            parse_cron_http_target("/nightly-sync"),
+            ("POST".into(), "/nightly-sync".into())
+        );
+        assert_eq!(
+            parse_cron_http_target("invalid-target"),
+            ("POST".into(), "/_internal/cron".into())
+        );
+    }
+
+    #[test]
+    fn outbound_ssrf_ip_classification() {
+        for blocked in [
+            "127.0.0.1",
+            "10.0.0.1",
+            "172.16.0.5",
+            "192.168.1.10",
+            "169.254.169.254",
+            "100.64.0.1",
+            "0.0.0.0",
+            "::1",
+            "fe80::1",
+            "fc00::1",
+            "::ffff:127.0.0.1",
+            "::ffff:169.254.169.254",
+            "::127.0.0.1",
+        ] {
+            let ip: IpAddr = blocked.parse().unwrap();
+            assert!(is_prohibited_outbound_ip(ip), "expected {blocked} blocked");
+        }
+        assert!(!is_prohibited_outbound_ip("93.184.216.34".parse().unwrap()));
+        assert!(!is_prohibited_outbound_ip(
+            "2606:4700:4700::1111".parse().unwrap()
+        ));
+
+        let blocked_up: SocketAddr = "127.0.0.1:3000".parse().unwrap();
+        assert!(is_blocked_socket_addr(
+            "[::ffff:127.0.0.1]:3000".parse().unwrap(),
+            Some(blocked_up),
+            true,
+        ));
+        assert!(!is_blocked_socket_addr(
+            "127.0.0.1:3001".parse().unwrap(),
+            Some(blocked_up),
+            true,
+        ));
     }
 }

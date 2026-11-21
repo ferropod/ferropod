@@ -664,13 +664,14 @@ impl SearchStore for TursoSearchStore {
         let conn = connect_db(&self.db)?;
         let mut rows = conn
             .query(
-                "SELECT doc_json FROM search_docs WHERE index_id = ?1 ORDER BY updated_at DESC",
+                "SELECT doc_json FROM search_docs WHERE index_id = ?1 ORDER BY updated_at DESC, doc_id ASC",
                 [meta.id.as_str()],
             )
             .await
             .map_err(map_turso_err)?;
+        let sort_updated_desc = input.sort.as_deref() == Some("updated_desc");
         let mut facets: HashMap<String, HashMap<String, usize>> = HashMap::new();
-        let mut hits: Vec<SearchHit> = Vec::new();
+        let mut hits: Vec<SearchHit> = Vec::with_capacity(limit);
         let mut total = 0usize;
 
         while let Some(row) = rows.next().await.map_err(map_turso_err)? {
@@ -717,31 +718,19 @@ impl SearchStore for TursoSearchStore {
                 continue;
             }
             total += 1;
-            hits.push(SearchHit { doc, score });
-            hits.sort_by(|a, b| {
-                let updated = || {
-                    let a_time = a
-                        .doc
-                        .get("updated_at")
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(0);
-                    let b_time = b
-                        .doc
-                        .get("updated_at")
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(0);
-                    b_time.cmp(&a_time)
-                };
-                if input.sort.as_deref() == Some("updated_desc") {
-                    updated()
-                } else {
-                    b.score
-                        .partial_cmp(&a.score)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                        .then_with(updated)
+            if sort_updated_desc {
+                if hits.len() < limit {
+                    hits.push(SearchHit { doc, score });
                 }
-            });
-            hits.truncate(limit);
+            } else {
+                let should_insert =
+                    hits.len() < limit || hits.last().is_some_and(|last| score > last.score);
+                if should_insert {
+                    let pos = hits.partition_point(|h| h.score >= score);
+                    hits.insert(pos, SearchHit { doc, score });
+                    hits.truncate(limit);
+                }
+            }
         }
 
         Ok(SearchQueryResult {

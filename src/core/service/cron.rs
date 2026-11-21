@@ -14,16 +14,104 @@ fn parse_every_secs(schedule: &str) -> Option<i64> {
             .parse::<i64>()
             .ok()
             .filter(|n| *n > 0)
-            .map(|n| n * 60)
+            .and_then(|n| n.checked_mul(60))
     } else if let Some(num) = rest.strip_suffix('h') {
         num.trim()
             .parse::<i64>()
             .ok()
             .filter(|n| *n > 0)
-            .map(|n| n * 3600)
+            .and_then(|n| n.checked_mul(3600))
     } else {
         None
     }
+}
+
+fn parse_cron_part(
+    part: &str,
+    min: u32,
+    max: u32,
+    allow_seven_as_zero: bool,
+) -> Option<(u32, u32, u32)> {
+    let part = part.trim();
+    if part.is_empty() {
+        return None;
+    }
+    let (range_str, step) = match part.split_once('/') {
+        Some((r, s)) => {
+            let step_val = s.trim().parse::<u32>().ok().filter(|v| *v > 0)?;
+            (r.trim(), step_val)
+        }
+        None => (part, 1),
+    };
+
+    if range_str == "*" {
+        return Some((min, max, step));
+    }
+    if let Some((a, b)) = range_str.split_once('-') {
+        let mut s = a.trim().parse::<u32>().ok()?;
+        let mut e = b.trim().parse::<u32>().ok()?;
+        if allow_seven_as_zero && s == 7 {
+            s = 0;
+        }
+        if allow_seven_as_zero && e == 7 {
+            e = 0;
+        }
+        if s > e || s < min || e > max {
+            return None;
+        }
+        return Some((s, e, step));
+    }
+    let mut exact = range_str.parse::<u32>().ok()?;
+    if allow_seven_as_zero && exact == 7 {
+        exact = 0;
+    }
+    if exact < min || exact > max {
+        return None;
+    }
+    let end = if step == 1 { exact } else { max };
+    Some((exact, end, step))
+}
+
+fn validate_cron_field(field: &str, min: u32, max: u32, allow_seven_as_zero: bool) -> bool {
+    let mut any = false;
+    for part in field.split(',') {
+        any = true;
+        if parse_cron_part(part, min, max, allow_seven_as_zero).is_none() {
+            return false;
+        }
+    }
+    any
+}
+
+/// Validate a cron schedule string before persisting it.
+pub fn validate_cron_schedule(schedule: &str) -> Result<()> {
+    let trimmed = schedule.trim();
+    if trimmed.is_empty() {
+        return Err(FerroError::InvalidArgument(
+            "cron schedule cannot be empty".into(),
+        ));
+    }
+    if parse_every_secs(trimmed).is_some()
+        || matches!(
+            trimmed,
+            "@hourly" | "@daily" | "@midnight" | "@weekly" | "@monthly"
+        )
+    {
+        return Ok(());
+    }
+    let fields: Vec<&str> = trimmed.split_whitespace().collect();
+    if fields.len() == 5
+        && validate_cron_field(fields[0], 0, 59, false)
+        && validate_cron_field(fields[1], 0, 23, false)
+        && validate_cron_field(fields[2], 1, 31, false)
+        && validate_cron_field(fields[3], 1, 12, false)
+        && validate_cron_field(fields[4], 0, 6, true)
+    {
+        return Ok(());
+    }
+    Err(FerroError::InvalidArgument(format!(
+        "invalid cron schedule '{trimmed}': expected 5 fields, @hourly/@daily/@weekly/@monthly, or @every <N>(s|m|h)"
+    )))
 }
 
 fn match_cron_field(
@@ -39,58 +127,9 @@ fn match_cron_field(
         value
     };
     for part in field.split(',') {
-        let part = part.trim();
-        if part.is_empty() {
+        let Some((start, end, step)) = parse_cron_part(part, min, max, allow_seven_as_zero) else {
             return false;
-        }
-        let (range_str, step) = match part.split_once('/') {
-            Some((r, s)) => {
-                let Ok(step_val) = s.trim().parse::<u32>() else {
-                    return false;
-                };
-                if step_val == 0 {
-                    return false;
-                }
-                (r.trim(), step_val)
-            }
-            None => (part, 1),
         };
-
-        let (start, end) = if range_str == "*" {
-            (min, max)
-        } else if let Some((a, b)) = range_str.split_once('-') {
-            let (Ok(mut s), Ok(mut e)) = (a.trim().parse::<u32>(), b.trim().parse::<u32>()) else {
-                return false;
-            };
-            if allow_seven_as_zero && s == 7 {
-                s = 0;
-            }
-            if allow_seven_as_zero && e == 7 {
-                e = 0;
-            }
-            if s > e || s < min || e > max {
-                return false;
-            }
-            (s, e)
-        } else {
-            let Ok(mut exact) = range_str.parse::<u32>() else {
-                return false;
-            };
-            if allow_seven_as_zero && exact == 7 {
-                exact = 0;
-            }
-            if exact < min || exact > max {
-                return false;
-            }
-            if step == 1 {
-                if norm_val == exact {
-                    return true;
-                }
-                continue;
-            }
-            (exact, max)
-        };
-
         if norm_val >= start && norm_val <= end && (norm_val - start) % step == 0 {
             return true;
         }
@@ -156,6 +195,7 @@ impl PlatformService {
                 "cron name, schedule, and target are required".into(),
             ));
         }
+        validate_cron_schedule(schedule)?;
         let resolved_pid = match (&caller.scope, project_id) {
             (TokenScope::Admin, pid) => self.resolve_optional_project_id(pid).await?,
             (TokenScope::Project(_), Some(req_pid)) => {
@@ -217,11 +257,7 @@ impl PlatformService {
         }
         if let Some(sc) = schedule {
             let sc = sc.trim();
-            if sc.is_empty() {
-                return Err(FerroError::InvalidArgument(
-                    "schedule cannot be empty".into(),
-                ));
-            }
+            validate_cron_schedule(sc)?;
             job.schedule = sc.to_string();
         }
         if let Some(tg) = target {
@@ -293,13 +329,13 @@ impl PlatformService {
                         err_msg = Some("active deployment was not found".into());
                     }
                 } else {
-                    err_msg = Some("runtime has no active deployment".into());
+                    err_msg = Some("app has no active deployment".into());
                 }
             } else {
-                err_msg = Some("runtime was not found".into());
+                err_msg = Some("app was not found".into());
             }
         } else {
-            err_msg = Some("cron job has no runtime".into());
+            err_msg = Some("cron job has no app".into());
         }
         if let Some(msg) = &err_msg {
             status = format!("error: {msg}");

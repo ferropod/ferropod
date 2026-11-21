@@ -1,7 +1,8 @@
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
 use clap::ValueEnum;
+use http::uri::Authority;
 use serde::{Deserialize, Serialize};
 
 /// Resource sizing preset for `ferropod serve`.
@@ -36,12 +37,89 @@ pub struct TlsConfig {
     pub http_redirect_https: bool,
 }
 
+/// Reserved Ferropod gateway path prefixes that `--local-api-prefix` must not shadow.
+pub const RESERVED_LOCAL_API_PREFIXES: &[&str] =
+    &["/_api", "/_blob", "/_panel", "/_internal", "/_healthz"];
+
+fn canonical_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => v6
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(v6)),
+        v4 @ IpAddr::V4(_) => v4,
+    }
+}
+
 /// A path on a routed site that is served by a configured HTTP backend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalApiConfig {
     pub host: String,
     pub prefix: String,
     pub upstream: SocketAddr,
+}
+
+impl LocalApiConfig {
+    /// Validate and normalize `--local-api-*` configuration against active Ferropod listeners.
+    pub fn validated(
+        host: &str,
+        prefix: Option<&str>,
+        upstream: SocketAddr,
+        listeners: &[SocketAddr],
+    ) -> anyhow::Result<Self> {
+        let trimmed_host = host.trim();
+        let authority: Authority = trimmed_host
+            .parse()
+            .map_err(|_| anyhow::anyhow!("--local-api-host must be a valid hostname"))?;
+        anyhow::ensure!(
+            authority.as_str() == authority.host()
+                && !authority.host().trim_end_matches('.').is_empty(),
+            "--local-api-host must be a hostname without a port"
+        );
+
+        let upstream_ip = canonical_ip(upstream.ip());
+        anyhow::ensure!(
+            upstream.port() != 0 && !upstream_ip.is_unspecified(),
+            "--local-api-upstream requires a backend IP address and nonzero port"
+        );
+        anyhow::ensure!(
+            !listeners.iter().any(|listener| {
+                listener.port() == upstream.port()
+                    && (canonical_ip(listener.ip()) == upstream_ip
+                        || listener.ip().is_unspecified())
+            }),
+            "--local-api-upstream must differ from the Ferropod listen addresses"
+        );
+
+        let raw_prefix = prefix.unwrap_or("/api").trim().trim_end_matches('/');
+        anyhow::ensure!(
+            raw_prefix.starts_with('/')
+                && !raw_prefix[1..].is_empty()
+                && raw_prefix[1..].split('/').all(|segment| {
+                    !segment.is_empty()
+                        && segment.bytes().all(|byte| {
+                            byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'
+                        })
+                }),
+            "--local-api-prefix must be a non-root path such as /api or /backend/v1"
+        );
+        let prefix_lower = raw_prefix.to_ascii_lowercase();
+        anyhow::ensure!(
+            !RESERVED_LOCAL_API_PREFIXES.iter().any(|reserved| {
+                prefix_lower == *reserved
+                    || prefix_lower
+                        .strip_prefix(reserved)
+                        .is_some_and(|rest| rest.starts_with('/'))
+            }),
+            "--local-api-prefix cannot shadow reserved Ferropod routes"
+        );
+
+        Ok(Self {
+            host: authority.host().trim_end_matches('.').to_ascii_lowercase(),
+            prefix: raw_prefix.to_owned(),
+            upstream,
+        })
+    }
 }
 
 /// Runtime configuration for the single-binary `ferropod` server.
@@ -73,6 +151,8 @@ pub struct Config {
     pub wasm_compile_concurrency: usize,
     pub wasm_epoch_timeout_ms: u64,
     pub wasm_cache_max_compiled: usize,
+    #[serde(default)]
+    pub wasm_allow_private_outbound: bool,
 }
 
 impl Config {
@@ -109,6 +189,7 @@ impl Config {
                 wasm_compile_concurrency: 1,
                 wasm_epoch_timeout_ms: 10_000,
                 wasm_cache_max_compiled: 8,
+                wasm_allow_private_outbound: false,
             },
             Profile::Standard => Self {
                 profile,
@@ -137,6 +218,7 @@ impl Config {
                 wasm_compile_concurrency: 2,
                 wasm_epoch_timeout_ms: 10_000,
                 wasm_cache_max_compiled: 32,
+                wasm_allow_private_outbound: false,
             },
         }
     }

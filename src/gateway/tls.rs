@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use axum::{
     body::Body,
-    http::{header, Request, StatusCode},
+    http::{Request, StatusCode},
     response::{IntoResponse, Redirect, Response},
     routing::get,
     Json, Router,
@@ -149,11 +149,7 @@ pub fn build_https_redirect_router(https_port: u16) -> Router {
 }
 
 fn redirect_to_https(req: Request<Body>, https_port: u16) -> Response {
-    let Some(raw_host) = req
-        .headers()
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
-    else {
+    let Some(raw_host) = crate::gateway::extract_request_host(&req) else {
         return (StatusCode::BAD_REQUEST, "missing Host header").into_response();
     };
     let host = strip_host_port(raw_host);

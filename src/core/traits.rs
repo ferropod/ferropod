@@ -39,6 +39,7 @@ pub trait ProjectStore: Send + Sync {
     async fn delete_route(&self, host: &str, expected_owner: Option<&str>) -> Result<bool>;
     async fn list_routes(&self) -> Result<Vec<Route>>;
     async fn load_route_entries(&self) -> Result<Vec<RouteEntry>>;
+    async fn list_referenced_artifact_paths(&self) -> Result<Vec<(String, String)>>;
 
     async fn checkpoint(&self) -> Result<()> {
         Ok(())
@@ -317,6 +318,18 @@ pub trait WorkerRuntime: Send + Sync {
     async fn preload_deployment(&self, deployment: &Deployment) -> Result<()> {
         let _ = deployment;
         Ok(())
+    }
+    async fn delete_project_artifacts(&self, project_id: &str) -> Result<()> {
+        let _ = project_id;
+        Ok(())
+    }
+    async fn gc_unreferenced_artifacts(
+        &self,
+        referenced_paths: &std::collections::HashSet<String>,
+        grace_secs: u64,
+    ) -> Result<usize> {
+        let _ = (referenced_paths, grace_secs);
+        Ok(0)
     }
     async fn handle_http(
         &self,

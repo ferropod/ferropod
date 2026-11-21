@@ -1657,18 +1657,15 @@ async fn search_list_docs(
     Query(query): Query<SearchDocsQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     let caller = authenticate_caller(&svc, &headers, None).await?;
-    let docs = if query.limit.is_some() || query.offset.is_some() {
-        svc.list_search_docs_page(
+    let docs = svc
+        .list_search_docs_page(
             &caller,
             &id,
             query.limit.unwrap_or(100),
             query.offset.unwrap_or(0),
         )
         .await
-    } else {
-        svc.list_search_docs(&caller, &id).await
-    }
-    .map_err(ApiError)?;
+        .map_err(ApiError)?;
     Ok(Json(docs))
 }
 

@@ -19,11 +19,11 @@ class NoRedirect(HTTPRedirectHandler):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--url', required=True, help='Ferropod origin, including https://')
-    parser.add_argument('--runtime', required=True, help='Runtime ID or name')
+    parser.add_argument('--app', '--runtime', dest='app', required=True, help='App ID or name')
     parser.add_argument('--file', required=True, type=Path, help='Built Wasm component')
     parser.add_argument('--target', choices=['prod', 'preview', 'ready'], default='preview')
     args = parser.parse_args()
-    token = os.environ.get('FERROPOD_TOKEN', '')
+    token = os.environ.get('FERROPOD_TOKEN', '').strip()
     if not token:
         parser.error('FERROPOD_TOKEN is required')
     url = urlsplit(args.url)
@@ -34,11 +34,13 @@ def main():
         parser.error('HTTPS is required except for local testing')
     if args.file.suffix.lower() not in ('.wasm', '.wat'):
         parser.error('--file must be a .wasm or .wat component')
+    if not args.file.is_file():
+        parser.error('--file must exist and be a regular file')
     size = args.file.stat().st_size
     if size == 0 or size > 64 * 1024 * 1024:
         parser.error('--file must be non-empty and at most 64 MiB')
     origin = args.url.rstrip('/')
-    runtime_path = '/_api/v1/runtimes/' + quote(args.runtime, safe='')
+    runtime_path = '/_api/v1/runtimes/' + quote(args.app, safe='')
     opener = build_opener(NoRedirect())
 
     def api(path, method='GET', data=None, content_type=None):
@@ -61,7 +63,11 @@ def main():
 
     runtime = api(runtime_path)
     deployments = api(runtime_path + '/deployments')
-    base_id = (runtime.get('preview_deployment_id') if args.target == 'preview' else None) or runtime.get('active_deployment_id')
+    base_id = (
+        (runtime.get('preview_deployment_id') if args.target == 'preview' else None)
+        or runtime.get('active_deployment_id')
+        or (deployments[0].get('id') if deployments else None)
+    )
     base = next((item for item in deployments if item['id'] == base_id), {})
     if base_id and not base:
         raise RuntimeError('current deployment was not returned; refusing to discard its settings')

@@ -270,7 +270,7 @@ impl LogStore for DailyLogStore {
                 idx += 1;
             }
             if let Some(raw_q) = q.q.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-                for term in raw_q.split_whitespace() {
+                for term in raw_q.split_whitespace().take(16) {
                     let pattern = format!("%{}%", escape_like(&term.to_lowercase()));
                     clauses.push(format!(
                         "(LOWER(message) LIKE ?{idx} ESCAPE '\\' OR LOWER(COALESCE(meta_json, '')) LIKE ?{idx} ESCAPE '\\' OR LOWER(COALESCE(request_id, '')) LIKE ?{idx} ESCAPE '\\')"
@@ -290,7 +290,10 @@ impl LogStore for DailyLogStore {
 
             let mut rows = match conn.query(&sql, params).await {
                 Ok(r) => r,
-                Err(_) => continue,
+                Err(err) => {
+                    tracing::warn!(%err, file = %path.display(), "daily log query failed");
+                    continue;
+                }
             };
             while let Some(row) = rows.next().await.map_err(map_turso_err)? {
                 collected.push(LogEntry {

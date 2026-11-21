@@ -74,6 +74,13 @@ enum Commands {
             requires = "local_api_upstream"
         )]
         local_api_prefix: Option<String>,
+        /// Allow WASM workers to connect to private/loopback/local-network IPs via outbound HTTP.
+        #[arg(
+            long,
+            env = "FERROPOD_WASM_ALLOW_PRIVATE_OUTBOUND",
+            default_value_t = false
+        )]
+        wasm_allow_private_outbound: bool,
         #[arg(long, env = "FERROPOD_DATA_DIR", default_value = "./data")]
         data_dir: PathBuf,
         #[arg(
@@ -251,10 +258,23 @@ async fn async_main(cli: Cli) -> Result<()> {
             local_api_host,
             local_api_upstream,
             local_api_prefix,
+            wasm_allow_private_outbound,
             data_dir,
             master_key,
         } => {
             let mut cfg = Config::for_profile(profile, bind, data_dir, master_key);
+            cfg.wasm_allow_private_outbound = wasm_allow_private_outbound;
+            let tls_active = tls_cert.is_some()
+                || tls_key.is_some()
+                || !acme_domain.is_empty()
+                || acme_email.is_some()
+                || acme_staging
+                || https_bind.is_some();
+            let effective_https_bind = if tls_active {
+                Some(https_bind.unwrap_or_else(|| "0.0.0.0:443".parse().expect("valid HTTPS bind")))
+            } else {
+                None
+            };
             cfg.tls = TlsConfig {
                 https_bind,
                 cert_path: tls_cert,
@@ -265,54 +285,27 @@ async fn async_main(cli: Cli) -> Result<()> {
                 http_redirect_https,
             };
             if let Some((host, upstream)) = local_api_host.zip(local_api_upstream) {
-                anyhow::ensure!(
-                    host.as_str() == host.host() && !host.host().trim_end_matches('.').is_empty(),
-                    "--local-api-host must be a hostname without a port"
-                );
-                anyhow::ensure!(
-                    upstream.port() != 0 && !upstream.ip().is_unspecified(),
-                    "--local-api-upstream requires a backend IP address and nonzero port"
-                );
-                anyhow::ensure!(
-                    ![Some(bind), https_bind]
-                        .into_iter()
-                        .flatten()
-                        .any(|listener| {
-                            listener.port() == upstream.port()
-                                && (listener.ip() == upstream.ip()
-                                    || listener.ip().is_unspecified())
-                        }),
-                    "--local-api-upstream must differ from the Ferropod listen addresses"
-                );
-                let prefix = local_api_prefix
-                    .as_deref()
-                    .unwrap_or("/api")
-                    .trim_end_matches('/');
-                anyhow::ensure!(
-                    prefix.starts_with('/')
-                        && prefix[1..].split('/').all(|segment| {
-                            !segment.is_empty()
-                                && segment.bytes().all(|byte| {
-                                    byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'
-                                })
-                        }),
-                    "--local-api-prefix must be a non-root path such as /api or /backend/v1"
-                );
-                cfg.local_api = Some(LocalApiConfig {
-                    host: host.host().trim_end_matches('.').to_ascii_lowercase(),
-                    prefix: prefix.to_owned(),
+                let mut listeners = vec![bind];
+                if let Some(https_listener) = effective_https_bind {
+                    listeners.push(https_listener);
+                }
+                cfg.local_api = Some(LocalApiConfig::validated(
+                    host.as_str(),
+                    local_api_prefix.as_deref(),
                     upstream,
-                });
+                    &listeners,
+                )?);
             }
             run_server(cfg, false).await?;
         }
         Commands::Dev { bind, data_dir } => {
-            let cfg = Config::for_profile(
+            let mut cfg = Config::for_profile(
                 Profile::Standard,
                 bind,
                 data_dir,
                 "dev-insecure-master-key-change-me".to_string(),
             );
+            cfg.wasm_allow_private_outbound = true;
             run_server(cfg, true).await?;
         }
         Commands::Token { action } => match action {

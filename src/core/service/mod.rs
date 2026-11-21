@@ -11,6 +11,7 @@ mod tokens;
 
 pub use cron::cron_matches_timestamp;
 pub use logs::LogSubscription;
+pub(crate) use projects::normalize_host;
 pub use projects::CreateDeploymentInput;
 
 use std::collections::HashMap;
@@ -184,12 +185,44 @@ impl PlatformService {
         }
 
         if let Err(e) = self
+            .run_artifact_gc_with_grace(
+                u64::try_from(self.config.blob_gc_grace_secs)
+                    .unwrap_or(0)
+                    .max(300),
+            )
+            .await
+        {
+            warn!(error = %e, "artifact gc error");
+        }
+
+        if let Err(e) = self
             .logs
             .cleanup_old_files(self.config.log_retention_days)
             .await
         {
             warn!(error = %e, "daily log cleanup error");
         }
+    }
+
+    /// Remove compiled/uploaded artifact files on disk no longer referenced by any deployment.
+    pub async fn run_artifact_gc(&self) -> Result<usize> {
+        self.run_artifact_gc_with_grace(0).await
+    }
+
+    /// Remove unreferenced artifact files older than `grace_secs` seconds.
+    pub async fn run_artifact_gc_with_grace(&self, grace_secs: u64) -> Result<usize> {
+        let entries = self.projects.list_referenced_artifact_paths().await?;
+        let mut referenced = std::collections::HashSet::with_capacity(entries.len() * 2);
+        for (project_id, raw) in entries {
+            let trimmed = raw.trim().trim_start_matches('/');
+            if !trimmed.is_empty() && !trimmed.contains('/') {
+                referenced.insert(format!("{project_id}/{trimmed}"));
+            }
+            referenced.insert(raw);
+        }
+        self.runtime
+            .gc_unreferenced_artifacts(&referenced, grace_secs)
+            .await
     }
 
     /// Export consistent database snapshots (`core.db`, `kv.db`, `queue.db`, and user DBs) for off-site backup.

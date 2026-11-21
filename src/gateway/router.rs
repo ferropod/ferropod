@@ -15,7 +15,11 @@ use uuid::Uuid;
 
 use crate::core::model::{RequestCtx, WorkerHttpRequest};
 use crate::core::service::PlatformService;
-use crate::gateway::{blob_api, guard::access_log_middleware, local_api::LocalApiProxy};
+use crate::gateway::{
+    blob_api,
+    guard::access_log_middleware,
+    local_api::{has_unsafe_path_segments, LocalApiProxy},
+};
 use crate::web;
 
 #[derive(Debug, Serialize)]
@@ -29,7 +33,11 @@ pub fn build_router(svc: PlatformService) -> Router {
     let blob_router = blob_api::router().layer(RequestBodyLimitLayer::new(
         svc.config().max_blob_upload_bytes,
     ));
-    let local_api = svc.config().local_api.as_ref().map(LocalApiProxy::new);
+    let local_api = svc
+        .config()
+        .local_api
+        .as_ref()
+        .map(|cfg| LocalApiProxy::new(cfg, svc.config().max_blob_upload_bytes));
 
     Router::new()
         .route(
@@ -57,15 +65,14 @@ async fn host_route_handler(
     req: Request<Body>,
 ) -> Response {
     let req_path = req.uri().path();
+    if has_unsafe_path_segments(req_path) {
+        return (StatusCode::BAD_REQUEST, "invalid request path").into_response();
+    }
     if req_path == "/_internal" || req_path.starts_with("/_internal/") {
         return (StatusCode::FORBIDDEN, "internal path forbidden").into_response();
     }
 
-    let host = req
-        .headers()
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
+    let host = crate::gateway::extract_request_host(&req).unwrap_or("");
 
     let Some(route) = svc.lookup_route(host).await else {
         return (StatusCode::NOT_FOUND, "route not found").into_response();

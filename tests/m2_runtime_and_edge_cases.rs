@@ -328,22 +328,35 @@ async fn http_worker_and_all_wit_v2_host_bindings() {
 async fn worker_outbound_http_via_wasi_outgoing_handler() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let upstream = Router::new().route("/upstream", get(|| async { "upstream-pong" }));
+    let upstream_hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let upstream_hits_srv = upstream_hits.clone();
+    let upstream = Router::new().route(
+        "/upstream",
+        get(move || {
+            let hits = upstream_hits_srv.clone();
+            async move {
+                hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                "upstream-pong"
+            }
+        }),
+    );
     let server = tokio::spawn(async move {
         let _ = axum::serve(listener, upstream).await;
     });
 
-    let h = setup_m2_harness(|_| {}).await;
-    let app = build_router(h.svc.clone());
-    let proj = h
+    // 1. Default config blocks private/loopback outbound requests (SSRF protection)
+    let h_blocked = setup_m2_harness(|_| {}).await;
+    let app_blocked = build_router(h_blocked.svc.clone());
+    let proj_b = h_blocked
         .svc
-        .create_project(&h.admin, "outbound-app", None)
+        .create_project(&h_blocked.admin, "outbound-blocked", None)
         .await
         .unwrap();
-    h.svc
+    h_blocked
+        .svc
         .create_deployment(
-            &h.admin,
-            &proj.id,
+            &h_blocked.admin,
+            &proj_b.id,
             CreateDeploymentInput {
                 artifact_path: Some("outbound.wasm".into()),
                 artifact_bytes: Some(test_worker_wasm_bytes()),
@@ -353,8 +366,65 @@ async fn worker_outbound_http_via_wasi_outgoing_handler() {
         )
         .await
         .unwrap();
-    h.svc
-        .upsert_route(&h.admin, "outbound.example.test", &proj.id, TargetEnv::Prod)
+    h_blocked
+        .svc
+        .upsert_route(
+            &h_blocked.admin,
+            "blocked.example.test",
+            &proj_b.id,
+            TargetEnv::Prod,
+        )
+        .await
+        .unwrap();
+
+    let blocked_resp = app_blocked
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/outbound")
+                .header(header::HOST, "blocked.example.test")
+                .header("x-upstream-authority", addr.to_string())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(blocked_resp.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(upstream_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    // 2. Opt-in allows loopback HTTP except blocked_upstream (--local-api-upstream)
+    let h_allowed = setup_m2_harness(|cfg| {
+        cfg.wasm_allow_private_outbound = true;
+    })
+    .await;
+    let app_allowed = build_router(h_allowed.svc.clone());
+    let proj_a = h_allowed
+        .svc
+        .create_project(&h_allowed.admin, "outbound-app", None)
+        .await
+        .unwrap();
+    h_allowed
+        .svc
+        .create_deployment(
+            &h_allowed.admin,
+            &proj_a.id,
+            CreateDeploymentInput {
+                artifact_path: Some("outbound.wasm".into()),
+                artifact_bytes: Some(test_worker_wasm_bytes()),
+                target_env: Some(TargetEnv::Prod),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    h_allowed
+        .svc
+        .upsert_route(
+            &h_allowed.admin,
+            "outbound.example.test",
+            &proj_a.id,
+            TargetEnv::Prod,
+        )
         .await
         .unwrap();
 
@@ -365,10 +435,66 @@ async fn worker_outbound_http_via_wasi_outgoing_handler() {
         .header("x-upstream-authority", addr.to_string())
         .body(Body::empty())
         .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
+    let resp = app_allowed.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(body.as_ref(), b"200:upstream-pong");
+    assert_eq!(upstream_hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    // 3. Even with wasm_allow_private_outbound=true, local_api.upstream remains blocked
+    let h_local = setup_m2_harness(|cfg| {
+        cfg.wasm_allow_private_outbound = true;
+        cfg.local_api = Some(ferropod::config::LocalApiConfig {
+            host: "site.example.test".into(),
+            prefix: "/api".into(),
+            upstream: addr,
+        });
+    })
+    .await;
+    let app_local = build_router(h_local.svc.clone());
+    let proj_l = h_local
+        .svc
+        .create_project(&h_local.admin, "outbound-local-api", None)
+        .await
+        .unwrap();
+    h_local
+        .svc
+        .create_deployment(
+            &h_local.admin,
+            &proj_l.id,
+            CreateDeploymentInput {
+                artifact_path: Some("outbound.wasm".into()),
+                artifact_bytes: Some(test_worker_wasm_bytes()),
+                target_env: Some(TargetEnv::Prod),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    h_local
+        .svc
+        .upsert_route(
+            &h_local.admin,
+            "localblocked.example.test",
+            &proj_l.id,
+            TargetEnv::Prod,
+        )
+        .await
+        .unwrap();
+    let local_blocked = app_local
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/outbound")
+                .header(header::HOST, "localblocked.example.test")
+                .header("x-upstream-authority", addr.to_string())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(local_blocked.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(upstream_hits.load(std::sync::atomic::Ordering::SeqCst), 1);
 
     server.abort();
 }
@@ -707,7 +833,7 @@ async fn cron_matcher_and_scheduled_worker_execution() {
         .unwrap();
     assert_eq!(
         result.last_status.as_deref(),
-        Some("error: cron job has no runtime")
+        Some("error: cron job has no app")
     );
 
     let empty = h
@@ -733,6 +859,150 @@ async fn cron_matcher_and_scheduled_worker_execution() {
         .unwrap();
     assert_eq!(
         result.last_status.as_deref(),
-        Some("error: runtime has no active deployment")
+        Some("error: app has no active deployment")
     );
+}
+
+#[tokio::test]
+async fn cross_project_artifact_isolation_cache_invalidation_and_gc() {
+    let h = setup_m2_harness(|_| {}).await;
+    let app = build_router(h.svc.clone());
+    let proj_a = h
+        .svc
+        .create_project(&h.admin, "iso-app-a", None)
+        .await
+        .unwrap();
+    let proj_b = h
+        .svc
+        .create_project(&h.admin, "iso-app-b", None)
+        .await
+        .unwrap();
+
+    let (path_a, _, _) = h
+        .svc
+        .upload_project_artifact(
+            &h.admin,
+            &proj_a.id,
+            "worker.wasm",
+            test_worker_wasm_bytes(),
+        )
+        .await
+        .unwrap();
+    assert!(h.tmp.path().join("artifacts").join(&path_a).exists());
+
+    // App B cannot deploy App A's artifact (service + HTTP API)
+    let svc_err = h
+        .svc
+        .create_deployment(
+            &h.admin,
+            &proj_b.id,
+            CreateDeploymentInput {
+                artifact_path: Some(path_a.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        svc_err,
+        ferropod::core::model::FerroError::Forbidden(_)
+    ));
+
+    let rest_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/_api/v1/runtimes/{}/deployments", proj_b.id))
+                .header(header::AUTHORIZATION, format!("Bearer {}", h.admin_token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "artifact_path": path_a }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rest_resp.status(), StatusCode::FORBIDDEN);
+
+    // Nonexistent artifact path fails at create_deployment time
+    let missing_err = h
+        .svc
+        .create_deployment(
+            &h.admin,
+            &proj_b.id,
+            CreateDeploymentInput {
+                artifact_path: Some("does-not-exist.wasm".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        missing_err,
+        ferropod::core::model::FerroError::NotFound(_)
+    ));
+
+    // Delete App A removes its on-disk artifacts directory
+    h.svc.delete_project(&h.admin, &proj_a.id).await.unwrap();
+    assert!(!h.tmp.path().join("artifacts").join(&proj_a.id).exists());
+
+    // Referenced deployment artifact survives GC while orphan is collected when grace == 0
+    let (live_path, _, _) = h
+        .svc
+        .upload_project_artifact(&h.admin, &proj_b.id, "live.wasm", test_worker_wasm_bytes())
+        .await
+        .unwrap();
+    h.svc
+        .create_deployment(
+            &h.admin,
+            &proj_b.id,
+            CreateDeploymentInput {
+                artifact_path: Some(live_path.clone()),
+                target_env: Some(TargetEnv::Prod),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    h.svc
+        .upsert_route(&h.admin, "gc.example.test", &proj_b.id, TargetEnv::Prod)
+        .await
+        .unwrap();
+
+    let (orphan_path, _, _) = h
+        .svc
+        .upload_project_artifact(
+            &h.admin,
+            &proj_b.id,
+            "orphan.wasm",
+            test_worker_wasm_bytes(),
+        )
+        .await
+        .unwrap();
+    let orphan_disk = h.tmp.path().join("artifacts").join(&orphan_path);
+    let live_disk = h.tmp.path().join("artifacts").join(&live_path);
+    assert!(orphan_disk.exists());
+    assert!(live_disk.exists());
+
+    // Grace period preserves freshly uploaded unreferenced artifact
+    assert_eq!(h.svc.run_artifact_gc_with_grace(300).await.unwrap(), 0);
+    assert!(orphan_disk.exists());
+
+    // Grace 0 collects orphan while preserving live artifact
+    assert_eq!(h.svc.run_artifact_gc().await.unwrap(), 1);
+    assert!(!orphan_disk.exists());
+    assert!(live_disk.exists());
+
+    let ping_resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/ping")
+                .header(header::HOST, "gc.example.test")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ping_resp.status(), StatusCode::OK);
 }

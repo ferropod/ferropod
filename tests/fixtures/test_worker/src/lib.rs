@@ -12,8 +12,8 @@ use exports::wasi::http::incoming_handler::Guest as HttpGuest;
 use ferropod::platform::{bucket, db, env, kv, log, queue};
 use wasi::http::outgoing_handler;
 use wasi::http::types::{
-    Fields, IncomingBody, IncomingRequest, Method, OutgoingBody, OutgoingRequest,
-    OutgoingResponse, ResponseOutparam, Scheme,
+    Fields, IncomingBody, IncomingRequest, Method, OutgoingBody, OutgoingRequest, OutgoingResponse,
+    ResponseOutparam, Scheme,
 };
 
 struct TestWorker;
@@ -166,9 +166,7 @@ fn handle_outbound(authority: &str) -> Result<String, String> {
 
 impl HttpGuest for TestWorker {
     fn handle(request: IncomingRequest, response_out: ResponseOutparam) {
-        let path = request
-            .path_with_query()
-            .unwrap_or_else(|| "/".to_string());
+        let path = request.path_with_query().unwrap_or_else(|| "/".to_string());
         let path_only = path.split('?').next().unwrap_or("/");
 
         if path_only == "/bindings" {
@@ -237,7 +235,14 @@ impl QueueGuest for TestWorker {
 
 impl ScheduledGuest for TestWorker {
     fn handle_cron(event: CronEvent) -> Result<(), String> {
-        kv::put("KV", "cron_last_name", event.name.as_bytes(), None, None, false)?;
+        kv::put(
+            "KV",
+            "cron_last_name",
+            event.name.as_bytes(),
+            None,
+            None,
+            false,
+        )?;
         kv::put(
             "KV",
             "cron_last_target",

@@ -118,10 +118,7 @@ pub async fn access_log_middleware(
 
     let method = req.method().to_string();
     let path = req.uri().path().to_string();
-    let host = req
-        .headers()
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
+    let host = crate::gateway::extract_request_host(&req)
         .unwrap_or("")
         .to_string();
 
