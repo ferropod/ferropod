@@ -113,6 +113,19 @@ CREATE TABLE IF NOT EXISTS user_databases (
     project_id TEXT,
     created_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS cron_jobs (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    project_id TEXT,
+    schedule TEXT NOT NULL,
+    target TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    last_run_at INTEGER,
+    last_status TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
 "#;
 
 #[derive(Debug, Clone)]

@@ -214,6 +214,9 @@ pub fn router() -> Router<PlatformService> {
         .route("/system/update/apply", post(system_update_apply))
         .route("/backups", get(list_backups).post(create_backup))
         .route("/backups/{name}", delete(delete_backup))
+        .route("/crons", get(cron_list).post(cron_create))
+        .route("/crons/{id}", patch(cron_update).delete(cron_delete))
+        .route("/crons/{id}/run", post(cron_run))
         .route("/projects", get(list_projects).post(create_project))
         .route("/projects/{id}", get(get_project).delete(delete_project))
         .route(
@@ -239,14 +242,14 @@ pub fn router() -> Router<PlatformService> {
         )
         .route("/kv/{ns}/{key}/incr", post(kv_incr))
         .route("/queues", get(queue_list).post(queue_create))
-        .route("/queues/{name}", delete(queue_delete))
+        .route("/queues/{name}", patch(queue_update).delete(queue_delete))
         .route("/queues/{name}/enqueue", post(queue_enqueue))
         .route("/queues/{name}/stats", get(queue_stats))
         .route("/queues/{name}/inspect", get(queue_inspect))
         .route("/queues/{name}/dlq/replay", post(queue_dlq_replay))
         .route("/queues/{name}/purge", post(queue_purge))
         .route("/buckets", get(bucket_list).post(bucket_create))
-        .route("/buckets/{name}", patch(bucket_update))
+        .route("/buckets/{name}", patch(bucket_update).delete(bucket_delete))
         .route("/buckets/{name}/presign", post(bucket_presign))
         .route("/dbs", get(db_list).post(db_create))
         .route("/dbs/{id}", delete(db_delete))
@@ -925,6 +928,43 @@ async fn queue_delete(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Debug, Deserialize)]
+struct UpdateQueueReq {
+    max_concurrency: Option<i64>,
+    rate_limit_per_sec: Option<i64>,
+    clear_rate_limit: Option<bool>,
+    batch_size: Option<i64>,
+    lease_secs: Option<i64>,
+    max_attempts: Option<i64>,
+}
+
+async fn queue_update(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Json(req): Json<UpdateQueueReq>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let rate_opt = if req.clear_rate_limit.unwrap_or(false) {
+        Some(None)
+    } else {
+        req.rate_limit_per_sec.map(Some)
+    };
+    let updated = svc
+        .queue_update(
+            &caller,
+            &name,
+            req.max_concurrency,
+            rate_opt,
+            req.batch_size,
+            req.lease_secs,
+            req.max_attempts,
+        )
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(updated))
+}
+
 async fn queue_enqueue(
     State(svc): State<PlatformService>,
     headers: HeaderMap,
@@ -1036,6 +1076,98 @@ async fn bucket_update(
         .await
         .map_err(ApiError)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn bucket_delete(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    svc.delete_bucket(&caller, &name).await.map_err(ApiError)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateCronReq {
+    name: String,
+    project_id: Option<String>,
+    schedule: String,
+    target: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateCronReq {
+    enabled: Option<bool>,
+    schedule: Option<String>,
+    target: Option<String>,
+}
+
+async fn cron_list(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    Ok(Json(svc.list_cron_jobs(&caller).await.map_err(ApiError)?))
+}
+
+async fn cron_create(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Json(req): Json<CreateCronReq>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let saved = svc
+        .create_cron_job(
+            &caller,
+            &req.name,
+            req.project_id.as_deref(),
+            &req.schedule,
+            &req.target,
+        )
+        .await
+        .map_err(ApiError)?;
+    Ok((StatusCode::CREATED, Json(saved)))
+}
+
+async fn cron_update(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateCronReq>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let updated = svc
+        .update_cron_job(
+            &caller,
+            &id,
+            req.enabled,
+            req.schedule.as_deref(),
+            req.target.as_deref(),
+        )
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(updated))
+}
+
+async fn cron_delete(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    svc.delete_cron_job(&caller, &id).await.map_err(ApiError)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn cron_run(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let ran = svc.trigger_cron_job(&caller, &id).await.map_err(ApiError)?;
+    Ok(Json(ran))
 }
 
 async fn bucket_presign(

@@ -107,6 +107,24 @@ impl BlobMetaStore for TursoCoreStore {
         Ok(())
     }
 
+    async fn delete_bucket(&self, name: &str) -> Result<()> {
+        let name_s = name.to_string();
+        let affected = with_retry(|| {
+            let db = self.db.clone();
+            let name_s = name_s.clone();
+            async move {
+                let conn = db.connect()?;
+                conn.execute("DELETE FROM blob_buckets WHERE name = ?1", [name_s])
+                    .await
+            }
+        })
+        .await?;
+        if affected == 0 {
+            return Err(FerroError::NotFound(format!("bucket '{name}'")));
+        }
+        Ok(())
+    }
+
     async fn upsert_object_meta(&self, meta: ObjectMeta, gc_grace_secs: i64) -> Result<()> {
         let now = meta.updated_at;
         let delete_after = now + gc_grace_secs;

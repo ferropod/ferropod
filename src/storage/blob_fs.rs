@@ -94,6 +94,16 @@ impl ObjectStore for FsBlobStore {
         self.meta.set_bucket_public(name, public_read).await
     }
 
+    async fn delete_bucket(&self, name: &str) -> Result<()> {
+        let existing = self.meta.list_objects_meta(name, None, 1).await?;
+        if !existing.is_empty() {
+            return Err(FerroError::Conflict(format!(
+                "bucket '{name}' is not empty"
+            )));
+        }
+        self.meta.delete_bucket(name).await
+    }
+
     async fn put_stream(
         &self,
         bucket: &str,

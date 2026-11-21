@@ -472,3 +472,17 @@ pub enum JobOutcome {
     Retry { delay_secs: u64, error: String },
     Dead { error: String },
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CronJob {
+    pub id: String,
+    pub name: String,
+    pub project_id: Option<String>,
+    pub schedule: String,
+    pub target: String,
+    pub enabled: bool,
+    pub last_run_at: Option<i64>,
+    pub last_status: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}

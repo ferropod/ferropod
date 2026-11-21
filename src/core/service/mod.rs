@@ -1,4 +1,5 @@
 mod blob;
+mod cron;
 mod db;
 mod kv;
 mod logs;

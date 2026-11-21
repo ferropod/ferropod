@@ -166,6 +166,27 @@ impl PlatformService {
         Ok(())
     }
 
+    pub async fn delete_bucket(&self, caller: &Caller, name: &str) -> Result<()> {
+        let meta = self
+            .objects
+            .get_bucket(name)
+            .await?
+            .ok_or_else(|| FerroError::NotFound(format!("bucket '{name}'")))?;
+        Self::require_resource_write(
+            caller,
+            meta.project_id.as_deref(),
+            &format!("bucket '{name}'"),
+        )?;
+        self.objects.delete_bucket(name).await?;
+        self.audit(
+            meta.project_id.as_deref(),
+            &caller.actor,
+            "bucket.delete",
+            serde_json::json!({ "name": name }),
+        );
+        Ok(())
+    }
+
     pub async fn presign_blob_url(
         &self,
         caller: &Caller,

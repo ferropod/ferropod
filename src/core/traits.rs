@@ -4,10 +4,10 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use crate::core::model::{
-    ApiToken, BucketMeta, ByteRange, ByteStream, Deployment, EnqueueOpts, Job, JobOutcome,
-    JobStatus, KvKeyMeta, KvNamespaceMeta, KvValue, LogEntry, LogQuery, ObjectMeta, Project,
-    QueryResult, QueueConfig, QueueStats, RequestCtx, Result, Route, RouteEntry, SqlValue,
-    TargetEnv, TokenScope, UserDbMeta, WorkerHttpRequest, WorkerHttpResponse,
+    ApiToken, BucketMeta, ByteRange, ByteStream, CronJob, Deployment, EnqueueOpts, Job,
+    JobOutcome, JobStatus, KvKeyMeta, KvNamespaceMeta, KvValue, LogEntry, LogQuery, ObjectMeta,
+    Project, QueryResult, QueueConfig, QueueStats, RequestCtx, Result, Route, RouteEntry,
+    SqlValue, TargetEnv, TokenScope, UserDbMeta, WorkerHttpRequest, WorkerHttpResponse,
 };
 
 #[async_trait]
@@ -87,6 +87,12 @@ pub trait RegistryStore: Send + Sync {
     async fn get_kv_namespace(&self, name: &str) -> Result<Option<KvNamespaceMeta>>;
     async fn list_kv_namespaces(&self) -> Result<Vec<KvNamespaceMeta>>;
     async fn delete_kv_namespace(&self, name: &str) -> Result<()>;
+
+    async fn create_cron_job(&self, job: CronJob) -> Result<CronJob>;
+    async fn get_cron_job(&self, id: &str) -> Result<Option<CronJob>>;
+    async fn list_cron_jobs(&self) -> Result<Vec<CronJob>>;
+    async fn update_cron_job(&self, job: &CronJob) -> Result<()>;
+    async fn delete_cron_job(&self, id: &str) -> Result<()>;
 }
 
 #[async_trait]
@@ -100,6 +106,7 @@ pub trait BlobMetaStore: Send + Sync {
     async fn get_bucket(&self, name: &str) -> Result<Option<BucketMeta>>;
     async fn list_buckets(&self) -> Result<Vec<BucketMeta>>;
     async fn set_bucket_public(&self, name: &str, public_read: bool) -> Result<()>;
+    async fn delete_bucket(&self, name: &str) -> Result<()>;
     async fn upsert_object_meta(&self, meta: ObjectMeta, gc_grace_secs: i64) -> Result<()>;
     async fn get_object_meta(&self, bucket: &str, key: &str) -> Result<Option<ObjectMeta>>;
     async fn delete_object_meta(
@@ -189,6 +196,7 @@ pub trait ObjectStore: Send + Sync {
     async fn get_bucket(&self, name: &str) -> Result<Option<BucketMeta>>;
     async fn list_buckets(&self) -> Result<Vec<BucketMeta>>;
     async fn set_bucket_public(&self, name: &str, public_read: bool) -> Result<()>;
+    async fn delete_bucket(&self, name: &str) -> Result<()>;
     async fn put_stream(
         &self,
         bucket: &str,

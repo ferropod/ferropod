@@ -102,6 +102,47 @@ impl PlatformService {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub async fn queue_update(
+        &self,
+        caller: &Caller,
+        queue: &str,
+        max_concurrency: Option<i64>,
+        rate_limit_per_sec: Option<Option<i64>>,
+        batch_size: Option<i64>,
+        lease_secs: Option<i64>,
+        max_attempts: Option<i64>,
+    ) -> Result<QueueConfig> {
+        let mut cfg = self.require_queue_write(caller, queue).await?;
+        if let Some(v) = max_concurrency {
+            cfg.max_concurrency = v.max(1);
+        }
+        if let Some(v) = rate_limit_per_sec {
+            cfg.rate_limit_per_sec = v.filter(|n| *n > 0);
+        }
+        if let Some(v) = batch_size {
+            cfg.batch_size = v.max(1);
+        }
+        if let Some(v) = lease_secs {
+            cfg.lease_secs = v.max(5);
+        }
+        if let Some(v) = max_attempts {
+            cfg.max_attempts = v.max(1);
+        }
+        self.queue.create_queue(cfg.clone()).await?;
+        self.audit(
+            cfg.project_id.as_deref(),
+            &caller.actor,
+            "queue.update",
+            serde_json::json!({
+                "name": cfg.name,
+                "max_concurrency": cfg.max_concurrency,
+                "rate_limit_per_sec": cfg.rate_limit_per_sec,
+            }),
+        );
+        Ok(cfg)
+    }
+
     pub async fn queue_enqueue(
         &self,
         caller: &Caller,
