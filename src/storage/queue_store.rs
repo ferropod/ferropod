@@ -12,6 +12,7 @@ use crate::core::model::{
     EnqueueOpts, FerroError, Job, JobStatus, QueueConfig, QueueStats, Result,
 };
 use crate::core::traits::QueueStore;
+use crate::storage::core_store::{opt_i64, opt_text};
 use crate::storage::tx::{
     checkpoint_db, connect_db, copy_db_with_sidecars, ensure_resource_group_column, map_turso_err,
     open_turso_db, with_retry,
@@ -53,6 +54,26 @@ CREATE INDEX IF NOT EXISTS idx_jobs_lease
 CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_dedup
     ON jobs (queue, dedup_key) WHERE dedup_key IS NOT NULL AND status != 'dead';
 "#;
+
+const SELECT_QUEUE: &str =
+    "SELECT name, project_id, consumer_project_id, max_concurrency, rate_limit_per_sec, \
+     batch_size, lease_secs, max_attempts, created_at, resource_group \
+     FROM queues";
+
+fn row_to_queue(row: &turso::Row) -> Result<QueueConfig> {
+    Ok(QueueConfig {
+        name: row.get(0).map_err(map_turso_err)?,
+        project_id: opt_text(row, 1)?,
+        consumer_project_id: opt_text(row, 2)?,
+        max_concurrency: row.get(3).map_err(map_turso_err)?,
+        rate_limit_per_sec: opt_i64(row, 4)?,
+        batch_size: row.get(5).map_err(map_turso_err)?,
+        lease_secs: row.get(6).map_err(map_turso_err)?,
+        max_attempts: row.get(7).map_err(map_turso_err)?,
+        created_at: row.get(8).map_err(map_turso_err)?,
+        group: opt_text(row, 9)?,
+    })
+}
 
 struct IngestItem {
     queue: String,
@@ -274,26 +295,11 @@ impl QueueStore for TursoQueueStore {
     async fn get_queue(&self, name: &str) -> Result<Option<QueueConfig>> {
         let conn = connect_db(&self.db)?;
         let mut rows = conn
-            .query(
-                "SELECT name, project_id, consumer_project_id, max_concurrency, rate_limit_per_sec, batch_size, lease_secs, max_attempts, created_at, resource_group
-                 FROM queues WHERE name = ?1 LIMIT 1",
-                [name],
-            )
+            .query(&format!("{SELECT_QUEUE} WHERE name = ?1 LIMIT 1"), [name])
             .await
             .map_err(map_turso_err)?;
         if let Some(row) = rows.next().await.map_err(map_turso_err)? {
-            Ok(Some(QueueConfig {
-                name: row.get(0).map_err(map_turso_err)?,
-                project_id: opt_text(&row, 1)?,
-                consumer_project_id: opt_text(&row, 2)?,
-                max_concurrency: row.get(3).map_err(map_turso_err)?,
-                rate_limit_per_sec: opt_i64(&row, 4)?,
-                batch_size: row.get(5).map_err(map_turso_err)?,
-                lease_secs: row.get(6).map_err(map_turso_err)?,
-                max_attempts: row.get(7).map_err(map_turso_err)?,
-                created_at: row.get(8).map_err(map_turso_err)?,
-                group: opt_text(&row, 9)?,
-            }))
+            row_to_queue(&row).map(Some)
         } else {
             Ok(None)
         }
@@ -302,27 +308,12 @@ impl QueueStore for TursoQueueStore {
     async fn list_queues(&self) -> Result<Vec<QueueConfig>> {
         let conn = connect_db(&self.db)?;
         let mut rows = conn
-            .query(
-                "SELECT name, project_id, consumer_project_id, max_concurrency, rate_limit_per_sec, batch_size, lease_secs, max_attempts, created_at, resource_group
-                 FROM queues ORDER BY name ASC",
-                (),
-            )
+            .query(&format!("{SELECT_QUEUE} ORDER BY name ASC"), ())
             .await
             .map_err(map_turso_err)?;
         let mut out = Vec::new();
         while let Some(row) = rows.next().await.map_err(map_turso_err)? {
-            out.push(QueueConfig {
-                name: row.get(0).map_err(map_turso_err)?,
-                project_id: opt_text(&row, 1)?,
-                consumer_project_id: opt_text(&row, 2)?,
-                max_concurrency: row.get(3).map_err(map_turso_err)?,
-                rate_limit_per_sec: opt_i64(&row, 4)?,
-                batch_size: row.get(5).map_err(map_turso_err)?,
-                lease_secs: row.get(6).map_err(map_turso_err)?,
-                max_attempts: row.get(7).map_err(map_turso_err)?,
-                created_at: row.get(8).map_err(map_turso_err)?,
-                group: opt_text(&row, 9)?,
-            });
+            out.push(row_to_queue(&row)?);
         }
         Ok(out)
     }
@@ -707,26 +698,6 @@ impl QueueStore for TursoQueueStore {
     async fn snapshot_to(&self, dest_path: &Path) -> Result<()> {
         checkpoint_db(&self.db).await;
         copy_db_with_sidecars(&self.db_path, dest_path).await
-    }
-}
-
-fn opt_text(row: &turso::Row, idx: usize) -> Result<Option<String>> {
-    match row.get_value(idx).map_err(map_turso_err)? {
-        TursoValue::Null => Ok(None),
-        TursoValue::Text(s) => Ok(Some(s)),
-        other => Err(FerroError::Internal(anyhow::anyhow!(
-            "unexpected column {idx} type for text: {other:?}"
-        ))),
-    }
-}
-
-fn opt_i64(row: &turso::Row, idx: usize) -> Result<Option<i64>> {
-    match row.get_value(idx).map_err(map_turso_err)? {
-        TursoValue::Null => Ok(None),
-        TursoValue::Integer(i) => Ok(Some(i)),
-        other => Err(FerroError::Internal(anyhow::anyhow!(
-            "unexpected column {idx} type for i64: {other:?}"
-        ))),
     }
 }
 
