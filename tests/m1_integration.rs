@@ -503,6 +503,7 @@ async fn blob_api_static_site_secrets_tls_and_logs() {
         .create_project(&h.admin, "demo-web", None)
         .await
         .unwrap();
+    h.svc.create_kv_namespace(&h.admin, "demo:cache", Some(&proj.id)).await.unwrap();
     let mut kv_map = HashMap::new();
     kv_map.insert("CACHE".into(), "demo:cache".into());
     let dep_preview = h
