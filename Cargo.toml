@@ -42,6 +42,13 @@ rustls-acme = { version = "0.15", default-features = false, features = ["ring", 
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "json"] }
 flate2 = "1"
 tar = "0.4"
+wasmtime = { version = "51", default-features = false, features = ["std", "runtime", "cranelift", "component-model", "async", "parallel-compilation", "wat"] }
+wasmtime-wasi = "51"
+wasmtime-wasi-http = "51"
+http = "1"
+http-body-util = "0.1"
+hyper = "1"
+base64 = "0.22"
 
 [dev-dependencies]
 tempfile = "3"

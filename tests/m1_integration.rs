@@ -511,6 +511,7 @@ async fn blob_api_static_site_secrets_tls_and_logs() {
             &proj.id,
             CreateDeploymentInput {
                 artifact_path: None,
+                artifact_bytes: None,
                 assets_bucket: Some("site-assets".into()),
                 assets_prefix: None,
                 spa_fallback: true,
@@ -1219,6 +1220,7 @@ async fn atomicity_kv_edge_cases_and_route_concurrency() {
             &proj.id,
             CreateDeploymentInput {
                 artifact_path: None,
+                artifact_bytes: None,
                 assets_bucket: None,
                 assets_prefix: None,
                 spa_fallback: false,
@@ -1236,6 +1238,7 @@ async fn atomicity_kv_edge_cases_and_route_concurrency() {
             &proj.id,
             CreateDeploymentInput {
                 artifact_path: None,
+                artifact_bytes: None,
                 assets_bucket: None,
                 assets_prefix: None,
                 spa_fallback: false,
@@ -1369,6 +1372,7 @@ async fn atomicity_kv_edge_cases_and_route_concurrency() {
             &proj.id,
             CreateDeploymentInput {
                 artifact_path: None,
+                artifact_bytes: None,
                 assets_bucket: Some("static-range".into()),
                 assets_prefix: None,
                 spa_fallback: false,

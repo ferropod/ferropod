@@ -121,6 +121,13 @@ pub trait BlobMetaStore: Send + Sync {
         prefix: Option<&str>,
         limit: usize,
     ) -> Result<Vec<ObjectMeta>>;
+    async fn list_objects_meta_page(
+        &self,
+        bucket: &str,
+        prefix: Option<&str>,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<(Vec<ObjectMeta>, Option<String>)>;
     async fn list_due_blob_gc(&self, now_secs: i64, limit: usize) -> Result<Vec<String>>;
     async fn claim_blob_gc_delete(&self, blob_path: &str) -> Result<bool>;
     async fn schedule_orphan_gc(&self, blob_path: &str, gc_grace_secs: i64) -> Result<()>;
@@ -150,6 +157,13 @@ pub trait KvStore: Send + Sync {
     async fn delete(&self, ns: &str, key: &str) -> Result<()>;
     async fn delete_namespace(&self, ns: &str) -> Result<()>;
     async fn list(&self, ns: &str, prefix: Option<&str>, limit: usize) -> Result<Vec<KvKeyMeta>>;
+    async fn list_page(
+        &self,
+        ns: &str,
+        prefix: Option<&str>,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<(Vec<KvKeyMeta>, Option<String>)>;
     async fn cleanup_expired_batch(&self, batch_limit: usize) -> Result<u64>;
 
     async fn checkpoint(&self) -> Result<()> {
@@ -172,6 +186,7 @@ pub trait QueueStore: Send + Sync {
     async fn claim_batch(&self, queue: &str, limit: usize, lease_secs: i64) -> Result<Vec<Job>>;
     async fn ack_batch(&self, job_ids: &[i64]) -> Result<()>;
     async fn nack(&self, job_id: i64, retry_after_secs: u64, err: &str) -> Result<Option<JobStatus>>;
+    async fn mark_dead(&self, job_id: i64, err: &str) -> Result<()>;
     async fn reap_expired(&self) -> Result<u64>;
     async fn inspect(&self, queue: &str, status: JobStatus, limit: usize) -> Result<Vec<Job>>;
     async fn dlq_replay(&self, queue: &str, job_ids: Option<&[i64]>) -> Result<u64>;
@@ -223,6 +238,13 @@ pub trait ObjectStore: Send + Sync {
     ) -> Result<Option<(ObjectMeta, ByteStream, u64, Option<(u64, u64)>)>>;
     async fn delete(&self, bucket: &str, key: &str) -> Result<bool>;
     async fn list(&self, bucket: &str, prefix: Option<&str>, limit: usize) -> Result<Vec<ObjectMeta>>;
+    async fn list_page(
+        &self,
+        bucket: &str,
+        prefix: Option<&str>,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<(Vec<ObjectMeta>, Option<String>)>;
     async fn run_gc_batch(&self, limit: usize) -> Result<u64>;
 }
 
@@ -250,10 +272,20 @@ pub trait LogStore: Send + Sync {
     async fn cleanup_old_files(&self, retention_days: u32) -> Result<u64>;
 }
 
-/// Worker runtime abstraction (implemented by Wasmtime runtime in M2).
+/// Worker runtime abstraction (implemented by Wasmtime runtime).
 #[async_trait]
 pub trait WorkerRuntime: Send + Sync {
+    async fn store_artifact(
+        &self,
+        project_id: &str,
+        rel_path: &str,
+        artifact: Bytes,
+    ) -> Result<(String, bool)>;
     async fn compile_and_load(&self, deployment: &Deployment, artifact: Bytes) -> Result<()>;
+    async fn preload_deployment(&self, deployment: &Deployment) -> Result<()> {
+        let _ = deployment;
+        Ok(())
+    }
     async fn handle_http(
         &self,
         ctx: RequestCtx,

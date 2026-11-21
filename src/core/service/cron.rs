@@ -1,9 +1,128 @@
-use chrono::Utc;
+use chrono::{DateTime, Datelike, Timelike, Utc};
 use uuid::Uuid;
 
-use crate::core::model::{Caller, CronJob, FerroError, LogEntry, Result, TokenScope};
+use crate::core::model::{Caller, CronJob, FerroError, LogEntry, RequestCtx, Result, TokenScope};
 
 use super::PlatformService;
+
+fn parse_every_secs(schedule: &str) -> Option<i64> {
+    let rest = schedule.trim().strip_prefix("@every")?.trim();
+    if let Some(num) = rest.strip_suffix('s') {
+        num.trim().parse::<i64>().ok().filter(|n| *n > 0)
+    } else if let Some(num) = rest.strip_suffix('m') {
+        num.trim()
+            .parse::<i64>()
+            .ok()
+            .filter(|n| *n > 0)
+            .map(|n| n * 60)
+    } else if let Some(num) = rest.strip_suffix('h') {
+        num.trim()
+            .parse::<i64>()
+            .ok()
+            .filter(|n| *n > 0)
+            .map(|n| n * 3600)
+    } else {
+        None
+    }
+}
+
+fn match_cron_field(field: &str, value: u32, min: u32, max: u32, allow_seven_as_zero: bool) -> bool {
+    let norm_val = if allow_seven_as_zero && value == 7 { 0 } else { value };
+    for part in field.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            return false;
+        }
+        let (range_str, step) = match part.split_once('/') {
+            Some((r, s)) => {
+                let Ok(step_val) = s.trim().parse::<u32>() else {
+                    return false;
+                };
+                if step_val == 0 {
+                    return false;
+                }
+                (r.trim(), step_val)
+            }
+            None => (part, 1),
+        };
+
+        let (start, end) = if range_str == "*" {
+            (min, max)
+        } else if let Some((a, b)) = range_str.split_once('-') {
+            let (Ok(mut s), Ok(mut e)) = (a.trim().parse::<u32>(), b.trim().parse::<u32>()) else {
+                return false;
+            };
+            if allow_seven_as_zero && s == 7 {
+                s = 0;
+            }
+            if allow_seven_as_zero && e == 7 {
+                e = 0;
+            }
+            if s > e || s < min || e > max {
+                return false;
+            }
+            (s, e)
+        } else {
+            let Ok(mut exact) = range_str.parse::<u32>() else {
+                return false;
+            };
+            if allow_seven_as_zero && exact == 7 {
+                exact = 0;
+            }
+            if exact < min || exact > max {
+                return false;
+            }
+            if step == 1 {
+                if norm_val == exact {
+                    return true;
+                }
+                continue;
+            }
+            (exact, max)
+        };
+
+        if norm_val >= start && norm_val <= end && (norm_val - start) % step == 0 {
+            return true;
+        }
+    }
+    false
+}
+
+/// Evaluate whether a cron expression matches the given UTC Unix timestamp (in seconds).
+/// Supports standard 5-field expressions (`*`, `*/n`, `a-b`, `a,b`) plus `@hourly`, `@daily`,
+/// `@midnight`, `@weekly`, `@monthly`, and `@every <N>(s|m|h)`.
+pub fn cron_matches_timestamp(schedule: &str, ts_secs: i64) -> bool {
+    let trimmed = schedule.trim();
+    if let Some(secs) = parse_every_secs(trimmed) {
+        return ts_secs.rem_euclid(secs) == 0;
+    }
+    let Some(dt) = DateTime::from_timestamp(ts_secs, 0) else {
+        return false;
+    };
+    match trimmed {
+        "@hourly" => dt.minute() == 0,
+        "@daily" | "@midnight" => dt.minute() == 0 && dt.hour() == 0,
+        "@weekly" => dt.minute() == 0 && dt.hour() == 0 && dt.weekday().num_days_from_sunday() == 0,
+        "@monthly" => dt.minute() == 0 && dt.hour() == 0 && dt.day() == 1,
+        other => {
+            let fields: Vec<&str> = other.split_whitespace().collect();
+            if fields.len() != 5 {
+                return false;
+            }
+            match_cron_field(fields[0], dt.minute(), 0, 59, false)
+                && match_cron_field(fields[1], dt.hour(), 0, 23, false)
+                && match_cron_field(fields[2], dt.day(), 1, 31, false)
+                && match_cron_field(fields[3], dt.month(), 1, 12, false)
+                && match_cron_field(
+                    fields[4],
+                    dt.weekday().num_days_from_sunday(),
+                    0,
+                    6,
+                    true,
+                )
+        }
+    }
+}
 
 impl PlatformService {
     pub async fn list_cron_jobs(&self, caller: &Caller) -> Result<Vec<CronJob>> {
@@ -138,8 +257,74 @@ impl PlatformService {
         Ok(())
     }
 
+    async fn execute_cron_job_internal(
+        &self,
+        mut job: CronJob,
+        actor: &str,
+        manual: bool,
+    ) -> Result<CronJob> {
+        let now = Utc::now().timestamp_millis();
+        let request_id = format!("cron_{}", Uuid::new_v4().simple());
+        let mut status = "ok".to_string();
+        let mut level = "info";
+        let mut err_msg: Option<String> = None;
+
+        if let Some(pid) = job.project_id.as_deref() {
+            if let Some(proj) = self.projects.get_project(pid).await? {
+                if let Some(dep_id) = proj.active_deployment_id.as_deref() {
+                    if let Some(dep) = self.projects.get_deployment(dep_id).await? {
+                        if dep.artifact_path.is_some() {
+                            let ctx = RequestCtx::new(proj.id.clone(), request_id.clone(), dep)
+                                .with_cron_job(job.clone());
+                            if let Err(e) = self.runtime.handle_cron(ctx, &job.schedule).await {
+                                let msg = e.to_string();
+                                status = format!("error: {msg}");
+                                level = "error";
+                                err_msg = Some(msg);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        job.last_run_at = Some(now);
+        job.last_status = Some(status.clone());
+        job.updated_at = now;
+        self.registry.update_cron_job(&job).await?;
+
+        self.logs.emit(LogEntry {
+            id: None,
+            ts: now,
+            project_id: job.project_id.clone(),
+            request_id: Some(request_id),
+            source: "cron".into(),
+            level: level.into(),
+            message: match &err_msg {
+                Some(e) => format!("Cron job '{}' failed: {e}", job.name),
+                None => format!(
+                    "Cron job '{}' {} -> {}",
+                    job.name,
+                    if manual { "triggered manually" } else { "executed" },
+                    job.target
+                ),
+            },
+            meta_json: Some(
+                serde_json::json!({
+                    "cron_id": job.id,
+                    "schedule": job.schedule,
+                    "target": job.target,
+                    "status": status,
+                    "actor": actor,
+                })
+                .to_string(),
+            ),
+        });
+        Ok(job)
+    }
+
     pub async fn trigger_cron_job(&self, caller: &Caller, id: &str) -> Result<CronJob> {
-        let mut job = self
+        let job = self
             .registry
             .get_cron_job(id)
             .await?
@@ -149,31 +334,39 @@ impl PlatformService {
             job.project_id.as_deref(),
             &format!("cron job '{}'", job.name),
         )?;
+        self.execute_cron_job_internal(job, &caller.actor, true)
+            .await
+    }
 
-        let now = Utc::now().timestamp_millis();
-        job.last_run_at = Some(now);
-        job.last_status = Some("ok".into());
-        job.updated_at = now;
-        self.registry.update_cron_job(&job).await?;
+    /// Evaluate all enabled cron jobs and execute any job that is due in the current schedule window.
+    pub async fn run_due_cron_jobs_once(&self) -> Result<usize> {
+        let jobs = self.registry.list_cron_jobs().await?;
+        let now_ms = Utc::now().timestamp_millis();
+        let now_secs = now_ms / 1000;
+        let current_min = now_secs / 60;
+        let mut executed = 0usize;
 
-        self.logs.emit(LogEntry {
-            id: None,
-            ts: now,
-            project_id: job.project_id.clone(),
-            request_id: None,
-            source: "cron".into(),
-            level: "info".into(),
-            message: format!("Cron job '{}' triggered manually -> {}", job.name, job.target),
-            meta_json: Some(
-                serde_json::json!({
-                    "cron_id": job.id,
-                    "schedule": job.schedule,
-                    "target": job.target,
-                    "actor": caller.actor,
-                })
-                .to_string(),
-            ),
-        });
-        Ok(job)
+        for job in jobs {
+            if !job.enabled {
+                continue;
+            }
+            let due = if let Some(interval_secs) = parse_every_secs(&job.schedule) {
+                job.last_run_at
+                    .map(|last| (now_ms - last) >= interval_secs * 1000)
+                    .unwrap_or(true)
+            } else {
+                cron_matches_timestamp(&job.schedule, now_secs)
+                    && job
+                        .last_run_at
+                        .map(|last| (last / 1000) / 60 < current_min)
+                        .unwrap_or(true)
+            };
+            if due {
+                self.execute_cron_job_internal(job, "scheduler", false)
+                    .await?;
+                executed += 1;
+            }
+        }
+        Ok(executed)
     }
 }

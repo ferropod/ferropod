@@ -1,19 +1,22 @@
+use std::collections::HashMap;
 use std::convert::Infallible;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse,
     },
-    routing::{delete, get, patch, post},
+    routing::{delete, get, patch, post, put},
     Json, Router,
 };
+use base64::Engine as _;
 use bytes::Bytes;
 use chrono::Utc;
 use futures_util::stream::Stream;
+use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 
@@ -54,6 +57,8 @@ struct CreateProjectReq {
 #[derive(Debug, Deserialize)]
 struct CreateDeploymentReq {
     artifact_path: Option<String>,
+    #[serde(default)]
+    artifact_base64: Option<String>,
     assets_bucket: Option<String>,
     assets_prefix: Option<String>,
     #[serde(default)]
@@ -63,6 +68,21 @@ struct CreateDeploymentReq {
     #[serde(default)]
     crons: Vec<String>,
     target_env: Option<TargetEnv>,
+}
+
+#[derive(Debug, Deserialize)]
+struct InvokeProjectReq {
+    method: Option<String>,
+    #[serde(default = "default_invoke_path")]
+    path: String,
+    #[serde(default)]
+    headers: HashMap<String, String>,
+    body: Option<String>,
+    target_env: Option<TargetEnv>,
+}
+
+fn default_invoke_path() -> String {
+    "/".to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -223,6 +243,11 @@ pub fn router() -> Router<PlatformService> {
             "/projects/{id}/deployments",
             get(list_deployments).post(create_deployment),
         )
+        .route(
+            "/projects/{id}/artifacts/{*path}",
+            put(upload_artifact).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
+        )
+        .route("/projects/{id}/invoke", post(invoke_project))
         .route("/projects/{id}/promote", post(promote_deployment))
         .route("/projects/{id}/rollback", post(rollback_deployment))
         .route("/projects/{id}/secrets", get(list_secrets).post(set_secret))
@@ -624,12 +649,26 @@ async fn create_deployment(
     Json(req): Json<CreateDeploymentReq>,
 ) -> Result<impl IntoResponse, ApiError> {
     let caller = authenticate_caller(&svc, &headers, None).await?;
+    let artifact_bytes = match req.artifact_base64 {
+        Some(b64) if !b64.trim().is_empty() => {
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(b64.trim())
+                .map_err(|e| {
+                    ApiError(FerroError::InvalidArgument(format!(
+                        "invalid artifact_base64: {e}"
+                    )))
+                })?;
+            Some(Bytes::from(decoded))
+        }
+        _ => None,
+    };
     let dep = svc
         .create_deployment(
             &caller,
             &id,
             CreateDeploymentInput {
                 artifact_path: req.artifact_path,
+                artifact_bytes,
                 assets_bucket: req.assets_bucket,
                 assets_prefix: req.assets_prefix,
                 spa_fallback: req.spa_fallback,
@@ -641,6 +680,81 @@ async fn create_deployment(
         .await
         .map_err(ApiError)?;
     Ok((StatusCode::CREATED, Json(dep)))
+}
+
+async fn upload_artifact(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Path((id, path)): Path<(String, String)>,
+    body: Bytes,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let (artifact_path, precompiled, size) = svc
+        .upload_project_artifact(&caller, &id, &path, body)
+        .await
+        .map_err(ApiError)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "artifact_path": artifact_path,
+            "precompiled": precompiled,
+            "size": size,
+        })),
+    ))
+}
+
+async fn invoke_project(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<InvokeProjectReq>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let started = Instant::now();
+    let method = req.method.unwrap_or_else(|| "GET".to_string());
+    let req_headers: Vec<(String, Vec<u8>)> = req
+        .headers
+        .into_iter()
+        .map(|(k, v)| (k, v.into_bytes()))
+        .collect();
+    let req_body = req.body.map(Bytes::from).unwrap_or_default();
+    let (deployment_id, resp) = svc
+        .invoke_project_http(
+            &caller,
+            &id,
+            req.target_env,
+            &method,
+            &req.path,
+            req_headers,
+            req_body,
+        )
+        .await
+        .map_err(ApiError)?;
+
+    let body_bytes = resp
+        .body
+        .try_fold(Vec::new(), |mut acc, chunk| async move {
+            acc.extend_from_slice(&chunk);
+            Ok(acc)
+        })
+        .await
+        .map_err(|e| ApiError(FerroError::Internal(anyhow::anyhow!("read response body: {e}"))))?;
+
+    let mut resp_headers = serde_json::Map::new();
+    for (k, v) in resp.headers {
+        resp_headers.insert(
+            k,
+            serde_json::Value::String(String::from_utf8_lossy(&v).into_owned()),
+        );
+    }
+
+    Ok(Json(serde_json::json!({
+        "status": resp.status,
+        "headers": resp_headers,
+        "body": String::from_utf8_lossy(&body_bytes).into_owned(),
+        "latency_ms": started.elapsed().as_secs_f64() * 1000.0,
+        "deployment_id": deployment_id,
+    })))
 }
 
 async fn promote_deployment(

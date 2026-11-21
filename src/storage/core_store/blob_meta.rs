@@ -296,31 +296,81 @@ impl BlobMetaStore for TursoCoreStore {
         prefix: Option<&str>,
         limit: usize,
     ) -> Result<Vec<ObjectMeta>> {
+        let (items, _) = self
+            .list_objects_meta_page(bucket, prefix, None, limit)
+            .await?;
+        Ok(items)
+    }
+
+    async fn list_objects_meta_page(
+        &self,
+        bucket: &str,
+        prefix: Option<&str>,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<(Vec<ObjectMeta>, Option<String>)> {
         let conn = connect_db(&self.db)?;
-        let limit_i64 = limit.min(1000) as i64;
-        let mut rows = if let Some(pfx) = prefix {
-            let pattern = format!("{}%", escape_like(pfx));
-            conn.query(
-                "SELECT bucket, key, sha256, blob_path, size, content_type, custom_meta, updated_at
-                 FROM blob_objects WHERE bucket = ?1 AND key LIKE ?2 ESCAPE '\\' ORDER BY key ASC LIMIT ?3",
-                (bucket, pattern, limit_i64),
-            )
-            .await
-            .map_err(map_turso_err)?
-        } else {
-            conn.query(
-                "SELECT bucket, key, sha256, blob_path, size, content_type, custom_meta, updated_at
-                 FROM blob_objects WHERE bucket = ?1 ORDER BY key ASC LIMIT ?2",
-                (bucket, limit_i64),
-            )
-            .await
-            .map_err(map_turso_err)?
+        let page_limit = limit.clamp(1, 1000);
+        let fetch_limit = (page_limit + 1) as i64;
+        let cursor_opt = cursor.filter(|c| !c.is_empty());
+
+        let mut rows = match (prefix, cursor_opt) {
+            (Some(pfx), Some(cur)) => {
+                let pattern = format!("{}%", escape_like(pfx));
+                conn.query(
+                    "SELECT bucket, key, sha256, blob_path, size, content_type, custom_meta, updated_at
+                     FROM blob_objects WHERE bucket = ?1 AND key LIKE ?2 ESCAPE '\\' AND key > ?3
+                     ORDER BY key ASC LIMIT ?4",
+                    (bucket, pattern, cur, fetch_limit),
+                )
+                .await
+                .map_err(map_turso_err)?
+            }
+            (Some(pfx), None) => {
+                let pattern = format!("{}%", escape_like(pfx));
+                conn.query(
+                    "SELECT bucket, key, sha256, blob_path, size, content_type, custom_meta, updated_at
+                     FROM blob_objects WHERE bucket = ?1 AND key LIKE ?2 ESCAPE '\\'
+                     ORDER BY key ASC LIMIT ?3",
+                    (bucket, pattern, fetch_limit),
+                )
+                .await
+                .map_err(map_turso_err)?
+            }
+            (None, Some(cur)) => {
+                conn.query(
+                    "SELECT bucket, key, sha256, blob_path, size, content_type, custom_meta, updated_at
+                     FROM blob_objects WHERE bucket = ?1 AND key > ?2
+                     ORDER BY key ASC LIMIT ?3",
+                    (bucket, cur, fetch_limit),
+                )
+                .await
+                .map_err(map_turso_err)?
+            }
+            (None, None) => {
+                conn.query(
+                    "SELECT bucket, key, sha256, blob_path, size, content_type, custom_meta, updated_at
+                     FROM blob_objects WHERE bucket = ?1 ORDER BY key ASC LIMIT ?2",
+                    (bucket, fetch_limit),
+                )
+                .await
+                .map_err(map_turso_err)?
+            }
         };
         let mut out = Vec::new();
         while let Some(row) = rows.next().await.map_err(map_turso_err)? {
             out.push(row_to_object_meta(&row)?);
         }
-        Ok(out)
+        let has_more = out.len() > page_limit;
+        if has_more {
+            out.truncate(page_limit);
+        }
+        let next_cursor = if has_more {
+            out.last().map(|o| o.key.clone())
+        } else {
+            None
+        };
+        Ok((out, next_cursor))
     }
 
     async fn list_due_blob_gc(&self, now_secs: i64, limit: usize) -> Result<Vec<String>> {

@@ -284,6 +284,18 @@ impl PlatformService {
         self.objects.list(bucket, prefix, limit).await
     }
 
+    pub async fn list_objects_page(
+        &self,
+        auth: &BlobAuth<'_>,
+        bucket: &str,
+        prefix: Option<&str>,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<(Vec<ObjectMeta>, Option<String>)> {
+        self.authorize_blob_read(auth, bucket, None).await?;
+        self.objects.list_page(bucket, prefix, cursor, limit).await
+    }
+
     /// Internal static-site asset HEAD bypasses bucket auth because the deployment explicitly bound `assets_bucket`.
     pub async fn static_head_object(
         &self,

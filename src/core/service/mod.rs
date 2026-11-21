@@ -8,6 +8,7 @@ mod queue;
 mod secrets;
 mod tokens;
 
+pub use cron::cron_matches_timestamp;
 pub use logs::LogSubscription;
 pub use projects::CreateDeploymentInput;
 
@@ -25,8 +26,9 @@ use crate::core::crypto::Crypto;
 use crate::core::model::{Caller, FerroError, LogEntry, Project, Result, RouteEntry};
 use crate::core::traits::{
     DbManager, KvStore, LogStore, ObjectStore, ProjectStore, QueueStore, RegistryStore,
-    SecretStore, TokenStore,
+    SecretStore, TokenStore, WorkerRuntime,
 };
+use crate::runtime::WasmtimeRuntime;
 
 /// Domain store dependencies required to build a [`PlatformService`].
 pub struct PlatformDeps {
@@ -55,6 +57,7 @@ pub struct PlatformService {
     objects: Arc<dyn ObjectStore>,
     db: Arc<dyn DbManager>,
     logs: Arc<dyn LogStore>,
+    runtime: Arc<dyn WorkerRuntime>,
     routes: Arc<RwLock<HashMap<String, RouteEntry>>>,
     http_concurrency: Arc<Semaphore>,
     route_refresh_lock: Arc<Mutex<()>>,
@@ -64,6 +67,8 @@ impl PlatformService {
     pub async fn new(config: Config, deps: PlatformDeps) -> Result<Self> {
         let crypto = Crypto::from_master_key(&config.master_key);
         let http_concurrency = Arc::new(Semaphore::new(config.max_concurrency));
+        let wasmtime_rt = Arc::new(WasmtimeRuntime::new(config.clone())?);
+        let runtime: Arc<dyn WorkerRuntime> = wasmtime_rt.clone();
         let svc = Self {
             config,
             crypto,
@@ -76,12 +81,18 @@ impl PlatformService {
             objects: deps.objects,
             db: deps.db,
             logs: deps.logs,
+            runtime,
             routes: Arc::new(RwLock::new(HashMap::new())),
             http_concurrency,
             route_refresh_lock: Arc::new(Mutex::new(())),
         };
+        wasmtime_rt.bind_service(svc.clone());
         svc.refresh_routes().await?;
         Ok(svc)
+    }
+
+    pub fn runtime(&self) -> &Arc<dyn WorkerRuntime> {
+        &self.runtime
     }
 
     pub fn config(&self) -> &Config {

@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 
+use bytes::Bytes;
 use chrono::Utc;
+use futures_util::TryStreamExt;
 use uuid::Uuid;
 
 use crate::core::model::{
-    Bindings, Caller, Deployment, FerroError, Project, Result, Route, RouteEntry, TargetEnv,
-    TokenScope,
+    Bindings, Caller, Deployment, FerroError, LogEntry, Project, RequestCtx, Result, Route,
+    RouteEntry, TargetEnv, TokenScope, WorkerHttpRequest, WorkerHttpResponse,
 };
 
 use super::PlatformService;
@@ -14,6 +16,7 @@ use super::PlatformService;
 #[derive(Debug, Clone, Default)]
 pub struct CreateDeploymentInput {
     pub artifact_path: Option<String>,
+    pub artifact_bytes: Option<Bytes>,
     pub assets_bucket: Option<String>,
     pub assets_prefix: Option<String>,
     pub spa_fallback: bool,
@@ -188,6 +191,14 @@ impl PlatformService {
             )?;
         }
 
+        let mut artifact_path = input.artifact_path;
+        if let Some(bytes) = input.artifact_bytes {
+            let rel = artifact_path.as_deref().unwrap_or("worker.cwasm");
+            let (stored_path, _precompiled) =
+                self.runtime.store_artifact(&proj.id, rel, bytes).await?;
+            artifact_path = Some(stored_path);
+        }
+
         let status = match input.target_env {
             Some(TargetEnv::Prod) => "active",
             Some(TargetEnv::Preview) => "preview",
@@ -197,7 +208,7 @@ impl PlatformService {
         let dep = Deployment {
             id: format!("dep_{}", Uuid::new_v4().simple()),
             project_id: proj.id.clone(),
-            artifact_path: input.artifact_path,
+            artifact_path,
             assets_bucket: input.assets_bucket,
             assets_prefix: input.assets_prefix,
             spa_fallback: input.spa_fallback,
@@ -206,6 +217,13 @@ impl PlatformService {
             status: status.to_string(),
             created_at: Utc::now().timestamp(),
         };
+
+        if let Some(ref rel) = dep.artifact_path {
+            let clean = rel.trim_start_matches('/');
+            if !clean.is_empty() && self.config.artifacts_dir().join(clean).exists() {
+                self.runtime.preload_deployment(&dep).await?;
+            }
+        }
 
         let saved = self
             .projects
@@ -393,5 +411,163 @@ impl PlatformService {
             TokenScope::Admin | TokenScope::Readonly => Ok(all),
             TokenScope::Project(pid) => Ok(all.into_iter().filter(|r| r.project_id == *pid).collect()),
         }
+    }
+
+    pub async fn upload_project_artifact(
+        &self,
+        caller: &Caller,
+        project_id_or_name: &str,
+        rel_path: &str,
+        bytes: Bytes,
+    ) -> Result<(String, bool, usize)> {
+        let proj = self.get_project_internal(project_id_or_name).await?;
+        Self::require_project_write(caller, &proj.id)?;
+        let size = bytes.len();
+        let (stored_path, precompiled) = self
+            .runtime
+            .store_artifact(&proj.id, rel_path, bytes)
+            .await?;
+        self.audit(
+            Some(&proj.id),
+            &caller.actor,
+            "artifact.upload",
+            serde_json::json!({
+                "artifact_path": stored_path,
+                "precompiled": precompiled,
+                "size": size,
+            }),
+        );
+        Ok((stored_path, precompiled, size))
+    }
+
+    pub async fn invoke_worker_http(
+        &self,
+        ctx: RequestCtx,
+        req: WorkerHttpRequest,
+    ) -> Result<WorkerHttpResponse> {
+        let project_id = ctx.project_id.clone();
+        let request_id = ctx.request_id.clone();
+        match self.runtime.handle_http(ctx, req).await {
+            Ok(resp) => Ok(resp),
+            Err(err) => {
+                self.logs.emit(LogEntry {
+                    id: None,
+                    ts: Utc::now().timestamp_millis(),
+                    project_id: Some(project_id),
+                    request_id: Some(request_id),
+                    source: "runtime".into(),
+                    level: "error".into(),
+                    message: format!("Worker HTTP invocation error: {err}"),
+                    meta_json: None,
+                });
+                Err(err)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn invoke_project_http(
+        &self,
+        caller: &Caller,
+        project_id_or_name: &str,
+        target_env: Option<TargetEnv>,
+        method: &str,
+        path: &str,
+        headers: Vec<(String, Vec<u8>)>,
+        body: Bytes,
+    ) -> Result<(String, WorkerHttpResponse)> {
+        let proj = self.get_project_internal(project_id_or_name).await?;
+        Self::require_project_read(caller, &proj.id)?;
+
+        let dep_id = match target_env.unwrap_or(TargetEnv::Prod) {
+            TargetEnv::Prod => proj.active_deployment_id.clone(),
+            TargetEnv::Preview => proj.preview_deployment_id.clone(),
+        }
+        .ok_or_else(|| {
+            FerroError::NotFound(format!("project '{}' has no deployment for target env", proj.name))
+        })?;
+
+        let dep = self
+            .projects
+            .get_deployment(&dep_id)
+            .await?
+            .ok_or_else(|| FerroError::NotFound(format!("deployment '{dep_id}'")))?;
+
+        let norm_path = if path.starts_with('/') {
+            path.to_string()
+        } else {
+            format!("/{path}")
+        };
+
+        let method_upper = method.trim().to_ascii_uppercase();
+        if let Some(bucket) = dep.assets_bucket.as_deref() {
+            if method_upper == "GET" || method_upper == "HEAD" {
+                let path_only = norm_path.split('?').next().unwrap_or("/");
+                let clean = path_only.trim_start_matches('/');
+                let rel = if clean.is_empty() {
+                    "index.html".to_string()
+                } else if clean.ends_with('/') {
+                    format!("{clean}index.html")
+                } else {
+                    clean.to_string()
+                };
+                let key = match dep
+                    .assets_prefix
+                    .as_deref()
+                    .map(|p| p.trim_matches('/'))
+                    .filter(|p| !p.is_empty())
+                {
+                    Some(pfx) => format!("{pfx}/{rel}"),
+                    None => rel,
+                };
+                if let Ok(Some((meta, stream, _, _))) =
+                    self.static_get_object_stream(bucket, &key, None).await
+                {
+                    let body_stream = if method_upper == "HEAD" {
+                        drop(stream);
+                        Box::pin(futures_util::stream::empty())
+                    } else {
+                        let bytes = stream
+                            .try_fold(Vec::new(), |mut acc, chunk| async move {
+                                acc.extend_from_slice(&chunk);
+                                Ok(acc)
+                            })
+                            .await
+                            .map_err(|e| FerroError::Internal(anyhow::anyhow!("read static asset: {e}")))?;
+                        Box::pin(futures_util::stream::once(async move {
+                            Ok::<_, std::io::Error>(Bytes::from(bytes))
+                        })) as crate::core::model::ByteStream
+                    };
+                    return Ok((
+                        dep.id.clone(),
+                        WorkerHttpResponse {
+                            status: 200,
+                            headers: vec![("content-type".into(), meta.content_type.into_bytes())],
+                            body: body_stream,
+                        },
+                    ));
+                }
+            }
+        }
+
+        if dep.artifact_path.is_none() {
+            return Err(FerroError::NotFound(format!(
+                "deployment '{}' has no worker artifact",
+                dep.id
+            )));
+        }
+
+        let request_id = format!("inv_{}", Uuid::new_v4().simple());
+        let ctx = RequestCtx::new(proj.id.clone(), request_id, dep.clone());
+        let req = WorkerHttpRequest {
+            method: method_upper,
+            uri: norm_path,
+            headers,
+            body: Box::pin(futures_util::stream::once(async move {
+                Ok::<_, std::io::Error>(body)
+            })),
+        };
+        let resp = self.invoke_worker_http(ctx, req).await?;
+        Ok((dep.id, resp))
     }
 }

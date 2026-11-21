@@ -439,6 +439,24 @@ impl QueueStore for TursoQueueStore {
         .await
     }
 
+    async fn mark_dead(&self, job_id: i64, err: &str) -> Result<()> {
+        let err_s = err.to_string();
+        with_retry(|| {
+            let db = self.db.clone();
+            let err_s = err_s.clone();
+            async move {
+                let conn = db.connect()?;
+                conn.execute(
+                    "UPDATE jobs SET status = 'dead', lease_until = 0, last_error = ?1 WHERE id = ?2",
+                    (err_s, job_id),
+                )
+                .await
+            }
+        })
+        .await?;
+        Ok(())
+    }
+
     async fn reap_expired(&self) -> Result<u64> {
         let now_ms = Utc::now().timestamp_millis();
         with_retry(|| {

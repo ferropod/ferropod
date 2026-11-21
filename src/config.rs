@@ -58,6 +58,11 @@ pub struct Config {
     pub blob_gc_grace_secs: i64,
     pub maintenance_interval_secs: u64,
     pub max_blob_upload_bytes: usize,
+    pub wasm_max_memory_bytes: usize,
+    pub wasm_max_table_elements: usize,
+    pub wasm_compile_concurrency: usize,
+    pub wasm_epoch_timeout_ms: u64,
+    pub wasm_cache_max_compiled: usize,
 }
 
 impl Config {
@@ -88,6 +93,11 @@ impl Config {
                 blob_gc_grace_secs: 30,
                 maintenance_interval_secs: 30,
                 max_blob_upload_bytes: 64 * 1024 * 1024,
+                wasm_max_memory_bytes: 32 * 1024 * 1024,
+                wasm_max_table_elements: 4_096,
+                wasm_compile_concurrency: 1,
+                wasm_epoch_timeout_ms: 10_000,
+                wasm_cache_max_compiled: 8,
             },
             Profile::Standard => Self {
                 profile,
@@ -110,6 +120,11 @@ impl Config {
                 blob_gc_grace_secs: 30,
                 maintenance_interval_secs: 30,
                 max_blob_upload_bytes: 256 * 1024 * 1024,
+                wasm_max_memory_bytes: 128 * 1024 * 1024,
+                wasm_max_table_elements: 16_384,
+                wasm_compile_concurrency: 2,
+                wasm_epoch_timeout_ms: 10_000,
+                wasm_cache_max_compiled: 32,
             },
         }
     }

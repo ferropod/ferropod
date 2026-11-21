@@ -444,12 +444,33 @@ pub struct ByteRange {
     pub end: Option<u64>,
 }
 
-/// Worker execution context passed to `WorkerRuntime` (expanded in M2).
+/// Worker execution context passed to `WorkerRuntime`.
 #[derive(Debug, Clone)]
 pub struct RequestCtx {
     pub project_id: String,
     pub request_id: String,
     pub deployment: Deployment,
+    pub cron_job: Option<CronJob>,
+}
+
+impl RequestCtx {
+    pub fn new(
+        project_id: impl Into<String>,
+        request_id: impl Into<String>,
+        deployment: Deployment,
+    ) -> Self {
+        Self {
+            project_id: project_id.into(),
+            request_id: request_id.into(),
+            deployment,
+            cron_job: None,
+        }
+    }
+
+    pub fn with_cron_job(mut self, job: CronJob) -> Self {
+        self.cron_job = Some(job);
+        self
+    }
 }
 
 /// Transport-agnostic HTTP request passed to `WorkerRuntime` (avoids coupling `core` to `axum`).

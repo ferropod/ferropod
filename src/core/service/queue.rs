@@ -1,7 +1,10 @@
 use bytes::Bytes;
+use chrono::Utc;
+use uuid::Uuid;
 
 use crate::core::model::{
-    Caller, EnqueueOpts, FerroError, Job, JobStatus, QueueConfig, QueueStats, Result, TokenScope,
+    Caller, EnqueueOpts, FerroError, Job, JobOutcome, JobStatus, LogEntry, QueueConfig,
+    QueueStats, RequestCtx, Result, TokenScope,
 };
 
 use super::PlatformService;
@@ -197,5 +200,87 @@ impl PlatformService {
             serde_json::json!({ "queue": queue, "purged": purged }),
         );
         Ok(purged)
+    }
+
+    /// Poll all queues with a configured `consumer_project_id`, dispatch claimed batches to
+    /// the Wasmtime runtime, and apply `Ack` / `Retry` / `Dead` outcomes.
+    pub async fn run_queue_dispatch_once(&self) -> Result<usize> {
+        let queues = self.queue.list_queues().await?;
+        let mut dispatched = 0usize;
+
+        for cfg in queues {
+            let Some(consumer_pid) = cfg.consumer_project_id.as_deref() else {
+                continue;
+            };
+            let Some(proj) = self.projects.get_project(consumer_pid).await? else {
+                continue;
+            };
+            let Some(dep_id) = proj.active_deployment_id.as_deref() else {
+                continue;
+            };
+            let Some(dep) = self.projects.get_deployment(dep_id).await? else {
+                continue;
+            };
+            if dep.artifact_path.is_none() {
+                continue;
+            }
+
+            let limit = cfg.batch_size.clamp(1, 100) as usize;
+            let lease_secs = cfg.lease_secs.max(5);
+            let batch = self.queue.claim_batch(&cfg.name, limit, lease_secs).await?;
+            if batch.is_empty() {
+                continue;
+            }
+
+            let request_id = format!("queue_{}", Uuid::new_v4().simple());
+            let ctx = RequestCtx::new(proj.id.clone(), request_id.clone(), dep);
+            match self.runtime.handle_queue(ctx, batch.clone()).await {
+                Ok(outcomes) => {
+                    let mut ack_ids = Vec::new();
+                    for (idx, job) in batch.iter().enumerate() {
+                        match outcomes.get(idx) {
+                            Some(JobOutcome::Ack) => ack_ids.push(job.id),
+                            Some(JobOutcome::Retry { delay_secs, error }) => {
+                                self.queue
+                                    .nack(job.id, (*delay_secs).max(1), error)
+                                    .await?;
+                            }
+                            Some(JobOutcome::Dead { error }) => {
+                                self.queue.mark_dead(job.id, error).await?;
+                            }
+                            None => {
+                                self.queue
+                                    .nack(job.id, 5, "worker returned fewer outcomes than jobs")
+                                    .await?;
+                            }
+                        }
+                    }
+                    if !ack_ids.is_empty() {
+                        self.queue.ack_batch(&ack_ids).await?;
+                    }
+                    dispatched += batch.len();
+                }
+                Err(err) => {
+                    let msg = err.to_string();
+                    self.logs.emit(LogEntry {
+                        id: None,
+                        ts: Utc::now().timestamp_millis(),
+                        project_id: Some(proj.id.clone()),
+                        request_id: Some(request_id),
+                        source: "queue".into(),
+                        level: "error".into(),
+                        message: format!("Queue '{}' consumer failed: {msg}", cfg.name),
+                        meta_json: None,
+                    });
+                    for job in &batch {
+                        let exp = job.attempts.clamp(1, 6) as u32;
+                        let delay = (1u64 << exp).min(300);
+                        let _ = self.queue.nack(job.id, delay, &msg).await;
+                    }
+                }
+            }
+        }
+
+        Ok(dispatched)
     }
 }

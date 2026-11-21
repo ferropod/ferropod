@@ -1,16 +1,19 @@
 use axum::{
     body::Body,
     extract::State,
-    http::{header, HeaderMap, Method, Request, StatusCode},
+    http::{header, HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode},
     middleware,
     response::{IntoResponse, Response},
     routing::get,
     Json, Router,
 };
+use futures_util::TryStreamExt;
 use serde::Serialize;
 use tower_http::compression::CompressionLayer;
 use tower_http::limit::RequestBodyLimitLayer;
+use uuid::Uuid;
 
+use crate::core::model::{RequestCtx, WorkerHttpRequest};
 use crate::core::service::PlatformService;
 use crate::gateway::{blob_api, guard::access_log_middleware};
 use crate::web;
@@ -49,6 +52,11 @@ async fn host_route_handler(
     State(svc): State<PlatformService>,
     req: Request<Body>,
 ) -> Response {
+    let req_path = req.uri().path();
+    if req_path == "/_internal" || req_path.starts_with("/_internal/") {
+        return (StatusCode::FORBIDDEN, "internal path forbidden").into_response();
+    }
+
     let method = req.method().clone();
     let headers = req.headers().clone();
     let host = headers
@@ -75,11 +83,58 @@ async fn host_route_handler(
     }
 
     if dep.artifact_path.is_some() {
-        return (
-            StatusCode::NOT_IMPLEMENTED,
-            "Wasmtime worker execution will be enabled in M2",
-        )
-            .into_response();
+        let Some(_permit) = svc.try_acquire_http_permit() else {
+            return (StatusCode::TOO_MANY_REQUESTS, "server busy").into_response();
+        };
+        let uri_str = req
+            .uri()
+            .path_and_query()
+            .map(|pq| pq.as_str().to_string())
+            .unwrap_or_else(|| "/".to_string());
+        let header_pairs = headers
+            .iter()
+            .map(|(k, v)| (k.as_str().to_string(), v.as_bytes().to_vec()))
+            .collect();
+        let body_stream = req
+            .into_body()
+            .into_data_stream()
+            .map_err(std::io::Error::other);
+        let worker_req = WorkerHttpRequest {
+            method: method.as_str().to_string(),
+            uri: uri_str,
+            headers: header_pairs,
+            body: Box::pin(body_stream),
+        };
+        let request_id = format!("req_{}", Uuid::new_v4().simple());
+        let ctx = RequestCtx::new(route.project_id, request_id, dep);
+        return match svc.invoke_worker_http(ctx, worker_req).await {
+            Ok(resp) => {
+                let status = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK);
+                let mut builder = Response::builder().status(status);
+                for (k, v) in resp.headers {
+                    if let (Ok(name), Ok(val)) = (
+                        HeaderName::from_bytes(k.as_bytes()),
+                        HeaderValue::from_bytes(&v),
+                    ) {
+                        builder = builder.header(name, val);
+                    }
+                }
+                builder
+                    .body(Body::from_stream(resp.body))
+                    .unwrap_or_else(|_| {
+                        (StatusCode::BAD_GATEWAY, "invalid worker response").into_response()
+                    })
+            }
+            Err(err) => {
+                let msg = err.to_string();
+                let code = if msg.contains("timed out") || msg.contains("interrupt") {
+                    StatusCode::GATEWAY_TIMEOUT
+                } else {
+                    StatusCode::BAD_GATEWAY
+                };
+                (code, msg).into_response()
+            }
+        };
     }
 
     (StatusCode::NOT_FOUND, "not found").into_response()

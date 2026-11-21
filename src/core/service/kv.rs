@@ -156,4 +156,16 @@ impl PlatformService {
         self.resolve_kv_namespace_for_read(caller, ns).await?;
         self.kv.list(ns, prefix, limit).await
     }
+
+    pub async fn kv_list_page(
+        &self,
+        caller: &Caller,
+        ns: &str,
+        prefix: Option<&str>,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<(Vec<KvKeyMeta>, Option<String>)> {
+        self.resolve_kv_namespace_for_read(caller, ns).await?;
+        self.kv.list_page(ns, prefix, cursor, limit).await
+    }
 }

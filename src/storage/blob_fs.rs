@@ -247,6 +247,18 @@ impl ObjectStore for FsBlobStore {
         self.meta.list_objects_meta(bucket, prefix, limit).await
     }
 
+    async fn list_page(
+        &self,
+        bucket: &str,
+        prefix: Option<&str>,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<(Vec<ObjectMeta>, Option<String>)> {
+        self.meta
+            .list_objects_meta_page(bucket, prefix, cursor, limit)
+            .await
+    }
+
     async fn run_gc_batch(&self, limit: usize) -> Result<u64> {
         let now = Utc::now().timestamp();
         let due = self.meta.list_due_blob_gc(now, limit).await?;

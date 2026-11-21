@@ -494,28 +494,69 @@ impl KvStore for TursoKvStore {
     }
 
     async fn list(&self, ns: &str, prefix: Option<&str>, limit: usize) -> Result<Vec<KvKeyMeta>> {
+        let (items, _) = self.list_page(ns, prefix, None, limit).await?;
+        Ok(items)
+    }
+
+    async fn list_page(
+        &self,
+        ns: &str,
+        prefix: Option<&str>,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<(Vec<KvKeyMeta>, Option<String>)> {
         let now = Utc::now().timestamp();
         let conn = connect_db(&self.db)?;
-        let limit_i64 = limit.min(1000) as i64;
-        let mut rows = if let Some(pfx) = prefix {
-            let pattern = format!("{}%", escape_like(pfx));
-            conn.query(
-                "SELECT key, LENGTH(value), metadata, expires_at, updated_at FROM kv_entries
-                 WHERE namespace = ?1 AND (expires_at IS NULL OR expires_at > ?2) AND key LIKE ?3 ESCAPE '\\'
-                 ORDER BY key ASC LIMIT ?4",
-                (ns, now, pattern, limit_i64),
-            )
-            .await
-            .map_err(map_turso_err)?
-        } else {
-            conn.query(
-                "SELECT key, LENGTH(value), metadata, expires_at, updated_at FROM kv_entries
-                 WHERE namespace = ?1 AND (expires_at IS NULL OR expires_at > ?2)
-                 ORDER BY key ASC LIMIT ?3",
-                (ns, now, limit_i64),
-            )
-            .await
-            .map_err(map_turso_err)?
+        let page_limit = limit.clamp(1, 1000);
+        let fetch_limit = (page_limit + 1) as i64;
+        let cursor_opt = cursor.filter(|c| !c.is_empty());
+
+        let mut rows = match (prefix, cursor_opt) {
+            (Some(pfx), Some(cur)) => {
+                let pattern = format!("{}%", escape_like(pfx));
+                conn.query(
+                    "SELECT key, LENGTH(value), metadata, expires_at, updated_at FROM kv_entries
+                     WHERE namespace = ?1 AND (expires_at IS NULL OR expires_at > ?2)
+                       AND key LIKE ?3 ESCAPE '\\' AND key > ?4
+                     ORDER BY key ASC LIMIT ?5",
+                    (ns, now, pattern, cur, fetch_limit),
+                )
+                .await
+                .map_err(map_turso_err)?
+            }
+            (Some(pfx), None) => {
+                let pattern = format!("{}%", escape_like(pfx));
+                conn.query(
+                    "SELECT key, LENGTH(value), metadata, expires_at, updated_at FROM kv_entries
+                     WHERE namespace = ?1 AND (expires_at IS NULL OR expires_at > ?2)
+                       AND key LIKE ?3 ESCAPE '\\'
+                     ORDER BY key ASC LIMIT ?4",
+                    (ns, now, pattern, fetch_limit),
+                )
+                .await
+                .map_err(map_turso_err)?
+            }
+            (None, Some(cur)) => {
+                conn.query(
+                    "SELECT key, LENGTH(value), metadata, expires_at, updated_at FROM kv_entries
+                     WHERE namespace = ?1 AND (expires_at IS NULL OR expires_at > ?2)
+                       AND key > ?3
+                     ORDER BY key ASC LIMIT ?4",
+                    (ns, now, cur, fetch_limit),
+                )
+                .await
+                .map_err(map_turso_err)?
+            }
+            (None, None) => {
+                conn.query(
+                    "SELECT key, LENGTH(value), metadata, expires_at, updated_at FROM kv_entries
+                     WHERE namespace = ?1 AND (expires_at IS NULL OR expires_at > ?2)
+                     ORDER BY key ASC LIMIT ?3",
+                    (ns, now, fetch_limit),
+                )
+                .await
+                .map_err(map_turso_err)?
+            }
         };
 
         let mut merged: HashMap<String, KvKeyMeta> = HashMap::new();
@@ -547,6 +588,11 @@ impl KvStore for TursoKvStore {
                         continue;
                     }
                 }
+                if let Some(cur) = cursor_opt {
+                    if entry_key.as_str() <= cur {
+                        continue;
+                    }
+                }
                 merged.insert(
                     entry_key.clone(),
                     KvKeyMeta {
@@ -562,8 +608,16 @@ impl KvStore for TursoKvStore {
 
         let mut out: Vec<_> = merged.into_values().collect();
         out.sort_by(|a, b| a.key.cmp(&b.key));
-        out.truncate(limit.min(1000));
-        Ok(out)
+        let has_more = out.len() > page_limit;
+        if has_more {
+            out.truncate(page_limit);
+        }
+        let next_cursor = if has_more {
+            out.last().map(|k| k.key.clone())
+        } else {
+            None
+        };
+        Ok((out, next_cursor))
     }
 
     async fn cleanup_expired_batch(&self, batch_limit: usize) -> Result<u64> {
