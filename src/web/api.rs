@@ -23,6 +23,7 @@ use crate::core::model::{
 };
 use crate::core::service::{CreateDeploymentInput, PlatformService};
 use crate::gateway::guard::{authenticate_caller, ApiError};
+use crate::update;
 
 #[derive(Debug, Deserialize)]
 struct AuthQuery {
@@ -32,6 +33,7 @@ struct AuthQuery {
 #[derive(Debug, Serialize)]
 struct StatusResp {
     status: &'static str,
+    version: &'static str,
     profile: String,
     actor: String,
     scope: String,
@@ -205,6 +207,13 @@ struct DbStatementItem {
 pub fn router() -> Router<PlatformService> {
     Router::new()
         .route("/status", get(status))
+        .route("/metrics", get(metrics))
+        .route("/system/info", get(system_info))
+        .route("/system/update/check", get(system_update_check))
+        .route("/system/releases", get(system_releases))
+        .route("/system/update/apply", post(system_update_apply))
+        .route("/backups", get(list_backups).post(create_backup))
+        .route("/backups/{name}", delete(delete_backup))
         .route("/projects", get(list_projects).post(create_project))
         .route("/projects/{id}", get(get_project).delete(delete_project))
         .route(
@@ -223,13 +232,14 @@ pub fn router() -> Router<PlatformService> {
             "/kv",
             get(kv_list_namespaces).post(kv_create_namespace),
         )
-        .route("/kv/{ns}", get(kv_list))
+        .route("/kv/{ns}", get(kv_list).delete(kv_delete_namespace))
         .route(
             "/kv/{ns}/{key}",
             get(kv_get).put(kv_put).delete(kv_delete),
         )
         .route("/kv/{ns}/{key}/incr", post(kv_incr))
         .route("/queues", get(queue_list).post(queue_create))
+        .route("/queues/{name}", delete(queue_delete))
         .route("/queues/{name}/enqueue", post(queue_enqueue))
         .route("/queues/{name}/stats", get(queue_stats))
         .route("/queues/{name}/inspect", get(queue_inspect))
@@ -239,6 +249,7 @@ pub fn router() -> Router<PlatformService> {
         .route("/buckets/{name}", patch(bucket_update))
         .route("/buckets/{name}/presign", post(bucket_presign))
         .route("/dbs", get(db_list).post(db_create))
+        .route("/dbs/{id}", delete(db_delete))
         .route("/dbs/{id}/schema", get(db_schema))
         .route("/dbs/{id}/query", post(db_query))
         .route("/dbs/{id}/execute", post(db_execute))
@@ -262,6 +273,7 @@ async fn status(
     .map_err(ApiError)?;
     Ok(Json(StatusResp {
         status: "ok",
+        version: update::CURRENT_VERSION,
         profile: format!("{:?}", svc.config().profile),
         actor: caller.actor.clone(),
         scope: caller.scope.as_str(),
@@ -272,6 +284,283 @@ async fn status(
         dbs: dbs.len(),
         kv_namespaces: kv_namespaces.len(),
     }))
+}
+
+#[derive(Debug, Serialize)]
+struct MetricsResp {
+    uptime_secs: u64,
+    rss_bytes: u64,
+    mem_total_bytes: u64,
+    mem_avail_bytes: u64,
+    mem_budget_bytes: u64,
+    load_1m: f64,
+    load_5m: f64,
+    load_15m: f64,
+    cpu_cores: usize,
+    open_fds: usize,
+    profile: String,
+    timestamp_ms: i64,
+}
+
+fn process_start_instant() -> &'static std::time::Instant {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START.get_or_init(std::time::Instant::now)
+}
+
+fn read_proc_rss_bytes() -> u64 {
+    let Ok(content) = std::fs::read_to_string("/proc/self/status") else {
+        return 0;
+    };
+    for line in content.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:") {
+            if let Some(kb_str) = rest.split_whitespace().next() {
+                if let Ok(kb) = kb_str.parse::<u64>() {
+                    return kb.saturating_mul(1024);
+                }
+            }
+        }
+    }
+    0
+}
+
+fn read_proc_meminfo() -> (u64, u64) {
+    let Ok(content) = std::fs::read_to_string("/proc/meminfo") else {
+        return (0, 0);
+    };
+    let mut total = 0u64;
+    let mut avail = 0u64;
+    for line in content.lines() {
+        if let Some(rest) = line.strip_prefix("MemTotal:") {
+            if let Some(kb) = rest.split_whitespace().next().and_then(|s| s.parse::<u64>().ok()) {
+                total = kb.saturating_mul(1024);
+            }
+        } else if let Some(rest) = line.strip_prefix("MemAvailable:") {
+            if let Some(kb) = rest.split_whitespace().next().and_then(|s| s.parse::<u64>().ok()) {
+                avail = kb.saturating_mul(1024);
+            }
+        }
+    }
+    (total, avail)
+}
+
+fn read_proc_loadavg() -> (f64, f64, f64) {
+    let Ok(content) = std::fs::read_to_string("/proc/loadavg") else {
+        return (0.0, 0.0, 0.0);
+    };
+    let mut parts = content.split_whitespace();
+    let l1 = parts.next().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+    let l5 = parts.next().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+    let l15 = parts.next().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+    (l1, l5, l15)
+}
+
+fn read_proc_open_fds() -> usize {
+    std::fs::read_dir("/proc/self/fd")
+        .map(|rd| rd.count())
+        .unwrap_or(0)
+}
+
+async fn metrics(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let _caller = authenticate_caller(&svc, &headers, None).await?;
+    let profile = format!("{:?}", svc.config().profile);
+    let rss_bytes = read_proc_rss_bytes();
+    let (mem_total_bytes, mem_avail_bytes) = read_proc_meminfo();
+    let (load_1m, load_5m, load_15m) = read_proc_loadavg();
+    let open_fds = read_proc_open_fds();
+    let cpu_cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let mem_budget_bytes = if profile.eq_ignore_ascii_case("lowmem") {
+        512 * 1024 * 1024
+    } else if mem_total_bytes > 0 {
+        mem_total_bytes
+    } else {
+        512 * 1024 * 1024
+    };
+    Ok(Json(MetricsResp {
+        uptime_secs: process_start_instant().elapsed().as_secs(),
+        rss_bytes,
+        mem_total_bytes,
+        mem_avail_bytes,
+        mem_budget_bytes,
+        load_1m,
+        load_5m,
+        load_15m,
+        cpu_cores,
+        open_fds,
+        profile,
+        timestamp_ms: chrono::Utc::now().timestamp_millis(),
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateBackupReq {
+    label: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct BackupInfo {
+    name: String,
+    path: String,
+    created_at_ms: i64,
+    file_count: usize,
+    size_bytes: u64,
+    files: Vec<String>,
+}
+
+fn sanitize_backup_segment(raw: &str) -> Option<String> {
+    let clean: String = raw
+        .trim()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(40)
+        .collect();
+    if clean.is_empty() {
+        None
+    } else {
+        Some(clean)
+    }
+}
+
+fn scan_backup_dir(root: &std::path::Path, name: String) -> Option<BackupInfo> {
+    let dir = root.join(&name);
+    let meta = std::fs::metadata(&dir).ok()?;
+    if !meta.is_dir() {
+        return None;
+    }
+    let created_at_ms = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+
+    let mut files = Vec::new();
+    let mut size_bytes = 0u64;
+    let mut stack = vec![(dir.clone(), String::new())];
+    while let Some((cur, prefix)) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&cur) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            let fname = entry.file_name().to_string_lossy().to_string();
+            let rel = if prefix.is_empty() {
+                fname
+            } else {
+                format!("{prefix}/{fname}")
+            };
+            if let Ok(m) = entry.metadata() {
+                if m.is_dir() {
+                    stack.push((path, rel));
+                } else if m.is_file() {
+                    size_bytes = size_bytes.saturating_add(m.len());
+                    files.push(rel);
+                }
+            }
+        }
+    }
+    files.sort();
+    Some(BackupInfo {
+        name,
+        path: dir.to_string_lossy().to_string(),
+        created_at_ms,
+        file_count: files.len(),
+        size_bytes,
+        files,
+    })
+}
+
+async fn list_backups(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    if !caller.scope.allows_admin() {
+        return Err(ApiError(FerroError::Forbidden(
+            "admin scope required".into(),
+        )));
+    }
+    let backups_root = svc.config().data_dir.join("backups");
+    let mut items = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&backups_root) {
+        for entry in rd.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if let Some(info) = scan_backup_dir(&backups_root, name) {
+                items.push(info);
+            }
+        }
+    }
+    items.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms));
+    Ok(Json(items))
+}
+
+async fn create_backup(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Json(req): Json<CreateBackupReq>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    if !caller.scope.allows_admin() {
+        return Err(ApiError(FerroError::Forbidden(
+            "admin scope required".into(),
+        )));
+    }
+    let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+    let name = match req.label.as_deref().and_then(sanitize_backup_segment) {
+        Some(lbl) => format!("snap_{ts}_{lbl}"),
+        None => format!("snap_{ts}"),
+    };
+    let backups_root = svc.config().data_dir.join("backups");
+    let out_dir = backups_root.join(&name);
+    svc.create_snapshot(&caller, &out_dir)
+        .await
+        .map_err(ApiError)?;
+    let info = scan_backup_dir(&backups_root, name.clone()).unwrap_or(BackupInfo {
+        name,
+        path: out_dir.to_string_lossy().to_string(),
+        created_at_ms: chrono::Utc::now().timestamp_millis(),
+        file_count: 0,
+        size_bytes: 0,
+        files: Vec::new(),
+    });
+    Ok((StatusCode::CREATED, Json(info)))
+}
+
+async fn delete_backup(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    if !caller.scope.allows_admin() {
+        return Err(ApiError(FerroError::Forbidden(
+            "admin scope required".into(),
+        )));
+    }
+    if name.is_empty()
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+        || name == "."
+    {
+        return Err(ApiError(FerroError::InvalidArgument(
+            "invalid backup name".into(),
+        )));
+    }
+    let target = svc.config().data_dir.join("backups").join(&name);
+    if !target.exists() {
+        return Err(ApiError(FerroError::NotFound(format!(
+            "backup '{name}' not found"
+        ))));
+    }
+    tokio::fs::remove_dir_all(&target)
+        .await
+        .map_err(|e| ApiError(FerroError::Internal(anyhow::anyhow!("delete backup: {e}"))))?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn list_projects(
@@ -497,6 +786,18 @@ async fn kv_create_namespace(
     Ok((StatusCode::CREATED, Json(ns)))
 }
 
+async fn kv_delete_namespace(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Path(ns): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    svc.delete_kv_namespace(&caller, &ns)
+        .await
+        .map_err(ApiError)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn kv_list_namespaces(
     State(svc): State<PlatformService>,
     headers: HeaderMap,
@@ -612,6 +913,16 @@ async fn queue_create(
     };
     let saved = svc.queue_create(&caller, cfg).await.map_err(ApiError)?;
     Ok((StatusCode::CREATED, Json(saved)))
+}
+
+async fn queue_delete(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    svc.queue_delete(&caller, &name).await.map_err(ApiError)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn queue_enqueue(
@@ -766,6 +1077,16 @@ async fn db_create(
     ))
 }
 
+async fn db_delete(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    svc.delete_user_db(&caller, &id).await.map_err(ApiError)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn db_schema(
     State(svc): State<PlatformService>,
     headers: HeaderMap,
@@ -833,4 +1154,94 @@ async fn logs_stream(
             .interval(Duration::from_secs(15))
             .text("keep-alive"),
     ))
+}
+
+#[derive(Debug, Deserialize)]
+struct ReleasesQuery {
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApplyUpdateReq {
+    version: Option<String>,
+    #[serde(default)]
+    force: bool,
+    #[serde(default = "default_true")]
+    restart: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+async fn system_info(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let _caller = authenticate_caller(&svc, &headers, None).await?;
+    Ok(Json(update::system_info()))
+}
+
+async fn system_update_check(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    if !caller.scope.allows_admin() {
+        return Err(ApiError(FerroError::Forbidden(
+            "admin scope required".into(),
+        )));
+    }
+    let res = update::check_for_update()
+        .await
+        .map_err(|e| ApiError(FerroError::Internal(e)))?;
+    Ok(Json(res))
+}
+
+async fn system_releases(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Query(q): Query<ReleasesQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    if !caller.scope.allows_admin() {
+        return Err(ApiError(FerroError::Forbidden(
+            "admin scope required".into(),
+        )));
+    }
+    let items = update::list_releases(q.limit.unwrap_or(10))
+        .await
+        .map_err(|e| ApiError(FerroError::Internal(e)))?;
+    Ok(Json(items))
+}
+
+async fn system_update_apply(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Json(req): Json<ApplyUpdateReq>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    if !caller.scope.allows_admin() {
+        return Err(ApiError(FerroError::Forbidden(
+            "admin scope required".into(),
+        )));
+    }
+    let _lock = update::UpdateLock::try_acquire().ok_or_else(|| {
+        ApiError(FerroError::Conflict(
+            "another update is already in progress".into(),
+        ))
+    })?;
+
+    let res = update::apply_update(req.version.as_deref(), req.force, req.restart)
+        .await
+        .map_err(|e| ApiError(FerroError::Internal(e)))?;
+
+    if res.restarting && (res.new_version != res.previous_version || req.force) {
+        tokio::spawn(async {
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            update::request_restart();
+        });
+    }
+
+    Ok(Json(res))
 }

@@ -8,6 +8,7 @@ use axum::{
     Json, Router,
 };
 use serde::Serialize;
+use tower_http::compression::CompressionLayer;
 use tower_http::limit::RequestBodyLimitLayer;
 
 use crate::core::service::PlatformService;
@@ -33,6 +34,7 @@ pub fn build_router(svc: PlatformService) -> Router {
         .route("/_admin/", get(web::admin_index))
         .route("/_admin/assets/{file}", get(web::admin_asset))
         .fallback(host_route_handler)
+        .layer(CompressionLayer::new())
         .layer(middleware::from_fn_with_state(
             svc.clone(),
             access_log_middleware,

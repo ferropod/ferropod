@@ -19,7 +19,9 @@
     'dbs',
     'search',
     'tokens',
-    'logs'
+    'logs',
+    'ops',
+    'updates'
   ];
 
   var state = {
@@ -291,13 +293,36 @@
     });
   }
 
+  // --- Token Persistence Helpers ---
+
+  function readStoredToken() {
+    var tok = '';
+    try { tok = localStorage.getItem(TOKEN_STORAGE) || ''; } catch (_) {}
+    if (!tok) {
+      try { tok = sessionStorage.getItem(TOKEN_STORAGE) || ''; } catch (_) {}
+    }
+    return tok;
+  }
+
+  function saveStoredToken(tok) {
+    try { localStorage.setItem(TOKEN_STORAGE, tok); } catch (_) {}
+    try { sessionStorage.setItem(TOKEN_STORAGE, tok); } catch (_) {}
+  }
+
+  function clearStoredToken() {
+    try { localStorage.removeItem(TOKEN_STORAGE); } catch (_) {}
+    try { sessionStorage.removeItem(TOKEN_STORAGE); } catch (_) {}
+  }
+
   // --- API Client ---
 
   async function api(path, opts) {
     opts = opts || {};
     var headers = Object.assign({}, opts.headers || {});
-    if (state.token) {
-      headers.Authorization = 'Bearer ' + state.token;
+    var tok = state.token || readStoredToken();
+    if (tok) {
+      state.token = tok;
+      headers.Authorization = 'Bearer ' + tok;
     }
     var fetchOpts = {
       method: opts.method || 'GET',
@@ -311,22 +336,37 @@
     }
 
     var res = await fetch(path, fetchOpts);
-    if (res.status === 401 && !opts.skipAuthRedirect) {
-      disconnect(true);
-      throw new Error(t('auth.invalidToken'));
-    }
     var text = await res.text();
-    if (!res.ok) {
-      var msg = res.status + ' ' + res.statusText;
-      if (text) {
-        try {
-          var parsed = JSON.parse(text);
-          if (parsed && parsed.error) msg = parsed.error;
-        } catch (_) {
-          msg = text;
-        }
+    var parsedErr = '';
+    if (!res.ok && text) {
+      try {
+        var parsedObj = JSON.parse(text);
+        if (parsedObj && parsedObj.error) parsedErr = parsedObj.error;
+      } catch (_) {
+        parsedErr = text;
       }
-      throw new Error(msg);
+    }
+
+    if (res.status === 401 && !opts.skipAuthRedirect) {
+      // Distinguish genuine invalid/expired token from scope/permission 401 on a specific resource
+      var stillValid = false;
+      if (state.status && path !== '/_api/v1/status') {
+        try {
+          var probe = await fetch('/_api/v1/status', {
+            headers: state.token ? { Authorization: 'Bearer ' + state.token } : {}
+          });
+          stillValid = probe.ok;
+        } catch (_) {}
+      }
+      if (!stillValid) {
+        disconnect(true);
+        throw new Error(parsedErr || t('auth.invalidToken'));
+      }
+      throw new Error(parsedErr || ('401 ' + res.statusText));
+    }
+
+    if (!res.ok) {
+      throw new Error(parsedErr || (res.status + ' ' + res.statusText));
     }
     if (!text || res.status === 204) return null;
     try {
@@ -382,7 +422,7 @@
 
   // --- Session & Auth ---
 
-  async function connectWithToken(token) {
+  async function connectWithToken(token, silentBoot) {
     var clean = (token || '').trim();
     if (!clean) {
       showLoginError(t('auth.tokenRequired'));
@@ -393,17 +433,26 @@
     btn.textContent = t('auth.connecting');
     hideLoginError();
 
+    if (silentBoot) {
+      $('login-view').classList.add('hidden');
+      $('app-shell').classList.remove('hidden');
+      var vr = $('view-root');
+      if (vr) vr.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
+    }
+
     state.token = clean;
     try {
       var st = await api('/_api/v1/status', { skipAuthRedirect: true });
       state.status = st;
-      try {
-        localStorage.setItem(TOKEN_STORAGE, clean);
-      } catch (_) {}
+      saveStoredToken(clean);
       enterApp();
     } catch (err) {
       state.token = '';
       state.status = null;
+      if (silentBoot) {
+        $('app-shell').classList.add('hidden');
+        $('login-view').classList.remove('hidden');
+      }
       showLoginError(err.message || t('auth.invalidToken'));
     } finally {
       btn.disabled = false;
@@ -428,6 +477,9 @@
     $('app-shell').classList.remove('hidden');
     $('session-actor').textContent = state.status.actor || '-';
     $('session-scope').textContent = state.status.scope || '-';
+    if ($('session-version')) {
+      $('session-version').textContent = state.status.version ? 'v' + state.status.version : 'v-';
+    }
     parseHash();
     renderCurrentRoute(true);
   }
@@ -436,9 +488,7 @@
     stopSse();
     state.token = '';
     state.status = null;
-    try {
-      localStorage.removeItem(TOKEN_STORAGE);
-    } catch (_) {}
+    clearStoredToken();
     $('app-shell').classList.add('hidden');
     $('login-view').classList.remove('hidden');
     if (!keepError) hideLoginError();
@@ -473,9 +523,59 @@
     if (state.currentRoute === 'queues') return renderQueues(fetchData);
     if (state.currentRoute === 'blobs') return renderBlobs(fetchData);
     if (state.currentRoute === 'dbs') return renderDbs(fetchData);
-    if (state.currentRoute === 'search') return renderSearch();
+    if (state.currentRoute === 'search') return renderSearch(fetchData);
     if (state.currentRoute === 'tokens') return renderTokens(fetchData);
     if (state.currentRoute === 'logs') return renderLogs(fetchData);
+    if (state.currentRoute === 'ops') return renderOps(fetchData);
+    if (state.currentRoute === 'updates') return renderUpdates(fetchData);
+  }
+
+  // --- Lazy Native ESM Component Loaders ---
+
+  var perfModulePromise = null;
+  function ensurePerfComponent() {
+    if (!perfModulePromise) {
+      perfModulePromise = import('/_admin/assets/perf_component.js').catch(function (err) {
+        perfModulePromise = null;
+        throw err;
+      });
+    }
+    return perfModulePromise;
+  }
+
+  var searchBundlePromise = null;
+  function ensureSearchBundle() {
+    if (!searchBundlePromise) {
+      searchBundlePromise = import('/_admin/assets/search_mock.js')
+        .then(function () { return import('/_admin/assets/search_components.js'); })
+        .catch(function (err) {
+          searchBundlePromise = null;
+          throw err;
+        });
+    }
+    return searchBundlePromise;
+  }
+
+  var opsModulePromise = null;
+  function ensureOpsComponent() {
+    if (!opsModulePromise) {
+      opsModulePromise = import('/_admin/assets/ops_component.js').catch(function (err) {
+        opsModulePromise = null;
+        throw err;
+      });
+    }
+    return opsModulePromise;
+  }
+
+  var updateModulePromise = null;
+  function ensureUpdateComponent() {
+    if (!updateModulePromise) {
+      updateModulePromise = import('/_admin/assets/update_component.js').catch(function (err) {
+        updateModulePromise = null;
+        throw err;
+      });
+    }
+    return updateModulePromise;
   }
 
   // --- 1. Overview ---
@@ -531,6 +631,7 @@
 
       '<div class="panel"><div class="panel-body row-between">' +
       '<div class="row gap-lg">' +
+      '<div><div class="muted text-xs">' + esc(t('updates.currentVersion')) + '</div><div class="text-strong mono"><a href="#/updates">v' + esc(st.version || '-') + '</a></div></div>' +
       '<div><div class="muted text-xs">' + esc(t('overview.profile')) + '</div><div class="text-strong">' + esc(st.profile || '-') + '</div></div>' +
       '<div><div class="muted text-xs">' + esc(t('overview.actor')) + '</div><div class="text-strong">' + esc(st.actor || '-') + '</div></div>' +
       '<div><div class="muted text-xs">' + esc(t('overview.scope')) + '</div><div><span class="badge badge-accent">' + esc(st.scope || '-') + '</span></div></div>' +
@@ -538,6 +639,7 @@
       '<div class="row">' +
       '<a href="#/projects" class="btn btn-sm">' + esc(t('nav.projects')) + '</a>' +
       '<a href="#/logs" class="btn btn-sm">' + esc(t('nav.logs')) + '</a>' +
+      '<a href="#/updates" class="btn btn-sm">' + esc(t('nav.updates')) + '</a>' +
       '</div></div></div>' +
 
       '<div class="stats-grid">' +
@@ -547,8 +649,10 @@
       statCard(t('overview.queues'), st.queues, '#/queues') +
       statCard(t('overview.buckets'), st.buckets, '#/blobs') +
       statCard(t('overview.dbs'), st.dbs, '#/dbs') +
-      statCard(t('overview.searchIndexes'), window.FerroSearchMock ? window.FerroSearchMock.listIndexes().length : 0, '#/search') +
+      statCard(t('overview.searchIndexes'), window.FerroSearchMock ? window.FerroSearchMock.listIndexes(getScope()).length : 0, '#/search') +
       '</div>' +
+
+      '<fp-perf-monitor id="overview-perf-monitor"></fp-perf-monitor>' +
 
       '<div class="grid-2">' +
       '<div class="panel"><div class="panel-header"><h3 class="panel-title">' + esc(t('overview.recentProjects')) + '</h3><a href="#/projects" class="btn btn-ghost btn-sm">' + esc(t('common.view')) + '</a></div>' +
@@ -561,6 +665,13 @@
         ? '<div class="table-wrap"><table class="data-table stack-mobile"><thead><tr><th>' + esc(t('routes.host')) + '</th><th>' + esc(t('routes.project')) + '</th><th>' + esc(t('routes.targetEnv')) + '</th></tr></thead><tbody>' + routeRows + '</tbody></table></div>'
         : '<div class="empty-state">' + esc(t('common.empty')) + '</div>') +
       '</div></div>';
+
+    if ($('overview-perf-monitor')) {
+      var perfEl = $('overview-perf-monitor');
+      ensurePerfComponent().then(function () {
+        perfEl.token = state.token || readStoredToken();
+      }).catch(function () {});
+    }
   }
 
   function statCard(label, value, hash) {
@@ -1178,6 +1289,7 @@
         '<input type="search" id="kv-prefix-input" style="width:190px;" value="' + esc(state.kvPrefix) + '" placeholder="' + esc(t('kv.prefixPlaceholder')) + '">' +
         '<button type="button" class="btn btn-sm" id="kv-filter-btn">' + esc(t('common.filter')) + '</button>' +
         (canWriteNs ? '<button type="button" class="btn btn-primary btn-sm" id="kv-put-btn">' + esc(t('kv.putKey')) + '</button>' : '') +
+        (canWriteNs && nsMeta ? '<button type="button" class="btn btn-danger btn-sm" id="kv-del-ns-btn">' + esc(t('kv.deleteNamespace')) + '</button>' : '') +
         '</div></div></div>' +
         (keyRows
           ? '<div class="table-wrap"><table class="data-table stack-mobile"><thead><tr><th>' + esc(t('kv.key')) + '</th><th>' + esc(t('kv.size')) + '</th><th>' + esc(t('common.expiresAt')) + '</th><th>' + esc(t('common.updatedAt')) + '</th><th class="th-actions">' + esc(t('common.actions')) + '</th></tr></thead><tbody>' + keyRows + '</tbody></table></div>'
@@ -1229,6 +1341,20 @@
     if ($('kv-put-btn')) {
       $('kv-put-btn').addEventListener('click', function () {
         openKvPutModal(null);
+      });
+    }
+    if ($('kv-del-ns-btn') && nsMeta) {
+      $('kv-del-ns-btn').addEventListener('click', function () {
+        var nsName = nsMeta.name;
+        confirmAction(t('kv.deleteNamespaceConfirm', { name: nsName }), async function () {
+          try {
+            await api('/_api/v1/kv/' + enc(nsName), { method: 'DELETE' });
+            state.selectedKvNs = '';
+            state.kvKeys = [];
+            toast(t('kv.namespaceDeleted'), 'success');
+            renderKv(true);
+          } catch (e) { toast(e.message, 'error'); }
+        });
       });
     }
     root.querySelectorAll('[data-view-kv]').forEach(function (btn) {
@@ -1471,6 +1597,7 @@
             '<button type="button" class="btn btn-primary btn-sm" id="q-enqueue-btn">' + esc(t('queues.enqueue')) + '</button>' +
             (st.dead > 0 ? '<button type="button" class="btn btn-sm" id="q-replay-all-btn">' + esc(t('queues.replayAll')) + '</button>' : '') +
             '<button type="button" class="btn btn-danger btn-sm" id="q-purge-btn">' + esc(t('queues.purge')) + '</button>' +
+            '<button type="button" class="btn btn-danger btn-sm" id="q-delete-btn">' + esc(t('queues.deleteQueue')) + '</button>' +
             '</div>'
           : '') +
         '</div></div>' +
@@ -1527,6 +1654,21 @@
             toast(t('queues.purged', { count: res.purged }), 'success');
             await loadSelectedQueue();
             renderQueues(false);
+          } catch (e) { toast(e.message, 'error'); }
+        });
+      });
+    }
+    if ($('q-delete-btn')) {
+      $('q-delete-btn').addEventListener('click', function () {
+        var qName = qCfg.name;
+        confirmAction(t('queues.deleteConfirm', { name: qName }), async function () {
+          try {
+            await api('/_api/v1/queues/' + enc(qName), { method: 'DELETE' });
+            state.selectedQueue = '';
+            state.queueStats = null;
+            state.queueJobs = [];
+            toast(t('queues.deleted'), 'success');
+            renderQueues(true);
           } catch (e) { toast(e.message, 'error'); }
         });
       });
@@ -1958,6 +2100,8 @@
         }
         if (state.selectedDbId && state.dbTab === 'schema') {
           await loadDbSchema();
+        } else if (state.dbTab === 'fts') {
+          await ensureSearchBundle();
         }
       } catch (e) {
         root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
@@ -2025,7 +2169,10 @@
         bodyHtml =
           '<div class="panel"><div class="panel-header"><div class="toolbar">' +
           '<div><h3 class="panel-title mono">' + esc(dbMeta.name) + '</h3><div class="muted text-xs mono">' + esc(dbMeta.id) + '</div></div>' +
+          '<div class="row">' +
           '<button type="button" class="btn btn-sm" id="db-sample-btn">' + esc(t('dbs.sampleSelect')) + '</button>' +
+          (canWriteDb ? '<button type="button" class="btn btn-danger btn-sm" id="db-delete-btn">' + esc(t('dbs.deleteDb')) + '</button>' : '') +
+          '</div>' +
           '</div></div><div class="panel-body stack gap-md">' +
           '<div class="field"><label>' + esc(t('dbs.sqlLabel')) + '</label><textarea id="db-sql-input" class="mono" placeholder="' + esc(t('dbs.sqlPlaceholder')) + '">' + esc(state.dbSql) + '</textarea></div>' +
           '<div class="field"><label>' + esc(t('dbs.paramsLabel')) + '</label><input type="text" id="db-params-input" class="mono" value="' + esc(state.dbParams) + '" placeholder="' + esc(t('dbs.paramsPlaceholder')) + '"></div>' +
@@ -2066,6 +2213,8 @@
         state.dbTab = btn.getAttribute('data-db-tab');
         if (state.dbTab === 'schema' && dbMeta) {
           try { await loadDbSchema(); } catch (e) { toast(e.message, 'error'); }
+        } else if (state.dbTab === 'fts') {
+          try { await ensureSearchBundle(); } catch (e) { toast(e.message, 'error'); }
         }
         renderDbs(false);
       });
@@ -2100,6 +2249,22 @@
     }
     if ($('db-query-btn')) $('db-query-btn').addEventListener('click', function () { runDbQuery(dbMeta.id); });
     if ($('db-exec-btn')) $('db-exec-btn').addEventListener('click', function () { runDbExecute(dbMeta.id); });
+    if ($('db-delete-btn') && dbMeta) {
+      $('db-delete-btn').addEventListener('click', function () {
+        var delId = dbMeta.id;
+        var delName = dbMeta.name;
+        confirmAction(t('dbs.deleteConfirm', { name: delName }), async function () {
+          try {
+            await api('/_api/v1/dbs/' + enc(delId), { method: 'DELETE' });
+            state.selectedDbId = '';
+            state.dbResult = null;
+            state.dbSchema = '';
+            toast(t('dbs.deleted'), 'success');
+            renderDbs(true);
+          } catch (e) { toast(e.message, 'error'); }
+        });
+      });
+    }
     if ($('db-fts-panel')) {
       $('db-fts-panel').addEventListener('fp-open-sql', function (ev) {
         if (ev.detail && ev.detail.sql) {
@@ -2195,12 +2360,64 @@
 
   // --- 7b. Full-Text Search (Native Web Component + Mock Data) ---
 
-  function renderSearch() {
+  async function renderSearch(fetchData) {
     var root = $('view-root');
+    root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
+    try {
+      await ensureSearchBundle();
+      if (fetchData && !state.projects.length) {
+        try {
+          state.projects = (await api('/_api/v1/projects')) || [];
+        } catch (_) {}
+      }
+    } catch (e) {
+      root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+      return;
+    }
     root.innerHTML = '';
     var wb = document.createElement('fp-search-workbench');
+    wb.projects = state.projects;
+    wb.scope = getScope();
     wb.canWrite = !isReadonly();
     root.appendChild(wb);
+  }
+
+  async function renderOps(fetchData) {
+    var root = $('view-root');
+    root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
+    try {
+      await ensureOpsComponent();
+      if (fetchData && !state.projects.length) {
+        try {
+          state.projects = (await api('/_api/v1/projects')) || [];
+        } catch (_) {}
+      }
+    } catch (e) {
+      root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+      return;
+    }
+    root.innerHTML = '';
+    var ops = document.createElement('fp-ops-center');
+    ops.token = state.token || readStoredToken();
+    ops.scope = getScope();
+    ops.projects = state.projects;
+    root.appendChild(ops);
+  }
+
+  async function renderUpdates() {
+    var root = $('view-root');
+    root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
+    try {
+      await ensureUpdateComponent();
+    } catch (e) {
+      root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+      return;
+    }
+    root.innerHTML = '';
+    var upd = document.createElement('fp-system-updates');
+    upd.token = state.token || readStoredToken();
+    upd.scope = getScope();
+    root.appendChild(upd);
   }
 
   // --- 8. Tokens (Admin Only) ---
@@ -2434,7 +2651,10 @@
       } catch (_) {}
     }
     if (fetchData && state.logsTab === 'history') {
+      await ensureSearchBundle();
       await queryHistoryLogs();
+    } else if (state.logsTab === 'history') {
+      await ensureSearchBundle();
     }
 
     var tabsHtml =
@@ -2534,6 +2754,7 @@
     if ($('log-fts-panel')) {
       var panel = $('log-fts-panel');
       panel.projects = state.projects;
+      panel.scope = getScope();
       panel.liveEntries = state.historyLogs;
       panel.addEventListener('fp-log-query', async function (ev) {
         var d = ev.detail || {};
@@ -2602,8 +2823,24 @@
       }
     });
 
+    document.querySelectorAll('a[data-nav]').forEach(function (link) {
+      link.addEventListener('click', function (ev) {
+        var href = link.getAttribute('href');
+        if (href && href.indexOf('#/') === 0) {
+          ev.preventDefault();
+          navigate(href);
+        }
+      });
+    });
+
     window.addEventListener('hashchange', function () {
-      if (!state.status) return;
+      if (!state.status) {
+        var tok = state.token || readStoredToken();
+        if (tok) {
+          connectWithToken(tok, true);
+        }
+        return;
+      }
       parseHash();
       closeDrawer();
       renderCurrentRoute(true);
@@ -2618,16 +2855,13 @@
 
     $('login-form').addEventListener('submit', function (ev) {
       ev.preventDefault();
-      connectWithToken($('token-input').value);
+      connectWithToken($('token-input').value, false);
     });
 
-    var savedToken = '';
-    try {
-      savedToken = localStorage.getItem(TOKEN_STORAGE) || '';
-    } catch (_) {}
+    var savedToken = readStoredToken();
     if (savedToken) {
       $('token-input').value = savedToken;
-      connectWithToken(savedToken);
+      connectWithToken(savedToken, true);
     }
   }
 

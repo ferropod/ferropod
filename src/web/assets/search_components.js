@@ -407,8 +407,11 @@ class FpSearchWorkbench extends HTMLElement {
     super();
     this.attachShadow({ mode: 'open' });
     this.shadowRoot.adoptedStyleSheets = [sharedSheet];
+    this._projects = [];
+    this._scope = 'admin';
     this._state = {
       selectedIndexId: '',
+      projectFilter: '',
       tab: 'playground', // playground | docs | schema
       query: '',
       fuzzy: true,
@@ -418,7 +421,7 @@ class FpSearchWorkbench extends HTMLElement {
   }
 
   connectedCallback() {
-    const indexes = getMock().listIndexes();
+    const indexes = getMock().listIndexes(this._scope);
     if (!this._state.selectedIndexId && indexes.length) {
       this._state.selectedIndexId = indexes[0].id;
     }
@@ -433,20 +436,72 @@ class FpSearchWorkbench extends HTMLElement {
     return this._canWrite !== false;
   }
 
+  set projects(list) {
+    this._projects = Array.isArray(list) ? list : [];
+    if (this.isConnected) this.render();
+  }
+
+  set scope(val) {
+    this._scope = String(val || 'admin');
+    if (this.isConnected) this.render();
+  }
+
+  _scopeProjectId() {
+    return this._scope.startsWith('project:') ? this._scope.slice('project:'.length) : '';
+  }
+
+  _projectName(pid) {
+    if (!pid) return '';
+    const found = this._projects.find((p) => p.id === pid);
+    return found ? found.name : pid;
+  }
+
+  _canWriteIndex(idx) {
+    if (!this.canWrite || this._scope === 'readonly') return false;
+    if (this._scope === 'admin') return true;
+    const spid = this._scopeProjectId();
+    return Boolean(spid && idx && idx.project_id === spid);
+  }
+
   render() {
     const { t, formatTime, formatBytes } = getI18n();
     const mock = getMock();
-    const indexes = mock.listIndexes();
+    const scopePid = this._scopeProjectId();
+    const allVisible = mock.listIndexes(this._scope);
+    const indexes = !scopePid && this._state.projectFilter
+      ? allVisible.filter((i) =>
+          this._state.projectFilter === '__global__'
+            ? !i.project_id
+            : i.project_id === this._state.projectFilter
+        )
+      : allVisible;
+
     if (!indexes.some((i) => i.id === this._state.selectedIndexId)) {
       this._state.selectedIndexId = indexes.length ? indexes[0].id : '';
       this._state.facets = {};
     }
     const activeIdx = indexes.find((i) => i.id === this._state.selectedIndexId) || null;
+    const canWriteActive = this._canWriteIndex(activeIdx);
+
+    const projectFilterHtml = !scopePid && this._projects.length ? `
+      <div style="padding:8px 10px;border-bottom:1px solid var(--border);">
+        <select id="project-filter-select" class="text-xs">
+          <option value="">${esc(t('common.all'))} (${esc(t('common.project'))})</option>
+          <option value="__global__" ${this._state.projectFilter === '__global__' ? 'selected' : ''}>${esc(t('common.allProjects'))}</option>
+          ${this._projects.map((p) =>
+            `<option value="${esc(p.id)}" ${this._state.projectFilter === p.id ? 'selected' : ''}>${esc(p.name)}</option>`
+          ).join('')}
+        </select>
+      </div>
+    ` : '';
 
     const indexMenuHtml = indexes.length
       ? indexes.map((idx) => `
           <button type="button" class="list-menu-item ${idx.id === this._state.selectedIndexId ? 'active' : ''}" data-select-index="${esc(idx.id)}">
-            <span class="truncate mono">${esc(idx.name)}</span>
+            <span class="stack" style="min-width:0;gap:2px;">
+              <span class="truncate mono">${esc(idx.name)}</span>
+              ${idx.project_id ? `<span class="text-xs muted truncate">${esc(this._projectName(idx.project_id))}</span>` : ''}
+            </span>
             <span class="row gap-xs" style="flex-shrink:0;">
               <span class="badge badge-neutral">${esc(idx.tokenizer)}</span>
               <span class="badge badge-accent">${idx.doc_count}</span>
@@ -508,7 +563,7 @@ class FpSearchWorkbench extends HTMLElement {
                       </div>
                       <div class="row gap-xs">
                         <span class="badge badge-accent mono">${esc(t('search.score'))} ${score.toFixed(2)}</span>
-                        ${this.canWrite ? `<button type="button" class="btn btn-ghost btn-sm" data-del-doc="${esc(doc.id)}">${esc(t('common.delete'))}</button>` : ''}
+                        ${canWriteActive ? `<button type="button" class="btn btn-ghost btn-sm" data-del-doc="${esc(doc.id)}">${esc(t('common.delete'))}</button>` : ''}
                       </div>
                     </div>
                     <div class="result-title">${titleHtml}</div>
@@ -547,7 +602,7 @@ class FpSearchWorkbench extends HTMLElement {
               ${facetsHtml}
               <div class="row-between text-xs muted">
                 <span>${esc(t('search.hitsSummary', { total: res.total, ms: res.took_ms, tokenizer: res.tokenizer }))}</span>
-                <span class="mono">/data/search/${esc(activeIdx.id)}/</span>
+                <span class="mono">/data/search/${esc(activeIdx.project_id || '_global')}/${esc(activeIdx.id)}/</span>
               </div>
               ${hitsHtml}
             </div>
@@ -560,8 +615,8 @@ class FpSearchWorkbench extends HTMLElement {
             <div class="panel-header">
               <h3 class="panel-title mono">${esc(activeIdx.name)}</h3>
               <div class="row gap-xs">
-                ${this.canWrite ? `<button type="button" class="btn btn-sm" id="commit-btn">${esc(t('search.commitOptimize'))}</button>` : ''}
-                ${this.canWrite ? `<button type="button" class="btn btn-primary btn-sm" id="upsert-doc-btn">${esc(t('search.upsertDoc'))}</button>` : ''}
+                ${canWriteActive ? `<button type="button" class="btn btn-sm" id="commit-btn">${esc(t('search.commitOptimize'))}</button>` : ''}
+                ${canWriteActive ? `<button type="button" class="btn btn-primary btn-sm" id="upsert-doc-btn">${esc(t('search.upsertDoc'))}</button>` : ''}
               </div>
             </div>
             ${docs.length ? `
@@ -573,7 +628,7 @@ class FpSearchWorkbench extends HTMLElement {
                       <th>Title</th>
                       <th>Facet / Tags</th>
                       <th>${esc(t('common.updatedAt'))}</th>
-                      ${this.canWrite ? `<th>${esc(t('common.actions'))}</th>` : ''}
+                      ${canWriteActive ? `<th>${esc(t('common.actions'))}</th>` : ''}
                     </tr>
                   </thead>
                   <tbody>
@@ -589,7 +644,7 @@ class FpSearchWorkbench extends HTMLElement {
                           ${d.lang ? `<span class="badge badge-neutral">${esc(d.lang)}</span>` : ''}
                         </td>
                         <td class="muted text-xs">${esc(formatTime(d.updated_at))}</td>
-                        ${this.canWrite ? `<td><button type="button" class="btn btn-danger btn-sm" data-del-doc="${esc(d.id)}">${esc(t('common.delete'))}</button></td>` : ''}
+                        ${canWriteActive ? `<td><button type="button" class="btn btn-danger btn-sm" data-del-doc="${esc(d.id)}">${esc(t('common.delete'))}</button></td>` : ''}
                       </tr>
                     `).join('')}
                   </tbody>
@@ -609,8 +664,8 @@ class FpSearchWorkbench extends HTMLElement {
             </div>
             <div class="panel">
               <div class="panel-header">
-                <h3 class="panel-title">Schema (${esc(activeIdx.tokenizer)})</h3>
-                ${this.canWrite ? `<button type="button" class="btn btn-danger btn-sm" id="delete-index-btn">${esc(t('search.deleteIndex'))}</button>` : ''}
+                <h3 class="panel-title">Schema (${esc(activeIdx.tokenizer)}) ${activeIdx.project_id ? `<span class="badge badge-accent">${esc(this._projectName(activeIdx.project_id))}</span>` : `<span class="badge badge-neutral">${esc(t('common.allProjects'))}</span>`}</h3>
+                ${canWriteActive ? `<button type="button" class="btn btn-danger btn-sm" id="delete-index-btn">${esc(t('search.deleteIndex'))}</button>` : ''}
               </div>
               <div class="table-wrap">
                 <table class="data-table">
@@ -661,6 +716,7 @@ class FpSearchWorkbench extends HTMLElement {
       <div class="split-layout">
         <div class="panel">
           <div class="panel-header"><h3 class="panel-title">${esc(t('search.indexes'))}</h3></div>
+          ${projectFilterHtml}
           <div class="list-menu">${indexMenuHtml}</div>
         </div>
         ${rightHtml}
@@ -676,6 +732,16 @@ class FpSearchWorkbench extends HTMLElement {
             <div class="field">
               <label for="ci-name">${esc(t('search.indexName'))}</label>
               <input type="text" id="ci-name" required placeholder="${esc(t('search.indexNamePlaceholder'))}">
+            </div>
+            <div class="field">
+              <label for="ci-project">${esc(t('common.project'))}</label>
+              <select id="ci-project" ${scopePid ? 'disabled' : ''}>
+                ${scopePid
+                  ? `<option value="${esc(scopePid)}" selected>${esc(this._projectName(scopePid))}</option>`
+                  : `<option value="">${esc(t('common.allProjects'))}</option>` +
+                    this._projects.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('')
+                }
+              </select>
             </div>
             <div class="field">
               <label for="ci-tokenizer">${esc(t('search.tokenizer'))}</label>
@@ -758,15 +824,25 @@ class FpSearchWorkbench extends HTMLElement {
       });
     }
 
+    const projFilter = root.getElementById('project-filter-select');
+    if (projFilter) {
+      projFilter.addEventListener('change', (ev) => {
+        this._state.projectFilter = ev.target.value;
+        this.render();
+      });
+    }
+
     const createForm = root.getElementById('create-index-form');
     if (createForm) {
       createForm.addEventListener('submit', (ev) => {
         ev.preventDefault();
         try {
+          const projEl = root.getElementById('ci-project');
           const created = mock.createIndex({
             name: root.getElementById('ci-name').value.trim(),
+            project_id: projEl ? (projEl.value || null) : null,
             tokenizer: root.getElementById('ci-tokenizer').value
-          });
+          }, this._scope);
           root.getElementById('create-index-dialog').close();
           this._state.selectedIndexId = created.id;
           this._state.tab = 'playground';
@@ -1124,6 +1200,7 @@ class FpLogSearchPanel extends HTMLElement {
     this.shadowRoot.adoptedStyleSheets = [sharedSheet];
     this._projects = [];
     this._liveEntries = [];
+    this._scope = 'admin';
     this._filters = {
       q: '',
       source: '',
@@ -1144,6 +1221,14 @@ class FpLogSearchPanel extends HTMLElement {
   set liveEntries(list) {
     this._liveEntries = Array.isArray(list) ? list : [];
     if (this.isConnected && !this._filters.mockFts) this.render();
+  }
+
+  set scope(val) {
+    this._scope = String(val || 'admin');
+    if (this._scope.startsWith('project:')) {
+      this._filters.project_id = this._scope.slice('project:'.length);
+    }
+    if (this.isConnected) this.render();
   }
 
   connectedCallback() {
@@ -1167,10 +1252,11 @@ class FpLogSearchPanel extends HTMLElement {
     const mock = getMock();
     const f = this._filters;
 
+    const scopePid = this._scope.startsWith('project:') ? this._scope.slice('project:'.length) : '';
     let entries = [];
     let summaryText = '';
     if (f.mockFts) {
-      const res = mock.queryMockLogs(f);
+      const res = mock.queryMockLogs(f, this._scope);
       entries = res.entries;
       summaryText = t('logs.ftsHitsSummary', { total: res.total, ms: res.took_ms, index: res.index_name });
     } else {
@@ -1230,11 +1316,14 @@ class FpLogSearchPanel extends HTMLElement {
                     `<option value="${l}" ${f.level === l ? 'selected' : ''}>${l}</option>`
                   ).join('')}
                 </select>
-                <select id="lf-project" style="width:auto;max-width:190px;">
-                  <option value="">${esc(t('common.all'))} (${esc(t('common.project'))})</option>
-                  ${this._projects.map((p) =>
-                    `<option value="${esc(p.id)}" ${f.project_id === p.id ? 'selected' : ''}>${esc(p.name)}</option>`
-                  ).join('')}
+                <select id="lf-project" style="width:auto;max-width:190px;" ${scopePid ? 'disabled' : ''}>
+                  ${scopePid
+                    ? `<option value="${esc(scopePid)}" selected>${esc(this._projectName(scopePid))}</option>`
+                    : `<option value="">${esc(t('common.all'))} (${esc(t('common.project'))})</option>` +
+                      this._projects.map((p) =>
+                        `<option value="${esc(p.id)}" ${f.project_id === p.id ? 'selected' : ''}>${esc(p.name)}</option>`
+                      ).join('')
+                  }
                 </select>
                 <input type="text" id="lf-reqid" style="max-width:170px;" value="${esc(f.request_id)}" placeholder="${esc(t('logs.requestIdPlaceholder'))}">
                 <select id="lf-window" style="width:auto;">

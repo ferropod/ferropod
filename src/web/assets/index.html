@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>ferropod Admin</title>
-  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23ea580c'/%3E%3Cpath d='M10 9h12v4h-8v3h6v4h-6v5h-4V9z' fill='%23ffffff'/%3E%3C/svg%3E">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512' fill='none'%3E%3Crect width='512' height='512' rx='96' fill='%230F172A'/%3E%3Cpath d='M233.5 101 Q256 88 278.5 101 L379 159 Q401.5 172 401.5 198 L401.5 314 Q401.5 340 379 353 L278.5 411 Q256 424 233.5 411 L133 353 Q110.5 340 110.5 314 L110.5 198 Q110.5 172 133 159 Z' stroke='%23F8FAFC' stroke-width='32' stroke-linejoin='round'/%3E%3Cpath d='M256 192 L274 238 L320 256 L274 274 L256 320 L238 274 L192 256 L238 238 Z' fill='%23EA580C'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/_admin/assets/styles.css">
 </head>
 <body>
@@ -12,7 +12,13 @@
     <div class="login-card">
       <div class="login-top">
         <div class="brand">
-          <span class="brand-mark" aria-hidden="true">F</span>
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 512 512" width="34" height="34" fill="none">
+              <rect width="512" height="512" rx="112" fill="#0F172A"/>
+              <path d="M233.5 101 Q256 88 278.5 101 L379 159 Q401.5 172 401.5 198 L401.5 314 Q401.5 340 379 353 L278.5 411 Q256 424 233.5 411 L133 353 Q110.5 340 110.5 314 L110.5 198 Q110.5 172 133 159 Z" stroke="#F8FAFC" stroke-width="34" stroke-linejoin="round"/>
+              <path d="M256 192 L274 238 L320 256 L274 274 L256 320 L238 274 L192 256 L238 238 Z" fill="#EA580C"/>
+            </svg>
+          </span>
           <div>
             <div class="brand-name"><span>ferro</span>pod</div>
             <div class="muted text-xs" data-i18n="app.subtitle">Lightweight Self-Hosted PaaS</div>
@@ -53,7 +59,13 @@
     <aside id="sidebar" class="sidebar" aria-label="Sidebar Navigation">
       <div class="sidebar-header">
         <a href="#/overview" class="brand" data-nav="overview">
-          <span class="brand-mark" aria-hidden="true">F</span>
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 512 512" width="34" height="34" fill="none">
+              <rect width="512" height="512" rx="112" fill="#0F172A"/>
+              <path d="M233.5 101 Q256 88 278.5 101 L379 159 Q401.5 172 401.5 198 L401.5 314 Q401.5 340 379 353 L278.5 411 Q256 424 233.5 411 L133 353 Q110.5 340 110.5 314 L110.5 198 Q110.5 172 133 159 Z" stroke="#F8FAFC" stroke-width="34" stroke-linejoin="round"/>
+              <path d="M256 192 L274 238 L320 256 L274 274 L256 320 L238 274 L192 256 L238 238 Z" fill="#EA580C"/>
+            </svg>
+          </span>
           <span class="brand-name"><span>ferro</span>pod</span>
         </a>
         <button type="button" class="btn btn-ghost btn-icon mobile-only" id="close-drawer-btn" aria-label="Close">
@@ -107,12 +119,23 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 10h12M4 14h16M4 18h9"/></svg>
           <span data-i18n="nav.logs">Logs</span>
         </a>
+        <a href="#/ops" class="nav-item" data-nav="ops">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+          <span data-i18n="nav.ops">Backups &amp; Cron</span>
+        </a>
+        <a href="#/updates" class="nav-item" data-nav="updates">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          <span data-i18n="nav.updates">Updates</span>
+        </a>
       </nav>
 
       <div class="sidebar-footer">
         <div class="session-box">
           <div class="session-actor" id="session-actor">-</div>
-          <span class="badge badge-neutral" id="session-scope">-</span>
+          <div class="row gap-xs">
+            <span class="badge badge-neutral" id="session-scope">-</span>
+            <a href="#/updates" class="badge badge-neutral mono" id="session-version" title="System Updates">v-</a>
+          </div>
         </div>
         <button type="button" class="btn btn-ghost btn-sm btn-block" id="disconnect-btn" data-i18n="auth.disconnect">Disconnect</button>
       </div>
@@ -167,8 +190,6 @@
   <div id="toast-root" class="toast-root" aria-live="polite"></div>
 
   <script src="/_admin/assets/i18n.js"></script>
-  <script src="/_admin/assets/search_mock.js"></script>
-  <script type="module" src="/_admin/assets/search_components.js"></script>
   <script src="/_admin/assets/app.js"></script>
 </body>
 </html>

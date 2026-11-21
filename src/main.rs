@@ -17,6 +17,7 @@ use ferropod::storage::{
     blob_fs::FsBlobStore, core_store::TursoCoreStore, log_store::DailyLogStore,
     queue_store::TursoQueueStore, user_db::TursoUserDbManager,
 };
+use ferropod::update;
 
 #[derive(Debug, Parser)]
 #[command(name = "ferropod", version, about = "AI-Native lightweight self-hosted PaaS")]
@@ -99,6 +100,22 @@ enum Commands {
         profile: Profile,
         #[arg(long, default_value = "/usr/local/bin/ferropod")]
         bin_path: PathBuf,
+    },
+    /// Check for updates or self-update ferropod from GitHub Releases.
+    #[command(visible_alias = "self-update")]
+    Update {
+        /// Only check if a newer release is available without installing.
+        #[arg(long, default_value_t = false)]
+        check: bool,
+        /// Install a specific release tag (e.g. v0.2.0) instead of latest.
+        #[arg(long)]
+        version: Option<String>,
+        /// Reinstall even if already running the target version.
+        #[arg(long, default_value_t = false)]
+        force: bool,
+        /// Do not automatically restart the systemd ferropod service after updating.
+        #[arg(long, default_value_t = false)]
+        no_restart: bool,
     },
 }
 
@@ -326,6 +343,72 @@ LimitNOFILE=65535{cap_line}
 WantedBy=multi-user.target"
             );
         }
+        Commands::Update {
+            check,
+            version,
+            force,
+            no_restart,
+        } => {
+            if check {
+                let res = update::check_for_update().await?;
+                println!("Current version : v{}", res.current_version);
+                println!("Target platform : {}", res.target);
+                println!("Install mode    : {}", res.install_mode);
+                match res.latest {
+                    Some(rel) => {
+                        println!("Latest release  : {} ({})", rel.tag, rel.html_url);
+                        if res.update_available {
+                            println!("Status          : Update available! Run `ferropod update` to upgrade.");
+                        } else {
+                            println!("Status          : Up to date.");
+                        }
+                    }
+                    None => {
+                        println!("Latest release  : none published yet in {}", res.repo);
+                    }
+                }
+            } else {
+                let _lock = update::UpdateLock::try_acquire()
+                    .ok_or_else(|| anyhow::anyhow!("another update is already in progress"))?;
+                println!(
+                    "Checking GitHub Releases ({}) for {}...",
+                    update::update_repo(),
+                    version.as_deref().unwrap_or("latest")
+                );
+                let res = update::apply_update(version.as_deref(), force, false).await?;
+                println!("{}", res.message);
+                println!("Binary path     : {}", res.binary_path);
+                if let Some(bak) = &res.backup_path {
+                    println!("Backup saved to : {bak}");
+                }
+                if res.checksum_verified {
+                    println!("SHA-256         : verified");
+                }
+                if !no_restart && res.new_version != res.previous_version {
+                    #[cfg(target_os = "linux")]
+                    {
+                        let active = tokio::process::Command::new("systemctl")
+                            .args(["is-active", "--quiet", "ferropod"])
+                            .status()
+                            .await
+                            .map(|s| s.success())
+                            .unwrap_or(false);
+                        if active {
+                            println!("Restarting systemd service `ferropod`...");
+                            let st = tokio::process::Command::new("systemctl")
+                                .args(["restart", "ferropod"])
+                                .status()
+                                .await;
+                            match st {
+                                Ok(s) if s.success() => println!("Service `ferropod` restarted."),
+                                Ok(s) => eprintln!("Warning: `systemctl restart ferropod` exited with {s}"),
+                                Err(e) => eprintln!("Warning: failed to restart systemd service: {e}"),
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -344,13 +427,34 @@ async fn run_server(cfg: Config, dev_mode: bool) -> Result<()> {
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let maint_handle = tokio::spawn(run_maintenance_loop(svc.clone(), shutdown_rx));
+    let mut restart_rx = update::init_restart_channel();
 
     let app = build_router(svc.clone());
-    serve_http_and_https(&cfg, &svc, app, shutdown_signal()).await?;
+    let stop_fut = async move {
+        tokio::select! {
+            _ = shutdown_signal() => {}
+            _ = async {
+                while !*restart_rx.borrow() {
+                    if restart_rx.changed().await.is_err() {
+                        std::future::pending::<()>().await;
+                    }
+                }
+            } => {
+                info!("received self-update restart signal, initiating graceful shutdown");
+            }
+        }
+    };
+    serve_http_and_https(&cfg, &svc, app, stop_fut).await?;
 
     let _ = shutdown_tx.send(true);
     let _ = maint_handle.await;
     let _ = svc.flush_and_checkpoint().await;
     info!("ferropod shutdown complete");
+
+    if update::is_restart_requested() {
+        info!("re-executing updated ferropod binary");
+        update::exec_self_restart()?;
+    }
+
     Ok(())
 }

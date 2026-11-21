@@ -318,28 +318,50 @@
     return searchIndexes.find(function (idx) { return idx.id === id; }) || null;
   }
 
-  function listIndexes() {
-    return searchIndexes.map(function (idx) {
-      return {
-        id: idx.id,
-        name: idx.name,
-        project_id: idx.project_id,
-        tokenizer: idx.tokenizer,
-        doc_count: idx.docs.length,
-        segments: idx.segments,
-        disk_bytes: idx.disk_bytes,
-        writer_budget_mb: idx.writer_budget_mb,
-        created_at: idx.created_at,
-        updated_at: idx.updated_at,
-        schema: idx.schema
-      };
-    });
+  function parseScopeProject(scope) {
+    if (typeof scope === 'string' && scope.indexOf('project:') === 0) {
+      return scope.slice('project:'.length) || null;
+    }
+    return null;
   }
 
-  function createIndex(opts) {
+  function listIndexes(scope) {
+    var scopePid = parseScopeProject(scope);
+    return searchIndexes
+      .filter(function (idx) {
+        return !scopePid || idx.project_id === scopePid;
+      })
+      .map(function (idx) {
+        return {
+          id: idx.id,
+          name: idx.name,
+          project_id: idx.project_id,
+          tokenizer: idx.tokenizer,
+          doc_count: idx.docs.length,
+          segments: idx.segments,
+          disk_bytes: idx.disk_bytes,
+          writer_budget_mb: idx.writer_budget_mb,
+          created_at: idx.created_at,
+          updated_at: idx.updated_at,
+          schema: idx.schema
+        };
+      });
+  }
+
+  function createIndex(opts, scope) {
+    if (scope === 'readonly') {
+      throw new Error('Readonly token cannot create search indexes');
+    }
+    var scopePid = parseScopeProject(scope);
+    var requestedPid = (opts && opts.project_id) ? String(opts.project_id) : null;
+    if (scopePid && requestedPid && requestedPid !== scopePid) {
+      throw new Error('Token scope cannot create index for another project');
+    }
+    var resolvedPid = scopePid || requestedPid || null;
+
     var name = String(opts.name || '').trim();
     if (!name) throw new Error('Index name is required');
-    if (searchIndexes.some(function (i) { return i.name === name; })) {
+    if (searchIndexes.some(function (i) { return i.name === name && i.project_id === resolvedPid; })) {
       throw new Error('Index "' + name + '" already exists');
     }
     var tok = opts.tokenizer || 'jieba';
@@ -353,7 +375,7 @@
     var created = {
       id: 'idx_' + name.replace(/[^a-zA-Z0-9_-]/g, '_') + '_' + String(ts).slice(-4),
       name: name,
-      project_id: opts.project_id || null,
+      project_id: resolvedPid,
       tokenizer: tok,
       segments: 1,
       disk_bytes: 16384,
@@ -694,8 +716,10 @@
     }
   ];
 
-  function queryMockLogs(filters) {
+  function queryMockLogs(filters, scope) {
     var f = filters || {};
+    var scopePid = parseScopeProject(scope);
+    var effectivePid = scopePid || f.project_id || '';
     var q = String(f.q || '').trim();
     var since = f.windowSecs ? (Date.now() - Number(f.windowSecs) * 1000) : 0;
     var limit = Number(f.limit || 100);
@@ -703,7 +727,7 @@
     var matched = mockLogEntries.filter(function (e) {
       if (f.source && e.source !== f.source) return false;
       if (f.level && e.level !== f.level) return false;
-      if (f.project_id && e.project_id !== f.project_id) return false;
+      if (effectivePid && e.project_id !== effectivePid) return false;
       if (f.request_id && (!e.request_id || e.request_id.toLowerCase().indexOf(f.request_id.toLowerCase()) === -1)) return false;
       if (since && e.ts < since) return false;
       if (q) {
