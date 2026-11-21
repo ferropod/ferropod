@@ -18,6 +18,8 @@ opsSheet.replaceSync(`
   .muted { color: var(--muted); }
   .text-xs { font-size: 12px; }
   .text-strong { font-weight: 600; color: var(--text); }
+  .break-all { word-break: break-all; overflow-wrap: anywhere; }
+  .cell-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
   .row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
   .row-between { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
   .stack { display: flex; flex-direction: column; }
@@ -202,12 +204,71 @@ opsSheet.replaceSync(`
     gap: 8px;
     background: var(--surface-subtle);
   }
-  @media (max-width: 639px) {
+  @media (max-width: 767px) {
     .panel-header, .panel-body { padding: 12px 14px; }
     input[type="text"], select { font-size: 16px; min-height: 42px; }
     .btn { min-height: 38px; }
-    .btn-sm { min-height: 34px; }
+    .btn-sm { min-height: 36px; }
     dialog.fp-dialog { width: calc(100vw - 16px); max-height: 90dvh; }
+
+    .data-table.stack-mobile thead { display: none; }
+    .data-table.stack-mobile,
+    .data-table.stack-mobile tbody,
+    .data-table.stack-mobile tr,
+    .data-table.stack-mobile td {
+      display: block;
+      width: 100%;
+    }
+    .data-table.stack-mobile tr {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--border);
+    }
+    .data-table.stack-mobile tr:last-child { border-bottom: none; }
+    .data-table.stack-mobile td {
+      border: none;
+      padding: 5px 0;
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 10px;
+      text-align: right;
+      min-width: 0;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+    .data-table.stack-mobile td > * {
+      min-width: 0;
+      max-width: 100%;
+    }
+    .data-table.stack-mobile td::before {
+      content: attr(data-label);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 500;
+      text-align: left;
+      flex-shrink: 0;
+    }
+    .data-table.stack-mobile td.cell-primary {
+      display: block;
+      padding: 0 0 8px;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 6px;
+    }
+    .data-table.stack-mobile td.cell-primary::before { display: none; }
+    .data-table.stack-mobile td.cell-actions-td {
+      display: block;
+      padding: 10px 0 0;
+      margin-top: 6px;
+      border-top: 1px dashed var(--border);
+    }
+    .data-table.stack-mobile td.cell-actions-td::before { display: none; }
+    .data-table.stack-mobile td.cell-actions-td .cell-actions {
+      width: 100%;
+      justify-content: flex-end;
+    }
+    .data-table.stack-mobile td.cell-actions-td .btn { flex: 1 1 auto; }
   }
 `);
 
@@ -469,17 +530,19 @@ class FpOpsCenter extends HTMLElement {
     if (this._tab === 'backups' && isAdmin) {
       const rows = this._backups.map((b) => `
         <tr>
-          <td>
-            <div class="mono text-strong">${esc(b.name)}</div>
+          <td class="cell-primary">
+            <div class="mono text-strong break-all">${esc(b.name)}</div>
             <details style="margin-top:4px;">
               <summary class="muted text-xs" style="cursor:pointer;">${esc(t('ops.filesCount', { count: b.file_count }))}</summary>
               <pre class="code-block" style="margin-top:6px;">${esc((b.files || []).join('\n'))}</pre>
             </details>
           </td>
-          <td class="mono text-xs">${esc(formatBytes(b.size_bytes))}</td>
-          <td class="muted text-xs">${esc(formatTime(b.created_at_ms))}</td>
-          <td>
-            <button type="button" class="btn btn-danger btn-sm" data-del-backup="${esc(b.name)}">${esc(t('common.delete'))}</button>
+          <td data-label="${esc(t('ops.size'))}" class="mono text-xs">${esc(formatBytes(b.size_bytes))}</td>
+          <td data-label="${esc(t('common.createdAt'))}" class="muted text-xs">${esc(formatTime(b.created_at_ms))}</td>
+          <td class="cell-actions-td">
+            <div class="cell-actions">
+              <button type="button" class="btn btn-danger btn-sm" data-del-backup="${esc(b.name)}">${esc(t('common.delete'))}</button>
+            </div>
           </td>
         </tr>
       `).join('');
@@ -501,7 +564,7 @@ class FpOpsCenter extends HTMLElement {
             ${this._loadingBackups
               ? `<div class="empty-state">${esc(t('common.loading'))}</div>`
               : (rows
-                ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>${esc(t('ops.snapshotName'))}</th><th>${esc(t('ops.size'))}</th><th>${esc(t('common.createdAt'))}</th><th>${esc(t('common.actions'))}</th></tr></thead><tbody>${rows}</tbody></table></div>`
+                ? `<div class="table-wrap"><table class="data-table stack-mobile"><thead><tr><th>${esc(t('ops.snapshotName'))}</th><th>${esc(t('ops.size'))}</th><th>${esc(t('common.createdAt'))}</th><th>${esc(t('common.actions'))}</th></tr></thead><tbody>${rows}</tbody></table></div>`
                 : `<div class="empty-state">${esc(t('ops.noBackups'))}</div>`)
             }
           </div>
@@ -529,7 +592,7 @@ rclone sync ./data/backups remote:ferropod-backups</pre>
                 </h3>
               </div>
               <div class="table-wrap">
-                <table class="data-table">
+                <table class="data-table stack-mobile">
                   <thead>
                     <tr>
                       <th>${esc(t('common.name'))}</th>
@@ -542,11 +605,11 @@ rclone sync ./data/backups remote:ferropod-backups</pre>
                   <tbody>
                     ${systemTasks.map((c) => `
                       <tr>
-                        <td class="text-strong">${esc(c.name)}</td>
-                        <td class="mono text-xs"><span class="badge badge-neutral">${esc(c.schedule)}</span></td>
-                        <td class="mono text-xs muted">${esc(c.target)}</td>
-                        <td class="text-xs"><span class="badge badge-success">${esc(c.last_status)}</span> <span class="muted">${esc(formatTime(c.last_run))}</span></td>
-                        <td><button type="button" class="btn btn-sm" data-run-sys="${esc(c.id)}">${esc(t('ops.runNow'))}</button></td>
+                        <td class="cell-primary text-strong">${esc(c.name)}</td>
+                        <td data-label="Cron" class="mono text-xs"><span class="badge badge-neutral">${esc(c.schedule)}</span></td>
+                        <td data-label="${esc(t('ops.target'))}" class="mono text-xs muted break-all">${esc(c.target)}</td>
+                        <td data-label="${esc(t('ops.lastRun'))}" class="text-xs"><span class="badge badge-success">${esc(c.last_status)}</span> <span class="muted">${esc(formatTime(c.last_run))}</span></td>
+                        <td class="cell-actions-td"><div class="cell-actions"><button type="button" class="btn btn-sm" data-run-sys="${esc(c.id)}">${esc(t('ops.runNow'))}</button></div></td>
                       </tr>
                     `).join('')}
                   </tbody>
@@ -569,7 +632,7 @@ rclone sync ./data/backups remote:ferropod-backups</pre>
             ${this._cronErr ? `<div class="panel-body"><div class="badge badge-warn">${esc(this._cronErr)}</div></div>` : ''}
             ${this._loadingCrons ? `<div class="empty-state">${esc(t('common.loading'))}</div>` : (visibleProjectTasks.length ? `
               <div class="table-wrap">
-                <table class="data-table">
+                <table class="data-table stack-mobile">
                   <thead>
                     <tr>
                       <th>${esc(t('common.name'))}</th>
@@ -583,22 +646,26 @@ rclone sync ./data/backups remote:ferropod-backups</pre>
                   <tbody>
                     ${visibleProjectTasks.map((c) => `
                       <tr>
-                        <td>
-                          <div class="text-strong">${esc(c.name)}</div>
-                          <span class="badge ${c.enabled ? 'badge-success' : 'badge-neutral'}">${esc(c.enabled ? t('ops.enabled') : t('ops.disabled'))}</span>
+                        <td class="cell-primary">
+                          <div class="row" style="justify-content:space-between;gap:8px;">
+                            <span class="text-strong">${esc(c.name)}</span>
+                            <span class="badge ${c.enabled ? 'badge-success' : 'badge-neutral'}">${esc(c.enabled ? t('ops.enabled') : t('ops.disabled'))}</span>
+                          </div>
                         </td>
-                        <td class="text-xs">${c.project_id ? `<span class="badge badge-accent">${esc(this._projectName(c.project_id))}</span>` : `<span class="muted">${esc(t('common.allProjects'))}</span>`}</td>
-                        <td class="mono text-xs"><span class="badge badge-neutral">${esc(c.schedule)}</span></td>
-                        <td class="mono text-xs muted">${esc(c.target)}</td>
-                        <td class="text-xs muted">
+                        <td data-label="${esc(t('common.project'))}" class="text-xs">${c.project_id ? `<span class="badge badge-accent">${esc(this._projectName(c.project_id))}</span>` : `<span class="muted">${esc(t('common.allProjects'))}</span>`}</td>
+                        <td data-label="Cron" class="mono text-xs"><span class="badge badge-neutral">${esc(c.schedule)}</span></td>
+                        <td data-label="${esc(t('ops.target'))}" class="mono text-xs muted break-all">${esc(c.target)}</td>
+                        <td data-label="${esc(t('ops.lastRun'))}" class="text-xs muted">
                           ${c.last_status ? `<span class="badge ${c.last_status === 'ok' ? 'badge-success' : 'badge-danger'}">${esc(c.last_status)}</span>` : ''}
                           ${c.last_run_at ? `<span>${esc(formatTime(c.last_run_at))}</span>` : (!c.last_status ? '-' : '')}
                         </td>
                         ${canWriteCron ? `
-                          <td class="row gap-xs">
-                            <button type="button" class="btn btn-sm" data-run-cron="${esc(c.id)}">${esc(t('ops.runNow'))}</button>
-                            <button type="button" class="btn btn-sm" data-toggle-cron="${esc(c.id)}">${esc(c.enabled ? t('perf.pause') : t('perf.resume'))}</button>
-                            <button type="button" class="btn btn-danger btn-sm" data-del-cron="${esc(c.id)}">${esc(t('common.delete'))}</button>
+                          <td class="cell-actions-td">
+                            <div class="cell-actions">
+                              <button type="button" class="btn btn-sm" data-run-cron="${esc(c.id)}">${esc(t('ops.runNow'))}</button>
+                              <button type="button" class="btn btn-sm" data-toggle-cron="${esc(c.id)}">${esc(c.enabled ? t('perf.pause') : t('perf.resume'))}</button>
+                              <button type="button" class="btn btn-danger btn-sm" data-del-cron="${esc(c.id)}">${esc(t('common.delete'))}</button>
+                            </div>
                           </td>
                         ` : ''}
                       </tr>

@@ -1544,6 +1544,11 @@ async fn admin_ui_assets_and_enriched_status() {
         ("/_panel/assets/styles.css", "text/css"),
         ("/_panel/assets/i18n.js", "application/javascript"),
         ("/_panel/assets/app.js", "application/javascript"),
+        (
+            "/_panel/assets/runtime_component.js",
+            "application/javascript",
+        ),
+        ("/_panel/assets/ops_component.js", "application/javascript"),
     ] {
         let resp = app
             .clone()
@@ -1578,6 +1583,22 @@ async fn admin_ui_assets_and_enriched_status() {
             .unwrap();
             assert!(css.contains("repeat(4, minmax(0, 1fr))"));
             assert!(css.contains("touch-action: manipulation"));
+            assert!(css.contains("overflow-wrap: anywhere"));
+        } else if matches!(
+            asset,
+            "/_panel/assets/runtime_component.js" | "/_panel/assets/ops_component.js"
+        ) {
+            let js = String::from_utf8(
+                resp.into_body()
+                    .collect()
+                    .await
+                    .unwrap()
+                    .to_bytes()
+                    .to_vec(),
+            )
+            .unwrap();
+            assert!(js.contains("stack-mobile"));
+            assert!(js.contains("data-label"));
         }
     }
 
@@ -2894,4 +2915,267 @@ async fn cron_schedule_validation_rejects_invalid_expressions() {
         .await
         .unwrap();
     assert_eq!(updated.schedule, "@every 30s");
+}
+
+#[tokio::test]
+async fn security_hardening_regression_checks() {
+    let h = setup_harness().await;
+    let app = build_router(h.svc.clone());
+    let token = Some(h.admin_token.as_str());
+
+    // 1. User DB execute rejects ATTACH, DETACH, PRAGMA
+    let db_id = h
+        .svc
+        .create_user_db(&h.admin, "sec-db", None)
+        .await
+        .unwrap();
+    for dangerous in [
+        "ATTACH DATABASE '/tmp/pwn.db' AS pwn",
+        "DETACH DATABASE main",
+        "PRAGMA writable_schema = ON",
+        "CREATE TABLE ok (id INT); ATTACH '/tmp/pwn.db' AS pwn",
+    ] {
+        let (st, _) = json_req(
+            &app,
+            Method::POST,
+            &format!("/_api/v1/dbs/{db_id}/execute"),
+            token,
+            Some(serde_json::json!({ "statements": [{ "sql": dangerous }] })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "must reject SQL: {dangerous}");
+    }
+
+    // 2. Project-scoped token cannot attach another project's worker as queue consumer
+    let proj_a = h.svc.create_project(&h.admin, "sec-a", None).await.unwrap();
+    let proj_b = h.svc.create_project(&h.admin, "sec-b", None).await.unwrap();
+    let (_, tok_a) = h
+        .svc
+        .create_token(
+            &h.admin,
+            "tok-sec-a",
+            TokenScope::Project(proj_a.id.clone()),
+            None,
+        )
+        .await
+        .unwrap();
+    let (st, _) = json_req(
+        &app,
+        Method::POST,
+        "/_api/v1/queues",
+        Some(&tok_a),
+        Some(serde_json::json!({
+            "name": "hijack-q",
+            "project_id": proj_a.id,
+            "consumer_project_id": proj_b.id,
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+
+    // 3. Blob XSS sandbox headers, weak ETag 304, bad bucket/key, presigned URL with space
+    let (bad_bkt, _) = json_req(
+        &app,
+        Method::POST,
+        "/_api/v1/buckets",
+        token,
+        Some(serde_json::json!({ "name": ".." })),
+    )
+    .await;
+    assert_eq!(bad_bkt, StatusCode::BAD_REQUEST);
+
+    h.svc
+        .create_bucket(&h.admin, "sec-blobs", None, true)
+        .await
+        .unwrap();
+    let put_space = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/_blob/sec-blobs/docs/my%20file.html")
+                .header(header::AUTHORIZATION, format!("Bearer {}", h.admin_token))
+                .header(header::CONTENT_TYPE, "text/html")
+                .body(Body::from("<script>alert(1)</script>"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(put_space.status(), StatusCode::CREATED);
+
+    let (st_presign, presign_body) = json_req(
+        &app,
+        Method::POST,
+        "/_api/v1/buckets/sec-blobs/presign",
+        token,
+        Some(serde_json::json!({ "key": "docs/my file.html", "op": "get", "expires_secs": 60 })),
+    )
+    .await;
+    assert_eq!(st_presign, StatusCode::OK);
+    let presign_val: serde_json::Value = serde_json::from_slice(&presign_body).unwrap();
+    let presign_url = presign_val["url"].as_str().unwrap();
+    assert!(presign_url.contains("docs/my%20file.html?op=get"));
+
+    let blob_get = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(presign_url)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(blob_get.status(), StatusCode::OK);
+    assert_eq!(
+        blob_get
+            .headers()
+            .get(header::X_CONTENT_TYPE_OPTIONS)
+            .and_then(|v| v.to_str().ok()),
+        Some("nosniff")
+    );
+    let csp = blob_get
+        .headers()
+        .get(header::CONTENT_SECURITY_POLICY)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(csp.contains("sandbox"));
+    let etag = blob_get
+        .headers()
+        .get(header::ETAG)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    let weak_etag_req = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/_blob/sec-blobs/docs/my%20file.html")
+                .header(header::IF_NONE_MATCH, format!("\"other\", W/{etag}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(weak_etag_req.status(), StatusCode::NOT_MODIFIED);
+
+    let bad_key_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/_blob/sec-blobs/a/../b")
+                .header(header::AUTHORIZATION, format!("Bearer {}", h.admin_token))
+                .body(Body::from("x"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bad_key_resp.status(), StatusCode::BAD_REQUEST);
+
+    // 4. Overflow bounds: Queue u64::MAX delay, KV u64::MAX ttl, invalid token expiry days
+    h.svc
+        .queue_create(
+            &h.admin,
+            QueueConfig {
+                group: None,
+                name: "sec-q".into(),
+                project_id: None,
+                consumer_project_id: None,
+                max_concurrency: 1,
+                rate_limit_per_sec: None,
+                batch_size: 1,
+                lease_secs: 30,
+                max_attempts: 3,
+                created_at: Utc::now().timestamp(),
+            },
+        )
+        .await
+        .unwrap();
+    let job_id = h
+        .svc
+        .queue_enqueue(
+            &h.admin,
+            "sec-q",
+            Bytes::from_static(b"\"ok\""),
+            EnqueueOpts {
+                delay_secs: Some(u64::MAX),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(job_id > 0);
+
+    h.svc
+        .create_kv_namespace(&h.admin, "sec-kv", None)
+        .await
+        .unwrap();
+    h.svc
+        .kv_put(
+            &h.admin,
+            "sec-kv",
+            "kmax",
+            Bytes::from_static(b"v"),
+            None,
+            Some(u64::MAX),
+            false,
+        )
+        .await
+        .unwrap();
+    assert!(h
+        .svc
+        .kv_get(&h.admin, "sec-kv", "kmax")
+        .await
+        .unwrap()
+        .is_some());
+
+    for bad_days in [0i64, -5, 100_000] {
+        let (st_tok, _) = json_req(
+            &app,
+            Method::POST,
+            "/_api/v1/tokens",
+            token,
+            Some(serde_json::json!({
+                "name": "bad-exp",
+                "scope": "readonly",
+                "expires_in_days": bad_days,
+            })),
+        )
+        .await;
+        assert_eq!(st_tok, StatusCode::BAD_REQUEST);
+    }
+
+    // 5. HTTPS redirect rejects Host injection / userinfo while accepting valid hosts
+    let redir_app = ferropod::gateway::tls::build_https_redirect_router(8443);
+    let evil_redir = redir_app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/login")
+                .header(header::HOST, "trusted@evil.com:80")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(evil_redir.status(), StatusCode::BAD_REQUEST);
+
+    let ok_redir = redir_app
+        .oneshot(
+            Request::builder()
+                .uri("/login?a=1")
+                .header(header::HOST, "example.com:8080")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ok_redir.status(), StatusCode::PERMANENT_REDIRECT);
+    assert_eq!(
+        ok_redir.headers().get(header::LOCATION).unwrap(),
+        "https://example.com:8443/login?a=1"
+    );
 }

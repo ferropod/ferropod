@@ -1113,6 +1113,12 @@ textarea {
     flex-wrap: wrap;
     gap: 12px;
     text-align: right;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+  .data-table.stack-mobile td > * {
+    min-width: 0;
+    max-width: 100%;
   }
   .data-table.stack-mobile td .code-block {
     width: 100%;

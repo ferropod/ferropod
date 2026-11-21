@@ -877,9 +877,12 @@
       bodyHtml = '<fp-project-bindings id="pd-bindings-panel"></fp-project-bindings>';
     } else if (state.projectTab === 'deployments') {
       var depRows = deps.map(function (d) {
-        var src = d.assets_bucket
+        var bucketSrc = d.assets_bucket
           ? 'bucket://' + d.assets_bucket + (d.assets_prefix ? '/' + d.assets_prefix : '')
-          : (d.artifact_path || '-');
+          : '';
+        var src = bucketSrc && d.artifact_path
+          ? bucketSrc + ' + ' + d.artifact_path
+          : (bucketSrc || d.artifact_path || '-');
         var isCurrent = p.active_deployment_id === d.id;
         return '<tr>' +
           '<td data-label="' + esc(t('projectDetail.deployId')) + '" class="mono text-xs">' + esc(d.id) + '</td>' +
@@ -964,7 +967,8 @@
         api('/_api/v1/dbs').catch(function () { return []; }),
         api('/_api/v1/kv').catch(function () { return []; }),
         api('/_api/v1/queues').catch(function () { return []; }),
-        api('/_api/v1/buckets').catch(function () { return []; })
+        api('/_api/v1/buckets').catch(function () { return []; }),
+        api('/_api/v1/search').catch(function () { return []; })
       ]).then(function (res) {
         bp.token = state.token || readStoredToken();
         bp.canWrite = writable;
@@ -974,7 +978,8 @@
           dbs: res[1] || [],
           kvNamespaces: res[2] || [],
           queues: res[3] || [],
-          buckets: res[4] || []
+          buckets: res[4] || [],
+          searchIndexes: res[5] || []
         };
       }).catch(function (e) { toast(e.message, 'error'); });
       bp.addEventListener('fp-bindings-saved', function () {

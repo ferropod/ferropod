@@ -22,6 +22,11 @@ runtimeSheet.replaceSync(`
   .text-sm { font-size: 13px; }
   .text-strong { font-weight: 600; color: var(--text); }
   .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .break-all { word-break: break-all; overflow-wrap: anywhere; }
+  .id-sub { word-break: break-all; overflow-wrap: anywhere; }
+  .route-badges { display: flex; flex-wrap: wrap; gap: 4px; }
+  .route-badge { white-space: normal; word-break: break-all; overflow-wrap: anywhere; max-width: 100%; }
+  .cell-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 
   .row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
   .row-between { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
@@ -242,15 +247,108 @@ runtimeSheet.replaceSync(`
   }
   .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
   @media (max-width: 560px) { .grid-2 { grid-template-columns: 1fr; } }
-  @media (max-width: 639px) {
+  @media (max-width: 767px) {
+    .page-head { flex-direction: column; align-items: stretch; gap: 10px; }
+    .page-head .row { width: 100%; }
+    #new-runtime-btn { width: 100%; }
     .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .stat-card { padding: 12px; }
+    .stat-value { font-size: 15px; word-break: break-word; }
     .panel-header, .panel-body { padding: 12px 14px; }
     input[type="text"], select, textarea { font-size: 16px; min-height: 42px; }
     .btn { min-height: 38px; }
-    .btn-sm { min-height: 34px; }
+    .btn-sm { min-height: 36px; }
     .invoke-bar { flex-direction: column; align-items: stretch; }
     .invoke-bar select, .invoke-bar input[type="text"], .invoke-bar .btn { width: 100%; flex: 0 0 auto; }
     dialog.fp-dialog { width: calc(100vw - 16px); max-height: 90dvh; }
+
+    .data-table.stack-mobile thead { display: none; }
+    .data-table.stack-mobile,
+    .data-table.stack-mobile tbody,
+    .data-table.stack-mobile tr,
+    .data-table.stack-mobile td {
+      display: block;
+      width: 100%;
+    }
+    .data-table.stack-mobile tr {
+      padding: 14px;
+      border-bottom: 1px solid var(--border);
+    }
+    .data-table.stack-mobile tr:last-child { border-bottom: none; }
+    .data-table.stack-mobile tr.group-heading-row {
+      padding: 8px 14px;
+      background: var(--surface-subtle);
+      border-bottom: 1px solid var(--border);
+    }
+    .data-table.stack-mobile tr.group-heading-row th {
+      display: block;
+      width: 100%;
+      padding: 0;
+      border: none;
+      background: transparent;
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--muted);
+    }
+    .data-table.stack-mobile td {
+      border: none;
+      padding: 5px 0;
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 10px;
+      text-align: right;
+      min-width: 0;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+    .data-table.stack-mobile td > * {
+      min-width: 0;
+      max-width: 100%;
+    }
+    .data-table.stack-mobile td::before {
+      content: attr(data-label);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 500;
+      text-align: left;
+      flex-shrink: 0;
+    }
+    .data-table.stack-mobile td .route-badges {
+      justify-content: flex-end;
+      max-width: 68%;
+    }
+    .data-table.stack-mobile td.cell-primary {
+      display: block;
+      padding: 0 0 8px;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 6px;
+    }
+    .data-table.stack-mobile td.cell-primary::before { display: none; }
+    .data-table.stack-mobile td.cell-primary .link-pill {
+      max-width: 100%;
+      padding: 5px 11px;
+      font-size: 13px;
+    }
+    .data-table.stack-mobile td.cell-actions-td {
+      display: block;
+      padding: 10px 0 0;
+      margin-top: 6px;
+      border-top: 1px dashed var(--border);
+    }
+    .data-table.stack-mobile td.cell-actions-td::before { display: none; }
+    .data-table.stack-mobile td.cell-actions-td .cell-actions {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      width: 100%;
+    }
+    .data-table.stack-mobile td.cell-actions-td .btn {
+      width: 100%;
+      min-height: 38px;
+    }
   }
   .hidden { display: none !important; }
 `);
@@ -414,30 +512,32 @@ class FpRuntimePanel extends HTMLElement {
       const hasActive = Boolean(p.active_deployment_id);
       const group = p.group || '';
       const heading = group !== lastGroup && hasGroups
-        ? `<tr><th colspan="6">${esc(group || t('groups.ungrouped'))}</th></tr>`
+        ? `<tr class="group-heading-row"><th colspan="6">${esc(group || t('groups.ungrouped'))}</th></tr>`
         : '';
       lastGroup = group;
       return `${heading}
         <tr>
-          <td>
+          <td class="cell-primary">
             <button type="button" class="link-pill text-strong" data-go-hash="#/runtime/${encodeURIComponent(p.id)}">${esc(p.name)}</button>
-            <div class="muted mono text-xs" style="margin-top:3px;">${esc(p.id)}</div>
+            <div class="muted mono text-xs id-sub" style="margin-top:4px;">${esc(p.id)}</div>
           </td>
-          <td>
+          <td data-label="${esc(t('common.status'))}">
             ${hasActive
               ? `<span class="badge badge-success">${esc(t('runtime.active'))}</span>`
               : `<span class="badge badge-neutral">${esc(t('runtime.idle'))}</span>`}
           </td>
-          <td class="mono text-xs">${esc(p.active_deployment_id || '-')}</td>
-          <td>
+          <td data-label="${esc(t('projects.activeDeployment'))}" class="mono text-xs break-all">${esc(p.active_deployment_id || '-')}</td>
+          <td data-label="${esc(t('nav.routes'))}">
             ${pRoutes.length
-              ? pRoutes.map((r) => `<span class="badge badge-info mono">${esc(r.host)}</span>`).join(' ')
+              ? `<div class="route-badges">${pRoutes.map((r) => `<span class="badge badge-info mono route-badge">${esc(r.host)}</span>`).join('')}</div>`
               : `<span class="muted text-xs">-</span>`}
           </td>
-          <td class="mono text-xs">${esc(p.max_concurrency)}</td>
-          <td class="row gap-xs">
-            <button type="button" class="btn btn-sm" data-go-hash="#/runtime/${encodeURIComponent(p.id)}" data-open-bindings="1">${esc(t('runtime.manageBindings'))}</button>
-            <button type="button" class="btn btn-sm" data-pick-invoke="${esc(p.id)}">${esc(t('runtime.testInvoke'))}</button>
+          <td data-label="${esc(t('projects.maxConcurrency'))}" class="mono text-xs">${esc(p.max_concurrency)}</td>
+          <td class="cell-actions-td">
+            <div class="cell-actions">
+              <button type="button" class="btn btn-sm" data-go-hash="#/runtime/${encodeURIComponent(p.id)}" data-open-bindings="1">${esc(t('runtime.manageBindings'))}</button>
+              <button type="button" class="btn btn-sm" data-pick-invoke="${esc(p.id)}">${esc(t('runtime.testInvoke'))}</button>
+            </div>
           </td>
         </tr>
       `;
@@ -494,7 +594,7 @@ class FpRuntimePanel extends HTMLElement {
           </div>
           ${workloadRows ? `
             <div class="table-wrap">
-              <table class="data-table">
+              <table class="data-table stack-mobile">
                 <thead>
                   <tr>
                     <th>${esc(t('runtime.runtimeName'))}</th>
@@ -519,17 +619,23 @@ class FpRuntimePanel extends HTMLElement {
             </h3>
           </div>
           <div class="panel-body stack gap-sm">
-            <form id="invoke-form" class="invoke-bar">
-              <select id="inv-proj">
-                ${this._projects.length
-                  ? this._projects.map((p) => `<option value="${esc(p.id)}" ${this._invoke.projectId === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')
-                  : `<option value="">(${esc(t('common.empty'))})</option>`}
-              </select>
-              <select id="inv-method">
-                ${['GET', 'POST', 'PUT', 'DELETE'].map((m) => `<option value="${m}" ${this._invoke.method === m ? 'selected' : ''}>${m}</option>`).join('')}
-              </select>
-              <input type="text" id="inv-path" class="mono" value="${esc(this._invoke.path)}" placeholder="/api/hello">
-              <button type="submit" class="btn btn-primary btn-sm" ${this._invoke.loading ? 'disabled' : ''}>${esc(t('runtime.sendRequest'))}</button>
+            <form id="invoke-form" class="stack gap-sm">
+              <div class="invoke-bar">
+                <select id="inv-proj">
+                  ${this._projects.length
+                    ? this._projects.map((p) => `<option value="${esc(p.id)}" ${this._invoke.projectId === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')
+                    : `<option value="">(${esc(t('common.empty'))})</option>`}
+                </select>
+                <select id="inv-method">
+                  ${['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].map((m) => `<option value="${m}" ${this._invoke.method === m ? 'selected' : ''}>${m}</option>`).join('')}
+                </select>
+                <input type="text" id="inv-path" class="mono" value="${esc(this._invoke.path)}" placeholder="/api/hello">
+                <button type="submit" class="btn btn-primary btn-sm" ${this._invoke.loading ? 'disabled' : ''}>${esc(t('runtime.sendRequest'))}</button>
+              </div>
+              <div class="field ${['POST', 'PUT', 'PATCH'].includes(this._invoke.method) ? '' : 'hidden'}" id="inv-body-wrap">
+                <label>Request Body</label>
+                <textarea id="inv-body" class="mono" placeholder='{"key":"value"}'>${esc(this._invoke.body || '')}</textarea>
+              </div>
             </form>
             ${this._invoke.result ? `
               <div class="row-between text-xs muted">
@@ -573,12 +679,22 @@ class FpRuntimePanel extends HTMLElement {
     });
 
     const form = sr.getElementById('invoke-form');
+    const methodSel = sr.getElementById('inv-method');
+    const bodyWrap = sr.getElementById('inv-body-wrap');
+    if (methodSel && bodyWrap) {
+      methodSel.addEventListener('change', () => {
+        this._invoke.method = methodSel.value;
+        bodyWrap.classList.toggle('hidden', !['POST', 'PUT', 'PATCH'].includes(methodSel.value));
+      });
+    }
     if (form) {
       form.addEventListener('submit', (ev) => {
         ev.preventDefault();
         this._invoke.projectId = sr.getElementById('inv-proj').value;
         this._invoke.method = sr.getElementById('inv-method').value;
         this._invoke.path = sr.getElementById('inv-path').value.trim() || '/';
+        const bodyEl = sr.getElementById('inv-body');
+        this._invoke.body = ['POST', 'PUT', 'PATCH'].includes(this._invoke.method) && bodyEl ? bodyEl.value : '';
         this.runInvoke();
       });
     }
@@ -600,7 +716,8 @@ const BINDING_TYPES = [
   { type: 'db', label: 'Database (Turso)', route: '#/dbs', defaultVar: 'DB' },
   { type: 'kv', label: 'KV Namespace', route: '#/kv', defaultVar: 'KV' },
   { type: 'queue', label: 'Queue', route: '#/queues', defaultVar: 'QUEUE' },
-  { type: 'bucket', label: 'Object Bucket', route: '#/blobs', defaultVar: 'BUCKET' }
+  { type: 'bucket', label: 'Object Bucket', route: '#/blobs', defaultVar: 'BUCKET' },
+  { type: 'search', label: 'Search Index', route: '#/search', defaultVar: 'SEARCH' }
 ];
 
 class FpProjectBindings extends HTMLElement {
@@ -610,7 +727,7 @@ class FpProjectBindings extends HTMLElement {
     this.shadowRoot.adoptedStyleSheets = [runtimeSheet];
     this._project = null;
     this._activeDeployment = null;
-    this._resources = { dbs: [], kvNamespaces: [], queues: [], buckets: [] };
+    this._resources = { dbs: [], kvNamespaces: [], queues: [], buckets: [], searchIndexes: [] };
     this._canWrite = false;
     this._token = '';
     this._rows = []; // [{ type, logical, target }]
@@ -621,7 +738,7 @@ class FpProjectBindings extends HTMLElement {
 
   set project(p) { this._project = p; this._syncInitialRows(); if (this.isConnected) this.render(); }
   set activeDeployment(d) { this._activeDeployment = d; this._syncInitialRows(); if (this.isConnected) this.render(); }
-  set resources(r) { this._resources = r || { dbs: [], kvNamespaces: [], queues: [], buckets: [] }; if (this.isConnected) this.render(); }
+  set resources(r) { this._resources = r || { dbs: [], kvNamespaces: [], queues: [], buckets: [], searchIndexes: [] }; if (this.isConnected) this.render(); }
   set canWrite(v) { this._canWrite = Boolean(v); if (this.isConnected) this.render(); }
   set token(v) { this._token = String(v || ''); }
 
@@ -631,7 +748,7 @@ class FpProjectBindings extends HTMLElement {
     this._initializedForDep = depKey;
     const b = (this._activeDeployment && this._activeDeployment.bindings) || {};
     const rows = [];
-    ['db', 'kv', 'queue', 'bucket'].forEach((type) => {
+    ['db', 'kv', 'queue', 'bucket', 'search'].forEach((type) => {
       const map = b[type] || {};
       Object.keys(map).forEach((logical) => {
         rows.push({ type, logical, target: map[logical] });
@@ -645,7 +762,8 @@ class FpProjectBindings extends HTMLElement {
       db: this._resources.dbs,
       kv: this._resources.kvNamespaces,
       queue: this._resources.queues,
-      bucket: this._resources.buckets
+      bucket: this._resources.buckets,
+      search: this._resources.searchIndexes
     };
     return (resources[type] || [])
       .filter((resource) => this._project && resource.project_id === this._project.id)
@@ -655,9 +773,8 @@ class FpProjectBindings extends HTMLElement {
   _buildBindingsObj() {
     const current = this._activeDeployment?.bindings || {};
     const out = {
-      kv: {}, db: {}, queue: {}, bucket: {},
-      env: current.env || {},
-      search: current.search || {}
+      kv: {}, db: {}, queue: {}, bucket: {}, search: {},
+      env: current.env || {}
     };
     this._rows.forEach((r) => {
       const k = String(r.logical || '').trim();
@@ -675,6 +792,7 @@ class FpProjectBindings extends HTMLElement {
     Object.entries(bindingsObj.kv).forEach(([k, v]) => lines.push(`// kv binding "${k}" -> ${v}\nlet val = kv::get("${k}", "session:1")?;\nlet page = kv::list("${k}", Some("user:"), None, 50)?;`));
     Object.entries(bindingsObj.queue).forEach(([k, v]) => lines.push(`// queue binding "${k}" -> ${v}\nqueue::enqueue("${k}", b"{\\"task\\":1}", None)?;`));
     Object.entries(bindingsObj.bucket).forEach(([k, v]) => lines.push(`// bucket binding "${k}" -> ${v}\nlet page = bucket::list("${k}", Some("assets/"), None, 50)?;`));
+    Object.entries(bindingsObj.search).forEach(([k, v]) => lines.push(`// search binding "${k}" -> ${v}\nlet res = search::query("${k}", "query", false, 10)?;`));
     lines.push(`// structured host logging\nlog::emit(log::Level::Info, "handled request", None);`);
     return lines.join('\n\n');
   }
