@@ -427,22 +427,87 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  background: var(--surface);
 }
 .session-box {
-  padding: 8px 10px;
-  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
   background: var(--surface-subtle);
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  gap: 10px;
+}
+.session-avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.session-meta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 .session-actor {
-  font-size: 12.5px;
+  font-size: 13px;
   font-weight: 600;
+  line-height: 1.25;
+  color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.session-badges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: nowrap;
+  min-width: 0;
+}
+.session-pill {
+  padding: 1px 7px;
+  font-size: 11px;
+  line-height: 1.4;
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-ver-pill {
+  padding: 1px 7px;
+  font-size: 11px;
+  line-height: 1.4;
+  background: var(--surface);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+.session-ver-pill:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.btn-disconnect {
+  height: 34px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+.btn-disconnect:hover:not(:disabled) {
+  background: var(--danger-soft);
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
+  color: var(--danger);
 }
 
 .main-col {
@@ -1149,4 +1214,48 @@ mark.fts-hl {
   padding: 0 3px;
   border-radius: 4px;
   font-weight: 600;
+}
+
+/* Collapsible Advanced Options & Preset Chips in Modals */
+details.adv-options {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-subtle);
+  overflow: hidden;
+}
+details.adv-options > summary {
+  padding: 9px 12px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+details.adv-options > summary:hover {
+  color: var(--text);
+}
+details.adv-options[open] > summary {
+  border-bottom: 1px solid var(--border);
+}
+details.adv-options .adv-options-body {
+  padding: 12px;
+  background: var(--surface);
+}
+.preset-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.preset-chip-btn {
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.preset-chip-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
 }

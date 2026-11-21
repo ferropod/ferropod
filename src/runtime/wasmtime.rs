@@ -452,8 +452,13 @@ impl WasmtimeRuntime {
             wasi_builder.env(k, v);
         }
 
+        let mem_limit = ctx
+            .wasm_max_memory_mb
+            .filter(|mb| *mb > 0)
+            .map(|mb| mb.saturating_mul(1024 * 1024))
+            .unwrap_or(self.config.wasm_max_memory_bytes);
         let limits = StoreLimitsBuilder::new()
-            .memory_size(self.config.wasm_max_memory_bytes)
+            .memory_size(mem_limit)
             .table_elements(self.config.wasm_max_table_elements)
             .instances(16)
             .tables(32)
@@ -466,7 +471,8 @@ impl WasmtimeRuntime {
             http: WasiHttpCtx::new(),
             hooks: FerroHttpHooks {
                 blocked_upstream: self.config.local_api.as_ref().map(|c| c.upstream),
-                allow_private_outbound: self.config.wasm_allow_private_outbound,
+                allow_private_outbound: self.config.wasm_allow_private_outbound
+                    || ctx.allow_private_outbound,
             },
             table: ResourceTable::new(),
             limits,
@@ -477,7 +483,11 @@ impl WasmtimeRuntime {
 
         let mut store = Store::new(&self.engine, state);
         store.limiter(|s| &mut s.limits);
-        let ticks = (self.config.wasm_epoch_timeout_ms / EPOCH_TICK_MS).max(1);
+        let timeout_ms = ctx
+            .timeout_ms
+            .filter(|t| *t > 0)
+            .unwrap_or(self.config.wasm_epoch_timeout_ms);
+        let ticks = (timeout_ms / EPOCH_TICK_MS).max(1);
         store.set_epoch_deadline(ticks);
         store.epoch_deadline_trap();
 
@@ -602,7 +612,11 @@ impl WasmtimeRuntime {
             Ok::<_, wasmtime::Error>(())
         });
 
-        let timeout_dur = Duration::from_millis(self.config.wasm_epoch_timeout_ms + 500);
+        let eff_timeout_ms = ctx
+            .timeout_ms
+            .filter(|t| *t > 0)
+            .unwrap_or(self.config.wasm_epoch_timeout_ms);
+        let timeout_dur = Duration::from_millis(eff_timeout_ms + 500);
         let res = tokio::time::timeout(timeout_dur, async {
             let resp_opt = match rx.await {
                 Ok(Ok(resp)) => {
@@ -881,7 +895,11 @@ impl WorkerRuntime for WasmtimeRuntime {
                 })
                 .collect();
 
-            let timeout_dur = Duration::from_millis(self.config.wasm_epoch_timeout_ms + 500);
+            let eff_timeout_ms = ctx
+                .timeout_ms
+                .filter(|t| *t > 0)
+                .unwrap_or(self.config.wasm_epoch_timeout_ms);
+            let timeout_dur = Duration::from_millis(eff_timeout_ms + 500);
             let exec = tokio::time::timeout(timeout_dur, async {
                 let worker = queue_pre
                     .instantiate_async(&mut store)
@@ -974,7 +992,11 @@ impl WorkerRuntime for WasmtimeRuntime {
                 },
             };
 
-            let timeout_dur = Duration::from_millis(self.config.wasm_epoch_timeout_ms + 500);
+            let eff_timeout_ms = ctx
+                .timeout_ms
+                .filter(|t| *t > 0)
+                .unwrap_or(self.config.wasm_epoch_timeout_ms);
+            let timeout_dur = Duration::from_millis(eff_timeout_ms + 500);
             let exec = tokio::time::timeout(timeout_dur, async {
                 let worker = sched_pre
                     .instantiate_async(&mut store)

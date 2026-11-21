@@ -48,25 +48,35 @@ pub fn connect_db(db: &Database) -> Result<Connection> {
     Ok(conn)
 }
 
-/// Legacy databases need the nullable column added before serving requests.
-pub(super) async fn ensure_resource_group_column(conn: &Connection, table: &str) -> Result<()> {
+/// Legacy databases need newly introduced columns added before serving requests.
+pub(crate) async fn ensure_column(
+    conn: &Connection,
+    table: &str,
+    col_name: &str,
+    col_def: &str,
+) -> Result<()> {
     let mut columns = conn
         .query(&format!("PRAGMA table_info({table})"), ())
         .await
         .map_err(map_turso_err)?;
     while let Some(column) = columns.next().await.map_err(map_turso_err)? {
-        if column.get::<String>(1).map_err(map_turso_err)? == "resource_group" {
+        if column.get::<String>(1).map_err(map_turso_err)? == col_name {
             return Ok(());
         }
     }
     drop(columns);
     conn.execute(
-        &format!("ALTER TABLE {table} ADD COLUMN resource_group TEXT"),
+        &format!("ALTER TABLE {table} ADD COLUMN {col_name} {col_def}"),
         (),
     )
     .await
     .map_err(map_turso_err)?;
     Ok(())
+}
+
+/// Legacy databases need the nullable column added before serving requests.
+pub(super) async fn ensure_resource_group_column(conn: &Connection, table: &str) -> Result<()> {
+    ensure_column(conn, table, "resource_group", "TEXT").await
 }
 
 pub fn is_retryable_turso_err(err: &TursoError) -> bool {

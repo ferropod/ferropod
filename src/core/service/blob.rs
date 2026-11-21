@@ -1,12 +1,43 @@
 use chrono::Utc;
 
 use crate::core::model::{
-    BlobAuth, BucketMeta, ByteRange, ByteStream, Caller, FerroError, ObjectMeta, Result, TokenScope,
+    BlobAuth, BucketMeta, BucketOpts, ByteRange, ByteStream, Caller, FerroError, ObjectMeta,
+    Result, TokenScope,
 };
 
 use super::PlatformService;
 
+fn content_type_allowed(allowed_list: &str, actual: &str) -> bool {
+    let actual_essence = actual
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let patterns: Vec<String> = allowed_list
+        .split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if patterns.is_empty() {
+        return true;
+    }
+    patterns.iter().any(|pat| {
+        if pat == "*/*" || pat == "*" {
+            true
+        } else if let Some(prefix) = pat.strip_suffix("/*") {
+            actual_essence.starts_with(&format!("{prefix}/"))
+        } else {
+            actual_essence == *pat
+        }
+    })
+}
+
 impl PlatformService {
+    pub async fn get_bucket_meta(&self, name: &str) -> Result<Option<BucketMeta>> {
+        self.objects.get_bucket(name).await
+    }
+
     async fn get_bucket_or_err(&self, name: &str) -> Result<BucketMeta> {
         self.objects
             .get_bucket(name)
@@ -118,14 +149,33 @@ impl PlatformService {
         public_read: bool,
         group: Option<&str>,
     ) -> Result<BucketMeta> {
-        let group = super::normalize_resource_group(group)?;
+        self.create_bucket_with_opts(
+            caller,
+            name,
+            BucketOpts {
+                group: group.map(str::to_owned),
+                project_id: project_id.map(str::to_owned),
+                public_read: Some(public_read),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    pub async fn create_bucket_with_opts(
+        &self,
+        caller: &Caller,
+        name: &str,
+        mut opts: BucketOpts,
+    ) -> Result<BucketMeta> {
+        opts.group = super::normalize_resource_group(opts.group.as_deref())?.map(str::to_owned);
         let name = name.trim();
         if name.is_empty() || name.contains('/') {
             return Err(FerroError::InvalidArgument(format!(
                 "invalid bucket name '{name}'"
             )));
         }
-        let resolved_pid = match (&caller.scope, project_id) {
+        let resolved_pid = match (&caller.scope, opts.project_id.as_deref()) {
             (TokenScope::Admin, pid) => self.resolve_optional_project_id(pid).await?,
             (TokenScope::Project(_), Some(req_pid)) => {
                 let proj = self.get_project_internal(req_pid).await?;
@@ -139,16 +189,80 @@ impl PlatformService {
                 ));
             }
         };
+        opts.project_id = resolved_pid.clone();
 
-        let meta = self
-            .objects
-            .create_bucket(name, resolved_pid.as_deref(), public_read, group)
-            .await?;
+        let meta = self.objects.create_bucket_with_opts(name, opts).await?;
         self.audit(
             resolved_pid.as_deref(),
             &caller.actor,
             "bucket.create",
-            serde_json::json!({ "name": meta.name, "public_read": public_read }),
+            serde_json::json!({ "name": meta.name, "public_read": meta.public_read }),
+        );
+        Ok(meta)
+    }
+
+    pub async fn update_bucket_with_opts(
+        &self,
+        caller: &Caller,
+        name: &str,
+        opts: BucketOpts,
+    ) -> Result<BucketMeta> {
+        let mut meta = self.get_bucket_or_err(name).await?;
+        Self::require_resource_write(
+            caller,
+            meta.project_id.as_deref(),
+            &format!("bucket '{name}'"),
+        )?;
+        if let Some(pub_read) = opts.public_read {
+            meta.public_read = pub_read;
+        }
+        if let Some(g) = opts.group {
+            meta.group = super::normalize_resource_group(Some(&g))?.map(str::to_owned);
+        }
+        if let Some(desc) = opts.description {
+            let trimmed = desc.trim();
+            meta.description = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+        }
+        if let Some(mos) = opts.max_object_size_mb {
+            meta.max_object_size_mb = if mos == 0 { None } else { Some(mos) };
+        }
+        if let Some(q) = opts.quota_mb {
+            meta.quota_mb = if q == 0 { None } else { Some(q) };
+        }
+        if let Some(act) = opts.allowed_content_types {
+            let trimmed = act.trim();
+            meta.allowed_content_types = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+        }
+        if let Some(cc) = opts.cache_control {
+            let trimmed = cc.trim();
+            meta.cache_control = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+        }
+        if let Some(cors) = opts.cors_origins {
+            let trimmed = cors.trim();
+            meta.cors_origins = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+        }
+        self.objects.update_bucket(&meta).await?;
+        self.audit(
+            meta.project_id.as_deref(),
+            &caller.actor,
+            "bucket.update",
+            serde_json::json!({ "name": meta.name, "public_read": meta.public_read }),
         );
         Ok(meta)
     }
@@ -252,10 +366,37 @@ impl PlatformService {
         content_type: &str,
         custom_meta: Option<String>,
     ) -> Result<ObjectMeta> {
-        self.authorize_blob_write(auth, bucket, key, true).await?;
-        self.objects
+        let b_meta = self.authorize_blob_write(auth, bucket, key, true).await?;
+        if let Some(ref allowed) = b_meta.allowed_content_types {
+            if !content_type_allowed(allowed, content_type) {
+                return Err(FerroError::InvalidArgument(format!(
+                    "content-type '{content_type}' is not allowed in bucket '{bucket}' (allowed: {allowed})"
+                )));
+            }
+        }
+        let obj = self
+            .objects
             .put_stream(bucket, key, stream, content_type, custom_meta)
-            .await
+            .await?;
+        if let Some(max_mb) = b_meta.max_object_size_mb.filter(|m| *m > 0) {
+            if obj.size > (max_mb as u64).saturating_mul(1024 * 1024) {
+                let _ = self.objects.delete(bucket, key).await;
+                return Err(FerroError::InvalidArgument(format!(
+                    "object size ({} bytes) exceeds bucket max_object_size_mb ({max_mb} MiB)",
+                    obj.size
+                )));
+            }
+        }
+        if let Some(quota_mb) = b_meta.quota_mb.filter(|q| *q > 0) {
+            let total = self.objects.total_bucket_bytes(bucket).await?;
+            if total > (quota_mb as u64).saturating_mul(1024 * 1024) {
+                let _ = self.objects.delete(bucket, key).await;
+                return Err(FerroError::InvalidArgument(format!(
+                    "bucket '{bucket}' exceeded storage quota ({quota_mb} MiB)"
+                )));
+            }
+        }
+        Ok(obj)
     }
 
     pub async fn head_object(

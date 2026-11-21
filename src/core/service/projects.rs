@@ -6,8 +6,8 @@ use futures_util::TryStreamExt;
 use uuid::Uuid;
 
 use crate::core::model::{
-    Bindings, Caller, Deployment, FerroError, LogEntry, Project, RequestCtx, Result, Route,
-    RouteEntry, TargetEnv, TokenScope, WorkerHttpRequest, WorkerHttpResponse,
+    Bindings, Caller, Deployment, FerroError, LogEntry, Project, ProjectOpts, RequestCtx, Result,
+    Route, RouteEntry, TargetEnv, TokenScope, WorkerHttpRequest, WorkerHttpResponse,
 };
 
 use super::PlatformService;
@@ -100,7 +100,25 @@ impl PlatformService {
         health_check_path: Option<&str>,
         group: Option<&str>,
     ) -> Result<Project> {
-        let group = super::normalize_resource_group(group)?;
+        self.create_project_with_opts(
+            caller,
+            name,
+            ProjectOpts {
+                group: group.map(str::to_owned),
+                health_check_path: health_check_path.map(str::to_owned),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    pub async fn create_project_with_opts(
+        &self,
+        caller: &Caller,
+        name: &str,
+        mut opts: ProjectOpts,
+    ) -> Result<Project> {
+        opts.group = super::normalize_resource_group(opts.group.as_deref())?.map(str::to_owned);
         Self::require_admin(caller)?;
         let name = name.trim();
         if name.is_empty() {
@@ -108,15 +126,96 @@ impl PlatformService {
                 "project name cannot be empty".into(),
             ));
         }
-        let proj = self
-            .projects
-            .create_project(name, health_check_path, group)
-            .await?;
+        if let Some(mc) = opts.max_concurrency {
+            if mc < 1 {
+                return Err(FerroError::InvalidArgument(
+                    "max_concurrency must be at least 1".into(),
+                ));
+            }
+        }
+        if let Some(t) = opts.timeout_ms {
+            if t < 50 {
+                return Err(FerroError::InvalidArgument(
+                    "timeout_ms must be at least 50ms".into(),
+                ));
+            }
+        }
+        if let Some(mem) = opts.wasm_max_memory_mb {
+            if mem < 1 {
+                return Err(FerroError::InvalidArgument(
+                    "wasm_max_memory_mb must be at least 1 MiB".into(),
+                ));
+            }
+        }
+        let proj = self.projects.create_project_with_opts(name, opts).await?;
         self.audit(
             Some(&proj.id),
             &caller.actor,
             "project.create",
             serde_json::json!({ "id": proj.id, "name": proj.name }),
+        );
+        Ok(proj)
+    }
+
+    pub async fn update_project(
+        &self,
+        caller: &Caller,
+        id_or_name: &str,
+        opts: ProjectOpts,
+    ) -> Result<Project> {
+        let mut proj = self.get_project_internal(id_or_name).await?;
+        Self::require_project_write(caller, &proj.id)?;
+        if let Some(g) = opts.group {
+            proj.group = super::normalize_resource_group(Some(&g))?.map(str::to_owned);
+        }
+        if let Some(desc) = opts.description {
+            let trimmed = desc.trim();
+            proj.description = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+        }
+        if let Some(hcp) = opts.health_check_path {
+            let trimmed = hcp.trim();
+            if !trimmed.is_empty() {
+                proj.health_check_path = if trimmed.starts_with('/') {
+                    trimmed.to_string()
+                } else {
+                    format!("/{trimmed}")
+                };
+            }
+        }
+        if let Some(mc) = opts.max_concurrency {
+            if mc < 1 {
+                return Err(FerroError::InvalidArgument(
+                    "max_concurrency must be at least 1".into(),
+                ));
+            }
+            proj.max_concurrency = mc;
+        }
+        if let Some(t) = opts.timeout_ms {
+            proj.timeout_ms = if t == 0 { None } else { Some(t.max(50)) };
+        }
+        if let Some(mem) = opts.wasm_max_memory_mb {
+            proj.wasm_max_memory_mb = if mem == 0 { None } else { Some(mem) };
+        }
+        if let Some(allow) = opts.allow_private_outbound {
+            proj.allow_private_outbound = allow;
+        }
+        proj.updated_at = Utc::now().timestamp();
+        self.projects.update_project(&proj).await?;
+        self.audit(
+            Some(&proj.id),
+            &caller.actor,
+            "project.update",
+            serde_json::json!({
+                "id": proj.id,
+                "max_concurrency": proj.max_concurrency,
+                "timeout_ms": proj.timeout_ms,
+                "wasm_max_memory_mb": proj.wasm_max_memory_mb,
+                "allow_private_outbound": proj.allow_private_outbound,
+            }),
         );
         Ok(proj)
     }
@@ -539,11 +638,19 @@ impl PlatformService {
 
     pub async fn invoke_worker_http(
         &self,
-        ctx: RequestCtx,
+        mut ctx: RequestCtx,
         req: WorkerHttpRequest,
     ) -> Result<WorkerHttpResponse> {
         let project_id = ctx.project_id.clone();
         let request_id = ctx.request_id.clone();
+        if ctx.timeout_ms.is_none()
+            && ctx.wasm_max_memory_mb.is_none()
+            && !ctx.allow_private_outbound
+        {
+            if let Ok(Some(proj)) = self.projects.get_project(&project_id).await {
+                ctx = ctx.with_project_limits(&proj);
+            }
+        }
         match self.runtime.handle_http(ctx, req).await {
             Ok(resp) => Ok(resp),
             Err(err) => {
@@ -664,7 +771,8 @@ impl PlatformService {
         }
 
         let request_id = format!("inv_{}", Uuid::new_v4().simple());
-        let ctx = RequestCtx::new(proj.id.clone(), request_id, dep.clone());
+        let ctx =
+            RequestCtx::new(proj.id.clone(), request_id, dep.clone()).with_project_limits(&proj);
         let req = WorkerHttpRequest {
             method: method_upper,
             uri: norm_path,

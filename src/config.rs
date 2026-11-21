@@ -9,11 +9,83 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum Profile {
-    /// Tuned for 512 MiB RAM VPS deployments.
+    /// Automatically detect host / container (cgroup) memory and CPU cores to allocate quotas.
+    #[default]
+    Auto,
+    /// Tuned for 512 MiB - 1 GiB RAM VPS deployments.
     LowMem,
     /// Standard preset for 2 GiB+ hosts.
-    #[default]
     Standard,
+}
+
+/// Detect the effective memory budget in bytes from `/proc/meminfo` and Linux cgroup v1/v2 limits.
+pub fn detect_system_memory_bytes() -> u64 {
+    let mut host_total = 0u64;
+    if let Ok(content) = std::fs::read_to_string("/proc/meminfo") {
+        for line in content.lines() {
+            if let Some(rest) = line.strip_prefix("MemTotal:") {
+                if let Some(kb) = rest
+                    .split_whitespace()
+                    .next()
+                    .and_then(|s| s.parse::<u64>().ok())
+                {
+                    host_total = kb.saturating_mul(1024);
+                    break;
+                }
+            }
+        }
+    }
+    if host_total == 0 {
+        host_total = 2 * 1024 * 1024 * 1024;
+    }
+
+    let mut effective = host_total;
+    for cg_path in [
+        "/sys/fs/cgroup/memory.max",
+        "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+    ] {
+        if let Ok(raw) = std::fs::read_to_string(cg_path) {
+            let trimmed = raw.trim();
+            if trimmed != "max" {
+                if let Ok(limit) = trimmed.parse::<u64>() {
+                    // Ignore sentinel "unlimited" values near u64::MAX / page-aligned max
+                    if limit > 0 && limit < (1u64 << 50) {
+                        effective = effective.min(limit);
+                    }
+                }
+            }
+        }
+    }
+    effective
+}
+
+/// Detect available logical CPU cores.
+pub fn detect_cpu_cores() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2)
+        .max(1)
+}
+
+impl Profile {
+    /// Resolve [`Profile::Auto`] into [`Profile::LowMem`] (`<= 1 GiB`) or [`Profile::Standard`] (`> 1 GiB`).
+    pub fn resolve_with_memory(self, mem_bytes: u64) -> Self {
+        match self {
+            Profile::Auto => {
+                if mem_bytes <= 1024 * 1024 * 1024 {
+                    Profile::LowMem
+                } else {
+                    Profile::Standard
+                }
+            }
+            explicit => explicit,
+        }
+    }
+
+    /// Resolve [`Profile::Auto`] using the current system/container memory budget.
+    pub fn resolve(self) -> Self {
+        self.resolve_with_memory(detect_system_memory_bytes())
+    }
 }
 
 /// Native TLS / HTTPS configuration for `ferropod serve`.
@@ -156,14 +228,104 @@ pub struct Config {
 }
 
 impl Config {
-    /// Create configuration defaults for the selected [`Profile`].
+    /// Create configuration defaults for the selected [`Profile`], auto-detecting system resources when [`Profile::Auto`] is selected.
     pub fn for_profile(
         profile: Profile,
         bind_addr: SocketAddr,
         data_dir: PathBuf,
         master_key: String,
     ) -> Self {
+        Self::for_profile_with_resources(
+            profile,
+            detect_system_memory_bytes(),
+            detect_cpu_cores(),
+            bind_addr,
+            data_dir,
+            master_key,
+        )
+    }
+
+    /// Create configuration for a [`Profile`] given explicit detected memory (`mem_bytes`) and logical CPU cores (`cpu_cores`).
+    pub fn for_profile_with_resources(
+        profile: Profile,
+        mem_bytes: u64,
+        cpu_cores: usize,
+        bind_addr: SocketAddr,
+        data_dir: PathBuf,
+        master_key: String,
+    ) -> Self {
+        let cores = cpu_cores.max(1);
         match profile {
+            Profile::Auto => {
+                let resolved = profile.resolve_with_memory(mem_bytes);
+                let mem_mib = (mem_bytes / (1024 * 1024)).max(256) as usize;
+                if resolved == Profile::LowMem {
+                    let is_tiny = mem_mib <= 512;
+                    Self {
+                        profile: Profile::LowMem,
+                        bind_addr,
+                        data_dir,
+                        master_key,
+                        tls: TlsConfig::default(),
+                        local_api: None,
+                        tokio_worker_threads: cores.clamp(1, 2),
+                        max_concurrency: if is_tiny { 32 } else { 64 },
+                        queue_concurrency: if is_tiny { 4 } else { 8 },
+                        max_open_user_dbs: if is_tiny { 10 } else { 16 },
+                        max_ephemeral_kv_entries: if is_tiny { 4_096 } else { 8_192 },
+                        log_channel_capacity: if is_tiny { 1_024 } else { 2_048 },
+                        log_retention_days: 7,
+                        queue_pending_retention_secs: 7 * 24 * 3600,
+                        queue_dlq_retention_secs: 7 * 24 * 3600,
+                        queue_lease_secs: 60,
+                        blob_gc_grace_secs: 30,
+                        maintenance_interval_secs: 30,
+                        max_blob_upload_bytes: 64 * 1024 * 1024,
+                        wasm_max_memory_bytes: 32 * 1024 * 1024,
+                        wasm_max_table_elements: 4_096,
+                        wasm_compile_concurrency: 1,
+                        wasm_epoch_timeout_ms: 10_000,
+                        wasm_cache_max_compiled: if is_tiny { 8 } else { 12 },
+                        wasm_allow_private_outbound: false,
+                    }
+                } else {
+                    Self {
+                        profile: Profile::Standard,
+                        bind_addr,
+                        data_dir,
+                        master_key,
+                        tls: TlsConfig::default(),
+                        local_api: None,
+                        tokio_worker_threads: cores.clamp(2, 16),
+                        max_concurrency: (mem_mib / 16).clamp(128, 1024),
+                        queue_concurrency: (cores * 4).clamp(8, 32),
+                        max_open_user_dbs: (mem_mib / 64).clamp(24, 128),
+                        max_ephemeral_kv_entries: (mem_mib * 8).clamp(16_384, 65_536),
+                        log_channel_capacity: mem_mib.clamp(2_048, 8_192),
+                        log_retention_days: 7,
+                        queue_pending_retention_secs: 7 * 24 * 3600,
+                        queue_dlq_retention_secs: 14 * 24 * 3600,
+                        queue_lease_secs: 60,
+                        blob_gc_grace_secs: 30,
+                        maintenance_interval_secs: 30,
+                        max_blob_upload_bytes: if mem_mib < 3072 {
+                            128 * 1024 * 1024
+                        } else {
+                            256 * 1024 * 1024
+                        },
+                        wasm_max_memory_bytes: if mem_mib < 3072 {
+                            64 * 1024 * 1024
+                        } else {
+                            128 * 1024 * 1024
+                        },
+                        wasm_max_table_elements: 16_384,
+                        wasm_compile_concurrency: (cores / 2).clamp(1, 4),
+                        wasm_epoch_timeout_ms: 10_000,
+                        wasm_cache_max_compiled: (mem_mib / 128).clamp(16, 64),
+                        wasm_allow_private_outbound: false,
+                    }
+                }
+            }
             Profile::LowMem => Self {
                 profile,
                 bind_addr,
@@ -198,9 +360,7 @@ impl Config {
                 master_key,
                 tls: TlsConfig::default(),
                 local_api: None,
-                tokio_worker_threads: std::thread::available_parallelism()
-                    .map(|n| n.get())
-                    .unwrap_or(4),
+                tokio_worker_threads: cores,
                 max_concurrency: 256,
                 queue_concurrency: 16,
                 max_open_user_dbs: 64,
@@ -257,5 +417,72 @@ impl Config {
 
     pub fn certs_dir(&self) -> PathBuf {
         self.data_dir.join("certs")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_profile_scales_with_detected_memory_and_cores() {
+        let bind: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let data = PathBuf::from("./data");
+
+        let cfg_512m = Config::for_profile_with_resources(
+            Profile::Auto,
+            512 * 1024 * 1024,
+            1,
+            bind,
+            data.clone(),
+            "k".into(),
+        );
+        assert_eq!(cfg_512m.profile, Profile::LowMem);
+        assert_eq!(cfg_512m.tokio_worker_threads, 1);
+        assert_eq!(cfg_512m.max_concurrency, 32);
+        assert_eq!(cfg_512m.wasm_cache_max_compiled, 8);
+        assert_eq!(cfg_512m.max_open_user_dbs, 10);
+
+        let cfg_1g = Config::for_profile_with_resources(
+            Profile::Auto,
+            1024 * 1024 * 1024,
+            2,
+            bind,
+            data.clone(),
+            "k".into(),
+        );
+        assert_eq!(cfg_1g.profile, Profile::LowMem);
+        assert_eq!(cfg_1g.tokio_worker_threads, 2);
+        assert_eq!(cfg_1g.max_concurrency, 64);
+        assert_eq!(cfg_1g.wasm_cache_max_compiled, 12);
+        assert_eq!(cfg_1g.max_open_user_dbs, 16);
+
+        let cfg_2g = Config::for_profile_with_resources(
+            Profile::Auto,
+            2 * 1024 * 1024 * 1024,
+            2,
+            bind,
+            data.clone(),
+            "k".into(),
+        );
+        assert_eq!(cfg_2g.profile, Profile::Standard);
+        assert_eq!(cfg_2g.max_concurrency, 128);
+        assert_eq!(cfg_2g.wasm_max_memory_bytes, 64 * 1024 * 1024);
+        assert_eq!(cfg_2g.wasm_cache_max_compiled, 16);
+
+        let cfg_8g = Config::for_profile_with_resources(
+            Profile::Auto,
+            8 * 1024 * 1024 * 1024,
+            8,
+            bind,
+            data,
+            "k".into(),
+        );
+        assert_eq!(cfg_8g.profile, Profile::Standard);
+        assert_eq!(cfg_8g.tokio_worker_threads, 8);
+        assert_eq!(cfg_8g.max_concurrency, 512);
+        assert_eq!(cfg_8g.wasm_max_memory_bytes, 128 * 1024 * 1024);
+        assert_eq!(cfg_8g.wasm_cache_max_compiled, 64);
+        assert_eq!(cfg_8g.max_open_user_dbs, 128);
     }
 }

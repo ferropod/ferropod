@@ -1,22 +1,33 @@
 use bytes::Bytes;
 
 use crate::core::model::{
-    Caller, FerroError, KvKeyMeta, KvNamespaceMeta, KvValue, Result, TokenScope,
+    Caller, FerroError, KvKeyMeta, KvNamespaceMeta, KvNamespaceOpts, KvValue, Result, TokenScope,
+    DEFAULT_KV_TTL_SECS,
 };
 
 use super::PlatformService;
 
 impl PlatformService {
-    async fn resolve_kv_namespace_for_read(&self, caller: &Caller, ns: &str) -> Result<()> {
+    async fn resolve_kv_namespace_for_read(
+        &self,
+        caller: &Caller,
+        ns: &str,
+    ) -> Result<Option<KvNamespaceMeta>> {
         let meta = self.registry.get_kv_namespace(ns).await?;
         let owner = meta.as_ref().and_then(|m| m.project_id.as_deref());
-        Self::require_resource_read(caller, owner, &format!("kv namespace '{ns}'"))
+        Self::require_resource_read(caller, owner, &format!("kv namespace '{ns}'"))?;
+        Ok(meta)
     }
 
-    async fn resolve_kv_namespace_for_write(&self, caller: &Caller, ns: &str) -> Result<()> {
+    async fn resolve_kv_namespace_for_write(
+        &self,
+        caller: &Caller,
+        ns: &str,
+    ) -> Result<Option<KvNamespaceMeta>> {
         let meta = self.registry.get_kv_namespace(ns).await?;
         let owner = meta.as_ref().and_then(|m| m.project_id.as_deref());
-        Self::require_resource_write(caller, owner, &format!("kv namespace '{ns}'"))
+        Self::require_resource_write(caller, owner, &format!("kv namespace '{ns}'"))?;
+        Ok(meta)
     }
 
     pub async fn create_kv_namespace(
@@ -36,14 +47,37 @@ impl PlatformService {
         project_id: Option<&str>,
         group: Option<&str>,
     ) -> Result<KvNamespaceMeta> {
-        let group = super::normalize_resource_group(group)?;
+        self.create_kv_namespace_with_opts(
+            caller,
+            name,
+            KvNamespaceOpts {
+                group: group.map(str::to_owned),
+                project_id: project_id.map(str::to_owned),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    pub async fn create_kv_namespace_with_opts(
+        &self,
+        caller: &Caller,
+        name: &str,
+        mut opts: KvNamespaceOpts,
+    ) -> Result<KvNamespaceMeta> {
+        opts.group = super::normalize_resource_group(opts.group.as_deref())?.map(str::to_owned);
         let name = name.trim();
         if name.is_empty() {
             return Err(FerroError::InvalidArgument(
                 "kv namespace name cannot be empty".into(),
             ));
         }
-        let resolved_pid = match (&caller.scope, project_id) {
+        if opts.default_ttl_secs == Some(0) {
+            return Err(FerroError::InvalidArgument(
+                "kv namespace default_ttl_secs must be greater than 0 (KV entries must have an expiration time)".into(),
+            ));
+        }
+        let resolved_pid = match (&caller.scope, opts.project_id.as_deref()) {
             (TokenScope::Admin, pid) => self.resolve_optional_project_id(pid).await?,
             (TokenScope::Project(_), Some(req_pid)) => {
                 let proj = self.get_project_internal(req_pid).await?;
@@ -57,16 +91,80 @@ impl PlatformService {
                 ));
             }
         };
+        opts.project_id = resolved_pid.clone();
+        opts.default_ttl_secs = Some(opts.default_ttl_secs.unwrap_or(DEFAULT_KV_TTL_SECS).max(1));
 
         let meta = self
             .registry
-            .create_kv_namespace(name, resolved_pid.as_deref(), group)
+            .create_kv_namespace_with_opts(name, opts)
             .await?;
         self.audit(
             resolved_pid.as_deref(),
             &caller.actor,
             "kv.namespace.create",
-            serde_json::json!({ "name": meta.name }),
+            serde_json::json!({
+                "name": meta.name,
+                "default_ttl_secs": meta.default_ttl_secs,
+                "default_ephemeral": meta.default_ephemeral,
+            }),
+        );
+        Ok(meta)
+    }
+
+    pub async fn update_kv_namespace(
+        &self,
+        caller: &Caller,
+        name: &str,
+        opts: KvNamespaceOpts,
+    ) -> Result<KvNamespaceMeta> {
+        let mut meta = self
+            .registry
+            .get_kv_namespace(name)
+            .await?
+            .ok_or_else(|| FerroError::NotFound(format!("kv namespace '{name}'")))?;
+        Self::require_resource_write(
+            caller,
+            meta.project_id.as_deref(),
+            &format!("kv namespace '{name}'"),
+        )?;
+        if let Some(ttl) = opts.default_ttl_secs {
+            if ttl == 0 {
+                return Err(FerroError::InvalidArgument(
+                    "kv namespace default_ttl_secs must be greater than 0 (KV entries must have an expiration time)".into(),
+                ));
+            }
+            meta.default_ttl_secs = ttl;
+        }
+        if let Some(g) = opts.group {
+            meta.group = super::normalize_resource_group(Some(&g))?.map(str::to_owned);
+        }
+        if let Some(desc) = opts.description {
+            let trimmed = desc.trim();
+            meta.description = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+        }
+        if let Some(eph) = opts.default_ephemeral {
+            meta.default_ephemeral = eph;
+        }
+        if let Some(mvb) = opts.max_value_bytes {
+            meta.max_value_bytes = if mvb == 0 { None } else { Some(mvb) };
+        }
+        if let Some(mk) = opts.max_keys {
+            meta.max_keys = if mk == 0 { None } else { Some(mk) };
+        }
+        self.registry.update_kv_namespace(&meta).await?;
+        self.audit(
+            meta.project_id.as_deref(),
+            &caller.actor,
+            "kv.namespace.update",
+            serde_json::json!({
+                "name": meta.name,
+                "default_ttl_secs": meta.default_ttl_secs,
+                "default_ephemeral": meta.default_ephemeral,
+            }),
         );
         Ok(meta)
     }
@@ -109,6 +207,34 @@ impl PlatformService {
         self.kv.get(ns, key).await
     }
 
+    async fn check_kv_quotas(
+        &self,
+        ns: &str,
+        key: &str,
+        val_len: usize,
+        meta: Option<&KvNamespaceMeta>,
+    ) -> Result<()> {
+        if let Some(m) = meta {
+            if let Some(max_bytes) = m.max_value_bytes {
+                if val_len > max_bytes {
+                    return Err(FerroError::InvalidArgument(format!(
+                        "kv value size ({val_len} bytes) exceeds namespace max_value_bytes ({max_bytes})"
+                    )));
+                }
+            }
+            if let Some(max_keys) = m.max_keys {
+                if self.kv.get(ns, key).await?.is_none()
+                    && self.kv.count_keys(ns).await? >= max_keys
+                {
+                    return Err(FerroError::InvalidArgument(format!(
+                        "kv namespace '{ns}' has reached its max_keys quota ({max_keys})"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn kv_put(
         &self,
@@ -120,9 +246,17 @@ impl PlatformService {
         ttl_secs: Option<u64>,
         ephemeral: bool,
     ) -> Result<()> {
-        self.resolve_kv_namespace_for_write(caller, ns).await?;
+        let meta = self.resolve_kv_namespace_for_write(caller, ns).await?;
+        self.check_kv_quotas(ns, key, val.len(), meta.as_ref())
+            .await?;
+        let ns_default_ttl = meta
+            .as_ref()
+            .map(|m| m.default_ttl_secs.max(1))
+            .unwrap_or(DEFAULT_KV_TTL_SECS);
+        let effective_ttl = Some(ttl_secs.unwrap_or(ns_default_ttl));
+        let effective_ephemeral = ephemeral || meta.as_ref().is_some_and(|m| m.default_ephemeral);
         self.kv
-            .put(ns, key, val, metadata, ttl_secs, ephemeral)
+            .put(ns, key, val, metadata, effective_ttl, effective_ephemeral)
             .await
     }
 
@@ -135,9 +269,16 @@ impl PlatformService {
         metadata: Option<String>,
         ttl_secs: Option<u64>,
     ) -> Result<bool> {
-        self.resolve_kv_namespace_for_write(caller, ns).await?;
+        let meta = self.resolve_kv_namespace_for_write(caller, ns).await?;
+        self.check_kv_quotas(ns, key, val.len(), meta.as_ref())
+            .await?;
+        let ns_default_ttl = meta
+            .as_ref()
+            .map(|m| m.default_ttl_secs.max(1))
+            .unwrap_or(DEFAULT_KV_TTL_SECS);
+        let effective_ttl = Some(ttl_secs.unwrap_or(ns_default_ttl));
         self.kv
-            .put_if_absent(ns, key, val, metadata, ttl_secs)
+            .put_if_absent(ns, key, val, metadata, effective_ttl)
             .await
     }
 
@@ -149,8 +290,29 @@ impl PlatformService {
         delta: i64,
         ttl_secs: Option<u64>,
     ) -> Result<i64> {
-        self.resolve_kv_namespace_for_write(caller, ns).await?;
-        self.kv.incr(ns, key, delta, ttl_secs).await
+        let meta = self.resolve_kv_namespace_for_write(caller, ns).await?;
+        self.check_kv_quotas(ns, key, 8, meta.as_ref()).await?;
+        let ns_default_ttl = meta
+            .as_ref()
+            .map(|m| m.default_ttl_secs.max(1))
+            .unwrap_or(DEFAULT_KV_TTL_SECS);
+        let effective_ttl = match ttl_secs {
+            Some(t) => Some(t),
+            None => {
+                if self
+                    .kv
+                    .get(ns, key)
+                    .await?
+                    .and_then(|v| v.expires_at)
+                    .is_some()
+                {
+                    None
+                } else {
+                    Some(ns_default_ttl)
+                }
+            }
+        };
+        self.kv.incr(ns, key, delta, effective_ttl).await
     }
 
     pub async fn kv_delete(&self, caller: &Caller, ns: &str, key: &str) -> Result<()> {

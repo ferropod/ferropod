@@ -44,6 +44,21 @@ pub struct Bindings {
     pub env: HashMap<String, String>,
 }
 
+/// Default KV entry TTL (7 days = 604,800 seconds). KV entries always expire.
+pub const DEFAULT_KV_TTL_SECS: u64 = 7 * 86_400;
+
+pub fn default_kv_ttl_secs() -> u64 {
+    DEFAULT_KV_TTL_SECS
+}
+
+pub fn default_retry_backoff_secs() -> i64 {
+    5
+}
+
+pub fn default_utc_timezone() -> String {
+    "UTC".to_string()
+}
+
 /// Project entity stored in `core.db`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
@@ -51,13 +66,33 @@ pub struct Project {
     pub group: Option<String>,
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
     pub active_deployment_id: Option<String>,
     pub preview_deployment_id: Option<String>,
     pub max_concurrency: i64,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub wasm_max_memory_mb: Option<usize>,
+    #[serde(default)]
+    pub allow_private_outbound: bool,
     pub access_policy_json: Option<String>,
     pub health_check_path: String,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// Options for creating or updating a project/app.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProjectOpts {
+    pub group: Option<String>,
+    pub description: Option<String>,
+    pub health_check_path: Option<String>,
+    pub max_concurrency: Option<i64>,
+    pub timeout_ms: Option<u64>,
+    pub wasm_max_memory_mb: Option<usize>,
+    pub allow_private_outbound: Option<bool>,
 }
 
 /// Immutable deployment version record.
@@ -257,14 +292,36 @@ pub enum BlobAuth<'a> {
     Anonymous,
 }
 
-/// KV namespace ownership metadata stored in `core.db`.
+/// KV namespace ownership and policy metadata stored in `core.db`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KvNamespaceMeta {
     #[serde(default)]
     pub group: Option<String>,
     pub name: String,
     pub project_id: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default = "default_kv_ttl_secs")]
+    pub default_ttl_secs: u64,
+    #[serde(default)]
+    pub default_ephemeral: bool,
+    #[serde(default)]
+    pub max_value_bytes: Option<usize>,
+    #[serde(default)]
+    pub max_keys: Option<usize>,
     pub created_at: i64,
+}
+
+/// Options for creating or updating a KV namespace.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct KvNamespaceOpts {
+    pub group: Option<String>,
+    pub project_id: Option<String>,
+    pub description: Option<String>,
+    pub default_ttl_secs: Option<u64>,
+    pub default_ephemeral: Option<bool>,
+    pub max_value_bytes: Option<usize>,
+    pub max_keys: Option<usize>,
 }
 
 /// User database registry metadata stored in `core.db`.
@@ -275,7 +332,30 @@ pub struct UserDbMeta {
     pub id: String,
     pub name: String,
     pub project_id: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub max_rows: Option<usize>,
+    #[serde(default)]
+    pub max_size_mb: Option<usize>,
+    #[serde(default)]
+    pub foreign_keys: bool,
+    #[serde(default)]
+    pub read_only: bool,
     pub created_at: i64,
+}
+
+/// Options for creating or updating a user database.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UserDbOpts {
+    pub group: Option<String>,
+    pub project_id: Option<String>,
+    pub description: Option<String>,
+    pub init_sql: Option<String>,
+    pub max_rows: Option<usize>,
+    pub max_size_mb: Option<usize>,
+    pub foreign_keys: Option<bool>,
+    pub read_only: Option<bool>,
 }
 
 /// Stored KV entry value.
@@ -361,11 +441,17 @@ pub struct QueueConfig {
     pub name: String,
     pub project_id: Option<String>,
     pub consumer_project_id: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
     pub max_concurrency: i64,
     pub rate_limit_per_sec: Option<i64>,
     pub batch_size: i64,
     pub lease_secs: i64,
     pub max_attempts: i64,
+    #[serde(default = "default_retry_backoff_secs")]
+    pub retry_backoff_secs: i64,
+    #[serde(default)]
+    pub dlq_retention_secs: Option<i64>,
     pub created_at: i64,
 }
 
@@ -385,8 +471,34 @@ pub struct BucketMeta {
     pub group: Option<String>,
     pub name: String,
     pub project_id: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
     pub public_read: bool,
+    #[serde(default)]
+    pub max_object_size_mb: Option<usize>,
+    #[serde(default)]
+    pub quota_mb: Option<usize>,
+    #[serde(default)]
+    pub allowed_content_types: Option<String>,
+    #[serde(default)]
+    pub cache_control: Option<String>,
+    #[serde(default)]
+    pub cors_origins: Option<String>,
     pub created_at: i64,
+}
+
+/// Options for creating or updating a blob bucket.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BucketOpts {
+    pub group: Option<String>,
+    pub project_id: Option<String>,
+    pub description: Option<String>,
+    pub public_read: Option<bool>,
+    pub max_object_size_mb: Option<usize>,
+    pub quota_mb: Option<usize>,
+    pub allowed_content_types: Option<String>,
+    pub cache_control: Option<String>,
+    pub cors_origins: Option<String>,
 }
 
 /// Native Blob object metadata.
@@ -465,6 +577,9 @@ pub struct RequestCtx {
     pub request_id: String,
     pub deployment: Deployment,
     pub cron_job: Option<CronJob>,
+    pub timeout_ms: Option<u64>,
+    pub wasm_max_memory_mb: Option<usize>,
+    pub allow_private_outbound: bool,
 }
 
 impl RequestCtx {
@@ -478,11 +593,26 @@ impl RequestCtx {
             request_id: request_id.into(),
             deployment,
             cron_job: None,
+            timeout_ms: None,
+            wasm_max_memory_mb: None,
+            allow_private_outbound: false,
         }
     }
 
     pub fn with_cron_job(mut self, job: CronJob) -> Self {
+        if job.timeout_ms.is_some() {
+            self.timeout_ms = job.timeout_ms;
+        }
         self.cron_job = Some(job);
+        self
+    }
+
+    pub fn with_project_limits(mut self, project: &Project) -> Self {
+        if self.timeout_ms.is_none() {
+            self.timeout_ms = project.timeout_ms;
+        }
+        self.wasm_max_memory_mb = project.wasm_max_memory_mb;
+        self.allow_private_outbound = project.allow_private_outbound;
         self
     }
 }
@@ -515,13 +645,34 @@ pub struct CronJob {
     pub id: String,
     pub name: String,
     pub project_id: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
     pub schedule: String,
     pub target: String,
     pub enabled: bool,
+    #[serde(default = "default_utc_timezone")]
+    pub timezone: String,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub max_retries: u32,
     pub last_run_at: Option<i64>,
     pub last_status: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// Options for creating or updating a cron job.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CronJobOpts {
+    pub project_id: Option<String>,
+    pub description: Option<String>,
+    pub schedule: Option<String>,
+    pub target: Option<String>,
+    pub enabled: Option<bool>,
+    pub timezone: Option<String>,
+    pub timeout_ms: Option<u64>,
+    pub max_retries: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -537,9 +688,13 @@ pub struct SearchFieldSchema {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchIndexMeta {
+    #[serde(default)]
+    pub group: Option<String>,
     pub id: String,
     pub name: String,
     pub project_id: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
     pub tokenizer: String,
     pub doc_count: usize,
     pub segments: usize,
@@ -548,6 +703,18 @@ pub struct SearchIndexMeta {
     pub created_at: i64,
     pub updated_at: i64,
     pub schema: Vec<SearchFieldSchema>,
+}
+
+/// Options for creating or updating a search index.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SearchIndexOpts {
+    pub group: Option<String>,
+    pub project_id: Option<String>,
+    pub description: Option<String>,
+    pub tokenizer: Option<String>,
+    pub writer_budget_mb: Option<usize>,
+    pub schema: Option<Vec<SearchFieldSchema>>,
+    pub facet_fields: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

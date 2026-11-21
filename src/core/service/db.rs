@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::core::model::{
     Caller, DbFtsHit, DbFtsIndexMeta, DbFtsQueryResult, FerroError, QueryResult, Result, SqlValue,
-    TokenScope, UserDbMeta,
+    TokenScope, UserDbMeta, UserDbOpts,
 };
 use crate::storage::search_store::score_json_document;
 
@@ -41,14 +41,34 @@ impl PlatformService {
         project_id: Option<&str>,
         group: Option<&str>,
     ) -> Result<String> {
-        let group = super::normalize_resource_group(group)?;
+        let meta = self
+            .create_user_db_with_opts(
+                caller,
+                name,
+                UserDbOpts {
+                    group: group.map(str::to_owned),
+                    project_id: project_id.map(str::to_owned),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        Ok(meta.id)
+    }
+
+    pub async fn create_user_db_with_opts(
+        &self,
+        caller: &Caller,
+        name: &str,
+        mut opts: UserDbOpts,
+    ) -> Result<UserDbMeta> {
+        opts.group = super::normalize_resource_group(opts.group.as_deref())?.map(str::to_owned);
         let name = name.trim();
         if name.is_empty() {
             return Err(FerroError::InvalidArgument(
                 "database name cannot be empty".into(),
             ));
         }
-        let resolved_pid = match (&caller.scope, project_id) {
+        let resolved_pid = match (&caller.scope, opts.project_id.as_deref()) {
             (TokenScope::Admin, pid) => self.resolve_optional_project_id(pid).await?,
             (TokenScope::Project(_), Some(req_pid)) => {
                 let proj = self.get_project_internal(req_pid).await?;
@@ -62,22 +82,89 @@ impl PlatformService {
                 ));
             }
         };
+        opts.project_id = resolved_pid.clone();
+        let init_sql = opts
+            .init_sql
+            .take()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
 
         let id = format!("db_{}", Uuid::new_v4().simple());
         self.registry
-            .register_user_db(&id, name, resolved_pid.as_deref(), group)
+            .register_user_db_with_opts(&id, name, opts)
             .await?;
         if let Err(e) = self.db.create_db(&id).await {
             let _ = self.registry.delete_user_db(&id).await;
             return Err(e);
         }
+        if let Some(sql) = init_sql {
+            let stmts: Vec<String> = sql
+                .split(';')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect();
+            for stmt in stmts {
+                if let Err(e) = self.db.execute_batch(&id, vec![(stmt, Vec::new())]).await {
+                    let _ = self.db.delete_db(&id).await;
+                    let _ = self.registry.delete_user_db(&id).await;
+                    return Err(e);
+                }
+            }
+        }
+        let meta = self.resolve_user_db(&id).await?;
         self.audit(
             resolved_pid.as_deref(),
             &caller.actor,
             "db.create",
             serde_json::json!({ "id": id, "name": name }),
         );
-        Ok(id)
+        Ok(meta)
+    }
+
+    pub async fn update_user_db(
+        &self,
+        caller: &Caller,
+        id_or_name: &str,
+        opts: UserDbOpts,
+    ) -> Result<UserDbMeta> {
+        let mut meta = self.resolve_user_db(id_or_name).await?;
+        Self::require_resource_write(
+            caller,
+            meta.project_id.as_deref(),
+            &format!("database '{}'", meta.name),
+        )?;
+        if let Some(g) = opts.group {
+            meta.group = super::normalize_resource_group(Some(&g))?.map(str::to_owned);
+        }
+        if let Some(desc) = opts.description {
+            let trimmed = desc.trim();
+            meta.description = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+        }
+        if let Some(mr) = opts.max_rows {
+            meta.max_rows = if mr == 0 { None } else { Some(mr) };
+        }
+        if let Some(ms) = opts.max_size_mb {
+            meta.max_size_mb = if ms == 0 { None } else { Some(ms) };
+        }
+        if let Some(fk) = opts.foreign_keys {
+            meta.foreign_keys = fk;
+        }
+        if let Some(ro) = opts.read_only {
+            meta.read_only = ro;
+        }
+        self.registry.update_user_db(&meta).await?;
+        self.audit(
+            meta.project_id.as_deref(),
+            &caller.actor,
+            "db.update",
+            serde_json::json!({ "id": meta.id, "name": meta.name, "read_only": meta.read_only }),
+        );
+        Ok(meta)
     }
 
     pub async fn list_user_dbs(&self, caller: &Caller) -> Result<Vec<UserDbMeta>> {
@@ -132,7 +219,13 @@ impl PlatformService {
             meta.project_id.as_deref(),
             &format!("database '{}'", meta.name),
         )?;
-        self.db.query(&meta.id, sql, params).await
+        let mut res = self.db.query(&meta.id, sql, params).await?;
+        if let Some(max_r) = meta.max_rows.filter(|r| *r > 0) {
+            if res.rows.len() > max_r {
+                res.rows.truncate(max_r);
+            }
+        }
+        Ok(res)
     }
 
     pub async fn execute_user_db_batch(
@@ -147,6 +240,66 @@ impl PlatformService {
             meta.project_id.as_deref(),
             &format!("database '{}'", meta.name),
         )?;
+        if meta.read_only {
+            return Err(FerroError::Forbidden(format!(
+                "database '{}' is configured as read-only",
+                meta.name
+            )));
+        }
+        if let Some(max_mb) = meta.max_size_mb.filter(|m| *m > 0) {
+            let db_path = self.config.user_dbs_dir().join(format!("{}.db", meta.id));
+            let wal_path = self
+                .config
+                .user_dbs_dir()
+                .join(format!("{}.db-wal", meta.id));
+            let main_len = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
+            let wal_len = std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0);
+            if main_len.saturating_add(wal_len) > (max_mb as u64).saturating_mul(1024 * 1024) {
+                return Err(FerroError::InvalidArgument(format!(
+                    "database '{}' exceeded max_size_mb quota ({max_mb} MiB)",
+                    meta.name
+                )));
+            }
+        }
+        if let Some(max_r) = meta.max_rows.filter(|r| *r > 0) {
+            let has_insert = stmts
+                .iter()
+                .any(|(s, _)| s.trim_start().to_ascii_uppercase().starts_with("INSERT"));
+            if has_insert {
+                let tables_qr = self
+                    .db
+                    .query(&meta.id, "SELECT name, type FROM sqlite_master", vec![])
+                    .await?;
+                let mut total_rows = 0usize;
+                for row in &tables_qr.rows {
+                    let tbl = row.first().and_then(|v| v.as_str()).unwrap_or("");
+                    let typ = row.get(1).and_then(|v| v.as_str()).unwrap_or("");
+                    if typ.eq_ignore_ascii_case("table")
+                        && !tbl.starts_with("sqlite_")
+                        && !tbl.starts_with("__turso_")
+                        && !tbl.starts_with("_turso_")
+                        && valid_sql_ident(tbl)
+                    {
+                        let cnt_sql = format!("SELECT COUNT(*) FROM \"{tbl}\"");
+                        if let Ok(cqr) = self.db.query(&meta.id, &cnt_sql, vec![]).await {
+                            let n = cqr
+                                .rows
+                                .first()
+                                .and_then(|r| r.first())
+                                .and_then(|v| v.as_i64())
+                                .unwrap_or(0);
+                            total_rows = total_rows.saturating_add(n.max(0) as usize);
+                        }
+                    }
+                }
+                if total_rows >= max_r {
+                    return Err(FerroError::InvalidArgument(format!(
+                        "database '{}' exceeded max_rows quota ({max_r})",
+                        meta.name
+                    )));
+                }
+            }
+        }
         self.db.execute_batch(&meta.id, stmts).await
     }
 

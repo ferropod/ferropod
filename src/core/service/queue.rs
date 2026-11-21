@@ -116,7 +116,58 @@ impl PlatformService {
         lease_secs: Option<i64>,
         max_attempts: Option<i64>,
     ) -> Result<QueueConfig> {
+        self.queue_update_full(
+            caller,
+            queue,
+            None,
+            None,
+            None,
+            max_concurrency,
+            rate_limit_per_sec,
+            batch_size,
+            lease_secs,
+            max_attempts,
+            None,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn queue_update_full(
+        &self,
+        caller: &Caller,
+        queue: &str,
+        group: Option<String>,
+        description: Option<String>,
+        consumer_project_id: Option<Option<String>>,
+        max_concurrency: Option<i64>,
+        rate_limit_per_sec: Option<Option<i64>>,
+        batch_size: Option<i64>,
+        lease_secs: Option<i64>,
+        max_attempts: Option<i64>,
+        retry_backoff_secs: Option<i64>,
+        dlq_retention_secs: Option<Option<i64>>,
+    ) -> Result<QueueConfig> {
         let mut cfg = self.require_queue_write(caller, queue).await?;
+        if let Some(g) = group {
+            cfg.group = super::normalize_resource_group(Some(&g))?.map(str::to_owned);
+        }
+        if let Some(desc) = description {
+            let trimmed = desc.trim();
+            cfg.description = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+        }
+        if let Some(c_opt) = consumer_project_id {
+            let resolved_c = self.resolve_optional_project_id(c_opt.as_deref()).await?;
+            if let Some(ref c_pid) = resolved_c {
+                Self::require_project_write(caller, c_pid)?;
+            }
+            cfg.consumer_project_id = resolved_c;
+        }
         if let Some(v) = max_concurrency {
             cfg.max_concurrency = v.max(1);
         }
@@ -131,6 +182,12 @@ impl PlatformService {
         }
         if let Some(v) = max_attempts {
             cfg.max_attempts = v.max(1);
+        }
+        if let Some(v) = retry_backoff_secs {
+            cfg.retry_backoff_secs = v.max(1);
+        }
+        if let Some(v) = dlq_retention_secs {
+            cfg.dlq_retention_secs = v.filter(|n| *n > 0);
         }
         self.queue.update_queue(cfg.clone()).await?;
         self.audit(
@@ -225,15 +282,20 @@ impl PlatformService {
                 continue;
             }
 
-            let limit = cfg.batch_size.clamp(1, 100) as usize;
+            let mut limit = cfg.batch_size.clamp(1, 100) as usize;
+            if let Some(rate) = cfg.rate_limit_per_sec.filter(|r| *r > 0) {
+                limit = limit.min(rate as usize).max(1);
+            }
             let lease_secs = cfg.lease_secs.max(5);
+            let base_backoff = cfg.retry_backoff_secs.max(1) as u64;
             let batch = self.queue.claim_batch(&cfg.name, limit, lease_secs).await?;
             if batch.is_empty() {
                 continue;
             }
 
             let request_id = format!("queue_{}", Uuid::new_v4().simple());
-            let ctx = RequestCtx::new(proj.id.clone(), request_id.clone(), dep);
+            let ctx = RequestCtx::new(proj.id.clone(), request_id.clone(), dep)
+                .with_project_limits(&proj);
             match self.runtime.handle_queue(ctx, batch.clone()).await {
                 Ok(outcomes) => {
                     let mut ack_ids = Vec::new();
@@ -248,7 +310,11 @@ impl PlatformService {
                             }
                             None => {
                                 self.queue
-                                    .nack(job.id, 5, "worker returned fewer outcomes than jobs")
+                                    .nack(
+                                        job.id,
+                                        base_backoff,
+                                        "worker returned fewer outcomes than jobs",
+                                    )
                                     .await?;
                             }
                         }

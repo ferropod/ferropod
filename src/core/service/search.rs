@@ -1,7 +1,10 @@
+use chrono::Utc;
+
 use crate::core::model::{
-    Caller, FerroError, Result, SearchFieldSchema, SearchIndexMeta, SearchQueryInput,
-    SearchQueryResult, TokenScope,
+    Caller, FerroError, Result, SearchFieldSchema, SearchIndexMeta, SearchIndexOpts,
+    SearchQueryInput, SearchQueryResult, TokenScope,
 };
+use crate::storage::search_store::TursoSearchStore;
 
 use super::PlatformService;
 
@@ -32,13 +35,33 @@ impl PlatformService {
         tokenizer: Option<&str>,
         schema: Option<Vec<SearchFieldSchema>>,
     ) -> Result<SearchIndexMeta> {
+        self.create_search_index_with_opts(
+            caller,
+            name,
+            SearchIndexOpts {
+                project_id: project_id.map(str::to_owned),
+                tokenizer: tokenizer.map(str::to_owned),
+                schema,
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    pub async fn create_search_index_with_opts(
+        &self,
+        caller: &Caller,
+        name: &str,
+        mut opts: SearchIndexOpts,
+    ) -> Result<SearchIndexMeta> {
+        opts.group = super::normalize_resource_group(opts.group.as_deref())?.map(str::to_owned);
         let name = name.trim();
         if name.is_empty() {
             return Err(FerroError::InvalidArgument(
                 "search index name cannot be empty".into(),
             ));
         }
-        let resolved_pid = match (&caller.scope, project_id) {
+        let resolved_pid = match (&caller.scope, opts.project_id.as_deref()) {
             (TokenScope::Admin, pid) => self.resolve_optional_project_id(pid).await?,
             (TokenScope::Project(_), Some(req_pid)) => {
                 let proj = self.get_project_internal(req_pid).await?;
@@ -52,19 +75,66 @@ impl PlatformService {
                 ));
             }
         };
+        opts.project_id = resolved_pid.clone();
 
-        let tok = tokenizer
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or("jieba+ngram");
-        let meta = self
-            .search
-            .create_index(name, resolved_pid.as_deref(), tok, schema)
-            .await?;
+        let meta = self.search.create_index_with_opts(name, opts).await?;
         self.audit(
             resolved_pid.as_deref(),
             &caller.actor,
             "search.index.create",
+            serde_json::json!({ "id": meta.id, "name": meta.name, "tokenizer": meta.tokenizer }),
+        );
+        Ok(meta)
+    }
+
+    pub async fn update_search_index(
+        &self,
+        caller: &Caller,
+        id_or_name: &str,
+        opts: SearchIndexOpts,
+    ) -> Result<SearchIndexMeta> {
+        let mut meta = self.resolve_search_index(id_or_name).await?;
+        Self::require_resource_write(
+            caller,
+            meta.project_id.as_deref(),
+            &format!("search index '{}'", meta.name),
+        )?;
+        if let Some(g) = opts.group {
+            meta.group = super::normalize_resource_group(Some(&g))?.map(str::to_owned);
+        }
+        if let Some(desc) = opts.description {
+            let trimmed = desc.trim();
+            meta.description = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+        }
+        if let Some(tok) = opts.tokenizer {
+            let trimmed = tok.trim();
+            if !trimmed.is_empty() {
+                meta.tokenizer = trimmed.to_string();
+            }
+        }
+        if let Some(wb) = opts.writer_budget_mb {
+            if wb > 0 {
+                meta.writer_budget_mb = wb.clamp(1, 256);
+            }
+        }
+        if let Some(schema) = opts.schema {
+            if !schema.is_empty() {
+                meta.schema = schema;
+            }
+        } else if let Some(facets) = opts.facet_fields {
+            meta.schema =
+                TursoSearchStore::build_schema_with_facets(&meta.tokenizer, Some(&facets));
+        }
+        meta.updated_at = Utc::now().timestamp_millis();
+        self.search.update_index(&meta).await?;
+        self.audit(
+            meta.project_id.as_deref(),
+            &caller.actor,
+            "search.index.update",
             serde_json::json!({ "id": meta.id, "name": meta.name, "tokenizer": meta.tokenizer }),
         );
         Ok(meta)

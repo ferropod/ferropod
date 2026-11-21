@@ -12,10 +12,10 @@ use crate::core::model::{
     EnqueueOpts, FerroError, Job, JobStatus, QueueConfig, QueueStats, Result,
 };
 use crate::core::traits::QueueStore;
-use crate::storage::core_store::{opt_i64, opt_text};
+use crate::storage::core_store::{opt_i64, opt_text, opt_text_param};
 use crate::storage::tx::{
-    checkpoint_db, connect_db, copy_db_with_sidecars, ensure_resource_group_column, map_turso_err,
-    open_turso_db, with_retry,
+    checkpoint_db, connect_db, copy_db_with_sidecars, ensure_column, ensure_resource_group_column,
+    map_turso_err, open_turso_db, with_retry,
 };
 
 const QUEUE_SCHEMA: &str = r#"
@@ -29,7 +29,10 @@ CREATE TABLE IF NOT EXISTS queues (
     lease_secs INTEGER NOT NULL DEFAULT 60,
     max_attempts INTEGER NOT NULL DEFAULT 5,
     created_at INTEGER NOT NULL,
-    resource_group TEXT
+    resource_group TEXT,
+    description TEXT,
+    retry_backoff_secs INTEGER NOT NULL DEFAULT 5,
+    dlq_retention_secs INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS jobs (
@@ -57,7 +60,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_dedup
 
 const SELECT_QUEUE: &str =
     "SELECT name, project_id, consumer_project_id, max_concurrency, rate_limit_per_sec, \
-     batch_size, lease_secs, max_attempts, created_at, resource_group \
+     batch_size, lease_secs, max_attempts, created_at, resource_group, description, retry_backoff_secs, dlq_retention_secs \
      FROM queues";
 
 fn row_to_queue(row: &turso::Row) -> Result<QueueConfig> {
@@ -72,6 +75,9 @@ fn row_to_queue(row: &turso::Row) -> Result<QueueConfig> {
         max_attempts: row.get(7).map_err(map_turso_err)?,
         created_at: row.get(8).map_err(map_turso_err)?,
         group: opt_text(row, 9)?,
+        description: opt_text(row, 10)?,
+        retry_backoff_secs: opt_i64(row, 11)?.unwrap_or(5).max(1),
+        dlq_retention_secs: opt_i64(row, 12)?,
     })
 }
 
@@ -103,6 +109,13 @@ impl TursoQueueStore {
             .map_err(map_turso_err)?;
 
         ensure_resource_group_column(&conn, "queues").await?;
+        for (col, def) in [
+            ("description", "TEXT"),
+            ("retry_backoff_secs", "INTEGER NOT NULL DEFAULT 5"),
+            ("dlq_retention_secs", "INTEGER"),
+        ] {
+            ensure_column(&conn, "queues", col, def).await?;
+        }
 
         let (ingest_tx, ingest_rx) = mpsc::channel::<IngestItem>(4_096);
         let notify = Arc::new(Notify::new());
@@ -235,8 +248,8 @@ impl QueueStore for TursoQueueStore {
             async move {
                 let conn = db.connect()?;
                 conn.execute(
-                    "INSERT INTO queues (name, project_id, consumer_project_id, max_concurrency, rate_limit_per_sec, batch_size, lease_secs, max_attempts, created_at, resource_group)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                    "INSERT INTO queues (name, project_id, consumer_project_id, max_concurrency, rate_limit_per_sec, batch_size, lease_secs, max_attempts, created_at, resource_group, description, retry_backoff_secs, dlq_retention_secs)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
 ",
                     vec![
                         TursoValue::Text(cfg.name),
@@ -248,7 +261,12 @@ impl QueueStore for TursoQueueStore {
                         TursoValue::Integer(cfg.lease_secs),
                         TursoValue::Integer(cfg.max_attempts),
                         TursoValue::Integer(cfg.created_at),
-                        cfg.group.map(TursoValue::Text).unwrap_or(TursoValue::Null),
+                        opt_text_param(cfg.group),
+                        opt_text_param(cfg.description),
+                        TursoValue::Integer(cfg.retry_backoff_secs.max(1)),
+                        cfg.dlq_retention_secs
+                            .map(TursoValue::Integer)
+                            .unwrap_or(TursoValue::Null),
                     ],
                 )
                 .await
@@ -266,8 +284,10 @@ impl QueueStore for TursoQueueStore {
                 let conn = db.connect()?;
                 conn.execute(
                     "UPDATE queues SET max_concurrency = ?1, rate_limit_per_sec = ?2,
-                     batch_size = ?3, lease_secs = ?4, max_attempts = ?5
-                     WHERE name = ?6 AND project_id IS ?7",
+                     batch_size = ?3, lease_secs = ?4, max_attempts = ?5,
+                     resource_group = ?6, description = ?7, consumer_project_id = ?8,
+                     retry_backoff_secs = ?9, dlq_retention_secs = ?10
+                     WHERE name = ?11 AND project_id IS ?12",
                     vec![
                         TursoValue::Integer(cfg.max_concurrency),
                         cfg.rate_limit_per_sec
@@ -276,6 +296,13 @@ impl QueueStore for TursoQueueStore {
                         TursoValue::Integer(cfg.batch_size),
                         TursoValue::Integer(cfg.lease_secs),
                         TursoValue::Integer(cfg.max_attempts),
+                        opt_text_param(cfg.group),
+                        opt_text_param(cfg.description),
+                        opt_text_param(cfg.consumer_project_id),
+                        TursoValue::Integer(cfg.retry_backoff_secs.max(1)),
+                        cfg.dlq_retention_secs
+                            .map(TursoValue::Integer)
+                            .unwrap_or(TursoValue::Null),
                         TursoValue::Text(cfg.name),
                         cfg.project_id
                             .map(TursoValue::Text)

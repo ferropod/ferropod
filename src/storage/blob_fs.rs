@@ -11,7 +11,9 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
-use crate::core::model::{BucketMeta, ByteRange, ByteStream, FerroError, ObjectMeta, Result};
+use crate::core::model::{
+    BucketMeta, BucketOpts, ByteRange, ByteStream, FerroError, ObjectMeta, Result,
+};
 use crate::core::traits::{BlobMetaStore, ObjectStore};
 
 const CHUNK_SIZE: usize = 64 * 1024;
@@ -87,17 +89,14 @@ impl FsBlobStore {
 
 #[async_trait]
 impl ObjectStore for FsBlobStore {
-    async fn create_bucket(
-        &self,
-        name: &str,
-        project_id: Option<&str>,
-        public_read: bool,
-        group: Option<&str>,
-    ) -> Result<BucketMeta> {
+    async fn create_bucket_with_opts(&self, name: &str, opts: BucketOpts) -> Result<BucketMeta> {
         Self::validate_name(name)?;
-        self.meta
-            .create_bucket(name, project_id, public_read, group)
-            .await
+        self.meta.create_bucket_with_opts(name, opts).await
+    }
+
+    async fn update_bucket(&self, meta: &BucketMeta) -> Result<()> {
+        Self::validate_name(&meta.name)?;
+        self.meta.update_bucket(meta).await
     }
 
     async fn get_bucket(&self, name: &str) -> Result<Option<BucketMeta>> {
@@ -120,6 +119,10 @@ impl ObjectStore for FsBlobStore {
             )));
         }
         self.meta.delete_bucket(name).await
+    }
+
+    async fn total_bucket_bytes(&self, bucket: &str) -> Result<u64> {
+        self.meta.total_bucket_bytes(bucket).await
     }
 
     async fn put_stream(

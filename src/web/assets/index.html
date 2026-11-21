@@ -131,13 +131,28 @@
 
       <div class="sidebar-footer">
         <div class="session-box">
-          <div class="session-actor" id="session-actor">-</div>
-          <div class="row gap-xs">
-            <span class="badge badge-neutral" id="session-scope">-</span>
-            <a href="#/updates" class="badge badge-neutral mono" id="session-version" title="System Updates">v-</a>
+          <div class="session-avatar" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+              <circle cx="12" cy="7" r="4"/>
+            </svg>
+          </div>
+          <div class="session-meta">
+            <div class="session-actor" id="session-actor">-</div>
+            <div class="session-badges">
+              <span class="badge badge-accent session-pill" id="session-scope">-</span>
+              <a href="#/updates" class="badge session-ver-pill mono" id="session-version" title="System Updates">v-</a>
+            </div>
           </div>
         </div>
-        <button type="button" class="btn btn-ghost btn-sm btn-block" id="disconnect-btn" data-i18n="auth.disconnect">Disconnect</button>
+        <button type="button" class="btn btn-disconnect btn-sm btn-block" id="disconnect-btn">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+            <polyline points="16 17 21 12 16 7"/>
+            <line x1="21" y1="12" x2="9" y2="12"/>
+          </svg>
+          <span data-i18n="auth.disconnect">Disconnect</span>
+        </button>
       </div>
     </aside>
 

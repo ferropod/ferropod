@@ -266,11 +266,14 @@ async fn queue_microbatch_claim_ack_nack_dlq_and_lease_reap() {
                 name: "jobs".into(),
                 project_id: None,
                 consumer_project_id: None,
+                description: None,
                 max_concurrency: 4,
                 rate_limit_per_sec: None,
                 batch_size: 20,
                 lease_secs: 30,
                 max_attempts: 2,
+                retry_backoff_secs: 5,
+                dlq_retention_secs: None,
                 created_at: Utc::now().timestamp(),
             },
         )
@@ -735,11 +738,14 @@ async fn multi_project_rbac_and_isolation() {
                 name: "q_a".into(),
                 project_id: Some(proj_a.id.clone()),
                 consumer_project_id: None,
+                description: None,
                 max_concurrency: 2,
                 rate_limit_per_sec: None,
                 batch_size: 10,
                 lease_secs: 30,
                 max_attempts: 3,
+                retry_backoff_secs: 5,
+                dlq_retention_secs: None,
                 created_at: Utc::now().timestamp(),
             },
         )
@@ -753,11 +759,14 @@ async fn multi_project_rbac_and_isolation() {
                 name: "q_b".into(),
                 project_id: Some(proj_b.id.clone()),
                 consumer_project_id: Some(proj_a.id.clone()),
+                description: None,
                 max_concurrency: 2,
                 rate_limit_per_sec: None,
                 batch_size: 10,
                 lease_secs: 30,
                 max_attempts: 3,
+                retry_backoff_secs: 5,
+                dlq_retention_secs: None,
                 created_at: Utc::now().timestamp(),
             },
         )
@@ -3084,11 +3093,14 @@ async fn security_hardening_regression_checks() {
                 name: "sec-q".into(),
                 project_id: None,
                 consumer_project_id: None,
+                description: None,
                 max_concurrency: 1,
                 rate_limit_per_sec: None,
                 batch_size: 1,
                 lease_secs: 30,
                 max_attempts: 3,
+                retry_backoff_secs: 5,
+                dlq_retention_secs: None,
                 created_at: Utc::now().timestamp(),
             },
         )
@@ -3178,4 +3190,383 @@ async fn security_hardening_regression_checks() {
         ok_redir.headers().get(header::LOCATION).unwrap(),
         "https://example.com:8443/login?a=1"
     );
+}
+
+#[tokio::test]
+async fn extended_creation_options_mandatory_kv_ttl_and_patch_endpoints() {
+    let h = setup_harness().await;
+    let app = build_router(h.svc.clone());
+    let tok = Some(h.admin_token.as_str());
+    let parse_json = |b: Bytes| -> serde_json::Value { serde_json::from_slice(&b).unwrap() };
+
+    // 1. App / Runtime creation with extended options + PATCH
+    let (st, proj_bytes) = json_req(
+        &app,
+        Method::POST,
+        "/_api/v1/runtimes",
+        tok,
+        Some(serde_json::json!({
+            "name": "pro-app",
+            "group": "core-services",
+            "description": "Production API worker",
+            "health_check_path": "/readyz",
+            "max_concurrency": 128,
+            "timeout_ms": 15000,
+            "wasm_max_memory_mb": 48,
+            "allow_private_outbound": true
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let proj_json = parse_json(proj_bytes);
+    let proj_id = proj_json["id"].as_str().unwrap().to_string();
+    assert_eq!(proj_json["max_concurrency"], 128);
+    assert_eq!(proj_json["timeout_ms"], 15000);
+    assert_eq!(proj_json["wasm_max_memory_mb"], 48);
+    assert_eq!(proj_json["allow_private_outbound"], true);
+    assert_eq!(proj_json["description"], "Production API worker");
+
+    let (st, proj_upd_bytes) = json_req(
+        &app,
+        Method::PATCH,
+        &format!("/_api/v1/runtimes/{proj_id}"),
+        tok,
+        Some(serde_json::json!({
+            "max_concurrency": 256,
+            "timeout_ms": 5000,
+            "description": "Updated worker"
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let proj_upd = parse_json(proj_upd_bytes);
+    assert_eq!(proj_upd["max_concurrency"], 256);
+    assert_eq!(proj_upd["timeout_ms"], 5000);
+    assert_eq!(proj_upd["description"], "Updated worker");
+
+    // 2. KV namespace: mandatory expiration (default_ttl_secs >= 1), quotas, and PATCH
+    let (st_zero_ns, _) = json_req(
+        &app,
+        Method::POST,
+        "/_api/v1/kv",
+        tok,
+        Some(serde_json::json!({
+            "name": "bad_ns",
+            "default_ttl_secs": 0
+        })),
+    )
+    .await;
+    assert_eq!(st_zero_ns, StatusCode::BAD_REQUEST);
+
+    let (st_kv, kv_ns_bytes) = json_req(
+        &app,
+        Method::POST,
+        "/_api/v1/kv",
+        tok,
+        Some(serde_json::json!({
+            "name": "sessions_ns",
+            "group": "cache",
+            "project_id": proj_id,
+            "description": "Session cache with mandatory TTL",
+            "default_ttl_secs": 3600,
+            "default_ephemeral": false,
+            "max_value_bytes": 16,
+            "max_keys": 2
+        })),
+    )
+    .await;
+    assert_eq!(st_kv, StatusCode::CREATED);
+    let kv_ns = parse_json(kv_ns_bytes);
+    assert_eq!(kv_ns["default_ttl_secs"], 3600);
+    assert_eq!(kv_ns["max_value_bytes"], 16);
+    assert_eq!(kv_ns["max_keys"], 2);
+
+    // Reject ttl_secs = 0 on PUT
+    let (st_put_zero, _) = json_req(
+        &app,
+        Method::PUT,
+        "/_api/v1/kv/sessions_ns/k1",
+        tok,
+        Some(serde_json::json!({
+            "value": "ok",
+            "ttl_secs": 0
+        })),
+    )
+    .await;
+    assert_eq!(st_put_zero, StatusCode::BAD_REQUEST);
+
+    // Omitting ttl_secs automatically applies namespace default_ttl_secs (never None!)
+    let (st_put1, _) = json_req(
+        &app,
+        Method::PUT,
+        "/_api/v1/kv/sessions_ns/k1",
+        tok,
+        Some(serde_json::json!({
+            "value": "val1"
+        })),
+    )
+    .await;
+    assert_eq!(st_put1, StatusCode::NO_CONTENT);
+
+    let (st_get1, got1_bytes) =
+        json_req(&app, Method::GET, "/_api/v1/kv/sessions_ns/k1", tok, None).await;
+    assert_eq!(st_get1, StatusCode::OK);
+    let got1 = parse_json(got1_bytes);
+    assert!(
+        got1["expires_at"].as_i64().unwrap() > Utc::now().timestamp(),
+        "KV entry must always have a positive expires_at timestamp"
+    );
+
+    // Value exceeding max_value_bytes (16) is rejected
+    let (st_too_big, _) = json_req(
+        &app,
+        Method::PUT,
+        "/_api/v1/kv/sessions_ns/k_big",
+        tok,
+        Some(serde_json::json!({
+            "value": "01234567890123456789"
+        })),
+    )
+    .await;
+    assert_eq!(st_too_big, StatusCode::BAD_REQUEST);
+
+    // Insert 2nd key (within max_keys = 2), then 3rd key fails max_keys quota
+    let (st_put2, _) = json_req(
+        &app,
+        Method::PUT,
+        "/_api/v1/kv/sessions_ns/k2",
+        tok,
+        Some(serde_json::json!({ "value": "val2" })),
+    )
+    .await;
+    assert_eq!(st_put2, StatusCode::NO_CONTENT);
+
+    let (st_put3, _) = json_req(
+        &app,
+        Method::PUT,
+        "/_api/v1/kv/sessions_ns/k3",
+        tok,
+        Some(serde_json::json!({ "value": "val3" })),
+    )
+    .await;
+    assert_eq!(st_put3, StatusCode::BAD_REQUEST);
+
+    // PATCH KV namespace raises max_keys and updates default_ttl_secs
+    let (st_kv_patch, kv_patched_bytes) = json_req(
+        &app,
+        Method::PATCH,
+        "/_api/v1/kv/sessions_ns",
+        tok,
+        Some(serde_json::json!({
+            "default_ttl_secs": 7200,
+            "max_keys": 10
+        })),
+    )
+    .await;
+    assert_eq!(st_kv_patch, StatusCode::OK);
+    let kv_patched = parse_json(kv_patched_bytes);
+    assert_eq!(kv_patched["default_ttl_secs"], 7200);
+    assert_eq!(kv_patched["max_keys"], 10);
+
+    // 3. Database creation with init_sql, max_rows, read_only, and PATCH
+    let (st_db, db_meta_bytes) = json_req(
+        &app,
+        Method::POST,
+        "/_api/v1/dbs",
+        tok,
+        Some(serde_json::json!({
+            "name": "configured_db",
+            "group": "storage",
+            "description": "Pre-initialized DB",
+            "init_sql": "CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL); INSERT INTO items (name) VALUES ('seed');",
+            "max_rows": 2,
+            "foreign_keys": true,
+            "read_only": false
+        })),
+    )
+    .await;
+    assert_eq!(st_db, StatusCode::CREATED);
+    let db_meta = parse_json(db_meta_bytes);
+    let db_id = db_meta["id"].as_str().unwrap().to_string();
+    assert_eq!(db_meta["max_rows"], 2);
+
+    // Insert 2nd row succeeds; 3rd row exceeds max_rows (2)
+    let (st_ins2, ins2_bytes) = json_req(
+        &app,
+        Method::POST,
+        &format!("/_api/v1/dbs/{db_id}/execute"),
+        tok,
+        Some(serde_json::json!({
+            "statements": [{ "sql": "INSERT INTO items (name) VALUES ('second')", "params": [] }]
+        })),
+    )
+    .await;
+    assert_eq!(
+        st_ins2,
+        StatusCode::OK,
+        "ins2 body: {}",
+        String::from_utf8_lossy(&ins2_bytes)
+    );
+
+    let (st_ins3, _) = json_req(
+        &app,
+        Method::POST,
+        &format!("/_api/v1/dbs/{db_id}/execute"),
+        tok,
+        Some(serde_json::json!({
+            "statements": [{ "sql": "INSERT INTO items (name) VALUES ('third')", "params": [] }]
+        })),
+    )
+    .await;
+    assert_eq!(st_ins3, StatusCode::BAD_REQUEST);
+
+    // PATCH DB to read_only = true and max_rows = 100
+    let (st_db_patch, db_patched_bytes) = json_req(
+        &app,
+        Method::PATCH,
+        &format!("/_api/v1/dbs/{db_id}"),
+        tok,
+        Some(serde_json::json!({
+            "max_rows": 100,
+            "read_only": true
+        })),
+    )
+    .await;
+    assert_eq!(st_db_patch, StatusCode::OK);
+    let db_patched = parse_json(db_patched_bytes);
+    assert_eq!(db_patched["read_only"], true);
+
+    let (st_ro_fail, _) = json_req(
+        &app,
+        Method::POST,
+        &format!("/_api/v1/dbs/{db_id}/execute"),
+        tok,
+        Some(serde_json::json!({
+            "statements": [{ "sql": "INSERT INTO items (name) VALUES ('blocked')", "params": [] }]
+        })),
+    )
+    .await;
+    assert_eq!(st_ro_fail, StatusCode::FORBIDDEN);
+
+    // 4. Bucket creation with allowed_content_types, cache_control, cors_origins
+    let (st_bkt, bkt_meta_bytes) = json_req(
+        &app,
+        Method::POST,
+        "/_api/v1/buckets",
+        tok,
+        Some(serde_json::json!({
+            "name": "images-only",
+            "public_read": true,
+            "allowed_content_types": "image/*,text/plain",
+            "cache_control": "public, max-age=3600",
+            "cors_origins": "*"
+        })),
+    )
+    .await;
+    assert_eq!(st_bkt, StatusCode::CREATED);
+    let bkt_meta = parse_json(bkt_meta_bytes);
+    assert_eq!(bkt_meta["cache_control"], "public, max-age=3600");
+
+    // Disallowed MIME type is rejected on PUT /_blob/images-only/app.json
+    let bad_mime_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/_blob/images-only/app.json")
+                .header(header::AUTHORIZATION, format!("Bearer {}", h.admin_token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bad_mime_resp.status(), StatusCode::BAD_REQUEST);
+
+    // Allowed MIME type succeeds and returns custom Cache-Control & CORS headers on GET
+    let ok_mime_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/_blob/images-only/readme.txt")
+                .header(header::AUTHORIZATION, format!("Bearer {}", h.admin_token))
+                .header(header::CONTENT_TYPE, "text/plain")
+                .body(Body::from("hello"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ok_mime_resp.status(), StatusCode::CREATED);
+
+    let get_blob_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/_blob/images-only/readme.txt")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get_blob_resp.status(), StatusCode::OK);
+    assert_eq!(
+        get_blob_resp.headers().get(header::CACHE_CONTROL).unwrap(),
+        "public, max-age=3600"
+    );
+    assert_eq!(
+        get_blob_resp
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .unwrap(),
+        "*"
+    );
+
+    // 5. Search index creation with group, writer_budget_mb, facet_fields + PATCH
+    let (st_si, si_meta_bytes) = json_req(
+        &app,
+        Method::POST,
+        "/_api/v1/search",
+        tok,
+        Some(serde_json::json!({
+            "name": "catalog_idx",
+            "group": "search-group",
+            "description": "Product catalog search",
+            "tokenizer": "unicode61",
+            "writer_budget_mb": 24,
+            "facet_fields": ["brand", "region"]
+        })),
+    )
+    .await;
+    assert_eq!(st_si, StatusCode::CREATED);
+    let si_meta = parse_json(si_meta_bytes);
+    let si_id = si_meta["id"].as_str().unwrap().to_string();
+    assert_eq!(si_meta["group"], "search-group");
+    assert_eq!(si_meta["writer_budget_mb"], 24);
+
+    let (st_groups, groups_bytes) =
+        json_req(&app, Method::GET, "/_api/v1/resource-groups", tok, None).await;
+    assert_eq!(st_groups, StatusCode::OK);
+    let groups_json = parse_json(groups_bytes);
+    let groups_arr = groups_json.as_array().unwrap();
+    assert!(groups_arr
+        .iter()
+        .any(|g| g.as_str() == Some("search-group")));
+
+    let (st_si_patch, si_patched_bytes) = json_req(
+        &app,
+        Method::PATCH,
+        &format!("/_api/v1/search/{si_id}"),
+        tok,
+        Some(serde_json::json!({
+            "description": "Updated catalog search",
+            "writer_budget_mb": 32
+        })),
+    )
+    .await;
+    assert_eq!(st_si_patch, StatusCode::OK);
+    let si_patched = parse_json(si_patched_bytes);
+    assert_eq!(si_patched["writer_budget_mb"], 32);
+    assert_eq!(si_patched["description"], "Updated catalog search");
 }

@@ -4,11 +4,12 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use crate::core::model::{
-    ApiToken, BucketMeta, ByteRange, ByteStream, CronJob, DbFtsIndexMeta, Deployment, EnqueueOpts,
-    Job, JobOutcome, JobStatus, KvKeyMeta, KvNamespaceMeta, KvValue, LogEntry, LogQuery,
-    ObjectMeta, Project, QueryResult, QueueConfig, QueueStats, RequestCtx, Result, Route,
-    RouteEntry, SearchFieldSchema, SearchIndexMeta, SearchQueryInput, SearchQueryResult, SqlValue,
-    TargetEnv, TokenScope, UserDbMeta, WorkerHttpRequest, WorkerHttpResponse,
+    ApiToken, BucketMeta, BucketOpts, ByteRange, ByteStream, CronJob, DbFtsIndexMeta, Deployment,
+    EnqueueOpts, Job, JobOutcome, JobStatus, KvKeyMeta, KvNamespaceMeta, KvNamespaceOpts, KvValue,
+    LogEntry, LogQuery, ObjectMeta, Project, ProjectOpts, QueryResult, QueueConfig, QueueStats,
+    RequestCtx, Result, Route, RouteEntry, SearchFieldSchema, SearchIndexMeta, SearchIndexOpts,
+    SearchQueryInput, SearchQueryResult, SqlValue, TargetEnv, TokenScope, UserDbMeta, UserDbOpts,
+    WorkerHttpRequest, WorkerHttpResponse,
 };
 
 #[async_trait]
@@ -18,7 +19,19 @@ pub trait ProjectStore: Send + Sync {
         name: &str,
         health_check_path: Option<&str>,
         group: Option<&str>,
-    ) -> Result<Project>;
+    ) -> Result<Project> {
+        self.create_project_with_opts(
+            name,
+            ProjectOpts {
+                group: group.map(str::to_owned),
+                health_check_path: health_check_path.map(str::to_owned),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+    async fn create_project_with_opts(&self, name: &str, opts: ProjectOpts) -> Result<Project>;
+    async fn update_project(&self, project: &Project) -> Result<()>;
     async fn get_project(&self, id_or_name: &str) -> Result<Option<Project>>;
     async fn list_projects(&self) -> Result<Vec<Project>>;
     async fn delete_project(&self, id: &str) -> Result<()>;
@@ -88,7 +101,25 @@ pub trait RegistryStore: Send + Sync {
         name: &str,
         project_id: Option<&str>,
         group: Option<&str>,
+    ) -> Result<()> {
+        self.register_user_db_with_opts(
+            id,
+            name,
+            UserDbOpts {
+                group: group.map(str::to_owned),
+                project_id: project_id.map(str::to_owned),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+    async fn register_user_db_with_opts(
+        &self,
+        id: &str,
+        name: &str,
+        opts: UserDbOpts,
     ) -> Result<()>;
+    async fn update_user_db(&self, meta: &UserDbMeta) -> Result<()>;
     async fn delete_user_db(&self, id: &str) -> Result<()>;
     async fn get_user_db(&self, id_or_name: &str) -> Result<Option<UserDbMeta>>;
     async fn list_user_dbs(&self) -> Result<Vec<UserDbMeta>>;
@@ -98,7 +129,23 @@ pub trait RegistryStore: Send + Sync {
         name: &str,
         project_id: Option<&str>,
         group: Option<&str>,
+    ) -> Result<KvNamespaceMeta> {
+        self.create_kv_namespace_with_opts(
+            name,
+            KvNamespaceOpts {
+                group: group.map(str::to_owned),
+                project_id: project_id.map(str::to_owned),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+    async fn create_kv_namespace_with_opts(
+        &self,
+        name: &str,
+        opts: KvNamespaceOpts,
     ) -> Result<KvNamespaceMeta>;
+    async fn update_kv_namespace(&self, meta: &KvNamespaceMeta) -> Result<()>;
     async fn get_kv_namespace(&self, name: &str) -> Result<Option<KvNamespaceMeta>>;
     async fn list_kv_namespaces(&self) -> Result<Vec<KvNamespaceMeta>>;
     async fn delete_kv_namespace(&self, name: &str) -> Result<()>;
@@ -122,11 +169,25 @@ pub trait BlobMetaStore: Send + Sync {
         project_id: Option<&str>,
         public_read: bool,
         group: Option<&str>,
-    ) -> Result<BucketMeta>;
+    ) -> Result<BucketMeta> {
+        self.create_bucket_with_opts(
+            name,
+            BucketOpts {
+                group: group.map(str::to_owned),
+                project_id: project_id.map(str::to_owned),
+                public_read: Some(public_read),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+    async fn create_bucket_with_opts(&self, name: &str, opts: BucketOpts) -> Result<BucketMeta>;
+    async fn update_bucket(&self, meta: &BucketMeta) -> Result<()>;
     async fn get_bucket(&self, name: &str) -> Result<Option<BucketMeta>>;
     async fn list_buckets(&self) -> Result<Vec<BucketMeta>>;
     async fn set_bucket_public(&self, name: &str, public_read: bool) -> Result<()>;
     async fn delete_bucket(&self, name: &str) -> Result<()>;
+    async fn total_bucket_bytes(&self, bucket: &str) -> Result<u64>;
     async fn upsert_object_meta(&self, meta: ObjectMeta, gc_grace_secs: i64) -> Result<()>;
     async fn get_object_meta(&self, bucket: &str, key: &str) -> Result<Option<ObjectMeta>>;
     async fn delete_object_meta(&self, bucket: &str, key: &str, gc_grace_secs: i64)
@@ -180,6 +241,9 @@ pub trait KvStore: Send + Sync {
         cursor: Option<&str>,
         limit: usize,
     ) -> Result<(Vec<KvKeyMeta>, Option<String>)>;
+    async fn count_keys(&self, ns: &str) -> Result<usize> {
+        Ok(self.list(ns, None, 1000).await?.len())
+    }
     async fn cleanup_expired_batch(&self, batch_limit: usize) -> Result<u64>;
 
     async fn checkpoint(&self) -> Result<()> {
@@ -239,11 +303,25 @@ pub trait ObjectStore: Send + Sync {
         project_id: Option<&str>,
         public_read: bool,
         group: Option<&str>,
-    ) -> Result<BucketMeta>;
+    ) -> Result<BucketMeta> {
+        self.create_bucket_with_opts(
+            name,
+            BucketOpts {
+                group: group.map(str::to_owned),
+                project_id: project_id.map(str::to_owned),
+                public_read: Some(public_read),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+    async fn create_bucket_with_opts(&self, name: &str, opts: BucketOpts) -> Result<BucketMeta>;
+    async fn update_bucket(&self, meta: &BucketMeta) -> Result<()>;
     async fn get_bucket(&self, name: &str) -> Result<Option<BucketMeta>>;
     async fn list_buckets(&self) -> Result<Vec<BucketMeta>>;
     async fn set_bucket_public(&self, name: &str, public_read: bool) -> Result<()>;
     async fn delete_bucket(&self, name: &str) -> Result<()>;
+    async fn total_bucket_bytes(&self, bucket: &str) -> Result<u64>;
     async fn put_stream(
         &self,
         bucket: &str,
@@ -348,7 +426,24 @@ pub trait SearchStore: Send + Sync {
         project_id: Option<&str>,
         tokenizer: &str,
         schema: Option<Vec<SearchFieldSchema>>,
+    ) -> Result<SearchIndexMeta> {
+        self.create_index_with_opts(
+            name,
+            SearchIndexOpts {
+                project_id: project_id.map(str::to_owned),
+                tokenizer: Some(tokenizer.to_owned()),
+                schema,
+                ..Default::default()
+            },
+        )
+        .await
+    }
+    async fn create_index_with_opts(
+        &self,
+        name: &str,
+        opts: SearchIndexOpts,
     ) -> Result<SearchIndexMeta>;
+    async fn update_index(&self, meta: &SearchIndexMeta) -> Result<()>;
     async fn get_index(&self, id_or_name: &str) -> Result<Option<SearchIndexMeta>>;
     async fn list_indexes(&self) -> Result<Vec<SearchIndexMeta>>;
     async fn delete_index(&self, id: &str) -> Result<()>;

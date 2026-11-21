@@ -8,7 +8,7 @@ use chrono::Utc;
 use tracing::info;
 use turso::{transaction::TransactionBehavior, Database, Value as TursoValue};
 
-use crate::core::model::{KvKeyMeta, KvValue, Result};
+use crate::core::model::{KvKeyMeta, KvValue, Result, DEFAULT_KV_TTL_SECS};
 use crate::core::traits::KvStore;
 use crate::storage::core_store::{escape_like, opt_i64, opt_text, opt_text_param};
 use crate::storage::tx::{
@@ -55,6 +55,15 @@ impl TursoKvStore {
         let db = open_turso_db(path).await?;
         let conn = connect_db(&db)?;
         conn.execute_batch(KV_SCHEMA).await.map_err(map_turso_err)?;
+        let default_exp = Utc::now()
+            .timestamp()
+            .saturating_add(DEFAULT_KV_TTL_SECS as i64);
+        let _ = conn
+            .execute(
+                "UPDATE kv_entries SET expires_at = ?1 WHERE expires_at IS NULL",
+                [default_exp],
+            )
+            .await;
         Ok(Self {
             db,
             db_path: path.to_path_buf(),
@@ -95,7 +104,16 @@ impl TursoKvStore {
             while let Some(row) = rows.next().await.map_err(map_turso_err)? {
                 let mut vals = Vec::with_capacity(6);
                 for i in 0..6 {
-                    vals.push(row.get_value(i).map_err(map_turso_err)?);
+                    let v = row.get_value(i).map_err(map_turso_err)?;
+                    if i == 4 && matches!(v, TursoValue::Null) {
+                        vals.push(TursoValue::Integer(
+                            Utc::now()
+                                .timestamp()
+                                .saturating_add(DEFAULT_KV_TTL_SECS as i64),
+                        ));
+                    } else {
+                        vals.push(v);
+                    }
                 }
                 batch.push(vals);
             }
@@ -217,7 +235,8 @@ impl KvStore for TursoKvStore {
         ephemeral: bool,
     ) -> Result<()> {
         let now = Utc::now().timestamp();
-        let expires_at = ttl_secs.map(|t| now.saturating_add(i64::try_from(t).unwrap_or(i64::MAX)));
+        let ttl = ttl_secs.unwrap_or(DEFAULT_KV_TTL_SECS);
+        let expires_at = Some(now.saturating_add(i64::try_from(ttl).unwrap_or(i64::MAX)));
 
         if ephemeral {
             let mut map = self.ephemeral_kv.write().await;
@@ -305,7 +324,8 @@ impl KvStore for TursoKvStore {
             }
         }
 
-        let expires_at = ttl_secs.map(|t| now.saturating_add(i64::try_from(t).unwrap_or(i64::MAX)));
+        let ttl = ttl_secs.unwrap_or(DEFAULT_KV_TTL_SECS);
+        let expires_at = Some(now.saturating_add(i64::try_from(ttl).unwrap_or(i64::MAX)));
         let ns_s = ns.to_string();
         let key_s = key.to_string();
         let val_v = val.to_vec();
@@ -376,6 +396,7 @@ impl KvStore for TursoKvStore {
     async fn incr(&self, ns: &str, key: &str, delta: i64, ttl_secs: Option<u64>) -> Result<i64> {
         let now = Utc::now().timestamp();
         let expires_at = ttl_secs.map(|t| now.saturating_add(i64::try_from(t).unwrap_or(i64::MAX)));
+        let fallback_expires_at = now.saturating_add(DEFAULT_KV_TTL_SECS as i64);
 
         // Remove any matching ephemeral key so persistent writes are never shadowed.
         {
@@ -424,34 +445,44 @@ impl KvStore for TursoKvStore {
 
                 let next = current.saturating_add(delta);
                 let next_bytes = next.to_string().into_bytes();
-                let upsert_sql = if reset_expiry {
-                    "INSERT INTO kv_entries (namespace, key, value, metadata, expires_at, updated_at)
-                     VALUES (?1, ?2, ?3, NULL, ?4, ?5)
-                     ON CONFLICT(namespace, key) DO UPDATE SET
-                        value = excluded.value,
-                        metadata = NULL,
-                        expires_at = excluded.expires_at,
-                        updated_at = excluded.updated_at"
+                if reset_expiry {
+                    let eff_exp = expires_at.unwrap_or(fallback_expires_at);
+                    tx.execute(
+                        "INSERT INTO kv_entries (namespace, key, value, metadata, expires_at, updated_at)
+                         VALUES (?1, ?2, ?3, NULL, ?4, ?5)
+                         ON CONFLICT(namespace, key) DO UPDATE SET
+                            value = excluded.value,
+                            metadata = NULL,
+                            expires_at = excluded.expires_at,
+                            updated_at = excluded.updated_at",
+                        vec![
+                            TursoValue::Text(ns_s),
+                            TursoValue::Text(key_s),
+                            TursoValue::Blob(next_bytes),
+                            TursoValue::Integer(eff_exp),
+                            TursoValue::Integer(now),
+                        ],
+                    )
+                    .await?;
                 } else {
-                    "INSERT INTO kv_entries (namespace, key, value, metadata, expires_at, updated_at)
-                     VALUES (?1, ?2, ?3, NULL, ?4, ?5)
-                     ON CONFLICT(namespace, key) DO UPDATE SET
-                        value = excluded.value,
-                        expires_at = COALESCE(excluded.expires_at, kv_entries.expires_at),
-                        updated_at = excluded.updated_at"
-                };
-
-                tx.execute(
-                    upsert_sql,
-                    vec![
-                        TursoValue::Text(ns_s),
-                        TursoValue::Text(key_s),
-                        TursoValue::Blob(next_bytes),
-                        expires_at.map(TursoValue::Integer).unwrap_or(TursoValue::Null),
-                        TursoValue::Integer(now),
-                    ],
-                )
-                .await?;
+                    tx.execute(
+                        "INSERT INTO kv_entries (namespace, key, value, metadata, expires_at, updated_at)
+                         VALUES (?1, ?2, ?3, NULL, ?4, ?5)
+                         ON CONFLICT(namespace, key) DO UPDATE SET
+                            value = excluded.value,
+                            expires_at = COALESCE(excluded.expires_at, kv_entries.expires_at, ?6),
+                            updated_at = excluded.updated_at",
+                        vec![
+                            TursoValue::Text(ns_s),
+                            TursoValue::Text(key_s),
+                            TursoValue::Blob(next_bytes),
+                            expires_at.map(TursoValue::Integer).unwrap_or(TursoValue::Null),
+                            TursoValue::Integer(now),
+                            TursoValue::Integer(fallback_expires_at),
+                        ],
+                    )
+                    .await?;
+                }
                 tx.commit().await?;
                 Ok(next)
             }
@@ -625,6 +656,30 @@ impl KvStore for TursoKvStore {
             None
         };
         Ok((out, next_cursor))
+    }
+
+    async fn count_keys(&self, ns: &str) -> Result<usize> {
+        let now = Utc::now().timestamp();
+        let conn = connect_db(&self.db)?;
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM kv_entries WHERE namespace = ?1 AND (expires_at IS NULL OR expires_at > ?2)",
+                (ns, now),
+            )
+            .await
+            .map_err(map_turso_err)?;
+        let mut count = if let Some(row) = rows.next().await.map_err(map_turso_err)? {
+            row.get::<i64>(0).map_err(map_turso_err)?.max(0) as usize
+        } else {
+            0
+        };
+        let map = self.ephemeral_kv.read().await;
+        for ((entry_ns, _), entry) in map.iter() {
+            if entry_ns == ns && entry.expires_at.map(|e| e > now).unwrap_or(true) {
+                count = count.saturating_add(1);
+            }
+        }
+        Ok(count)
     }
 
     async fn cleanup_expired_batch(&self, batch_limit: usize) -> Result<u64> {

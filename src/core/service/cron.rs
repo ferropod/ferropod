@@ -1,7 +1,9 @@
 use chrono::{DateTime, Datelike, Timelike, Utc};
 use uuid::Uuid;
 
-use crate::core::model::{Caller, CronJob, FerroError, LogEntry, RequestCtx, Result, TokenScope};
+use crate::core::model::{
+    Caller, CronJob, CronJobOpts, FerroError, LogEntry, RequestCtx, Result, TokenScope,
+};
 
 use super::PlatformService;
 
@@ -187,16 +189,35 @@ impl PlatformService {
         schedule: &str,
         target: &str,
     ) -> Result<CronJob> {
+        self.create_cron_job_with_opts(
+            caller,
+            name,
+            CronJobOpts {
+                project_id: project_id.map(str::to_owned),
+                schedule: Some(schedule.to_owned()),
+                target: Some(target.to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    pub async fn create_cron_job_with_opts(
+        &self,
+        caller: &Caller,
+        name: &str,
+        opts: CronJobOpts,
+    ) -> Result<CronJob> {
         let name = name.trim();
-        let schedule = schedule.trim();
-        let target = target.trim();
+        let schedule = opts.schedule.as_deref().unwrap_or("").trim();
+        let target = opts.target.as_deref().unwrap_or("").trim();
         if name.is_empty() || schedule.is_empty() || target.is_empty() {
             return Err(FerroError::InvalidArgument(
                 "cron name, schedule, and target are required".into(),
             ));
         }
         validate_cron_schedule(schedule)?;
-        let resolved_pid = match (&caller.scope, project_id) {
+        let resolved_pid = match (&caller.scope, opts.project_id.as_deref()) {
             (TokenScope::Admin, pid) => self.resolve_optional_project_id(pid).await?,
             (TokenScope::Project(_), Some(req_pid)) => {
                 let proj = self.get_project_internal(req_pid).await?;
@@ -212,13 +233,30 @@ impl PlatformService {
         };
 
         let now = Utc::now().timestamp_millis();
+        let description = opts
+            .description
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        let timezone = opts
+            .timezone
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("UTC")
+            .to_string();
         let job = CronJob {
             id: format!("cron_{}", &Uuid::new_v4().simple().to_string()[..12]),
             name: name.to_string(),
             project_id: resolved_pid.clone(),
+            description,
             schedule: schedule.to_string(),
             target: target.to_string(),
-            enabled: true,
+            enabled: opts.enabled.unwrap_or(true),
+            timezone,
+            timeout_ms: opts.timeout_ms.filter(|t| *t >= 50),
+            max_retries: opts.max_retries.unwrap_or(0).min(5),
             last_run_at: None,
             last_status: None,
             created_at: now,
@@ -242,6 +280,25 @@ impl PlatformService {
         schedule: Option<&str>,
         target: Option<&str>,
     ) -> Result<CronJob> {
+        self.update_cron_job_with_opts(
+            caller,
+            id,
+            CronJobOpts {
+                enabled,
+                schedule: schedule.map(str::to_owned),
+                target: target.map(str::to_owned),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    pub async fn update_cron_job_with_opts(
+        &self,
+        caller: &Caller,
+        id: &str,
+        opts: CronJobOpts,
+    ) -> Result<CronJob> {
         let mut job = self
             .registry
             .get_cron_job(id)
@@ -252,20 +309,40 @@ impl PlatformService {
             job.project_id.as_deref(),
             &format!("cron job '{}'", job.name),
         )?;
-        if let Some(en) = enabled {
+        if let Some(en) = opts.enabled {
             job.enabled = en;
         }
-        if let Some(sc) = schedule {
+        if let Some(sc) = opts.schedule.as_deref() {
             let sc = sc.trim();
             validate_cron_schedule(sc)?;
             job.schedule = sc.to_string();
         }
-        if let Some(tg) = target {
+        if let Some(tg) = opts.target.as_deref() {
             let tg = tg.trim();
             if tg.is_empty() {
                 return Err(FerroError::InvalidArgument("target cannot be empty".into()));
             }
             job.target = tg.to_string();
+        }
+        if let Some(desc) = opts.description {
+            let trimmed = desc.trim();
+            job.description = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+        }
+        if let Some(tz) = opts.timezone {
+            let trimmed = tz.trim();
+            if !trimmed.is_empty() {
+                job.timezone = trimmed.to_string();
+            }
+        }
+        if let Some(t) = opts.timeout_ms {
+            job.timeout_ms = if t == 0 { None } else { Some(t.max(50)) };
+        }
+        if let Some(r) = opts.max_retries {
+            job.max_retries = r.min(5);
         }
         job.updated_at = Utc::now().timestamp_millis();
         self.registry.update_cron_job(&job).await?;
@@ -316,11 +393,30 @@ impl PlatformService {
                 if let Some(dep_id) = proj.active_deployment_id.as_deref() {
                     if let Some(dep) = self.projects.get_deployment(dep_id).await? {
                         if dep.artifact_path.is_some() {
-                            let ctx = RequestCtx::new(proj.id.clone(), request_id.clone(), dep)
+                            let max_tries = 1 + job.max_retries.min(5);
+                            for attempt in 0..max_tries {
+                                let ctx = RequestCtx::new(
+                                    proj.id.clone(),
+                                    request_id.clone(),
+                                    dep.clone(),
+                                )
+                                .with_project_limits(&proj)
                                 .with_cron_job(job.clone());
-                            if let Err(e) = self.runtime.handle_cron(ctx, &job.schedule).await {
-                                let msg = e.to_string();
-                                err_msg = Some(msg);
+                                match self.runtime.handle_cron(ctx, &job.schedule).await {
+                                    Ok(()) => {
+                                        err_msg = None;
+                                        break;
+                                    }
+                                    Err(e) => {
+                                        err_msg = Some(e.to_string());
+                                        if attempt + 1 < max_tries {
+                                            tokio::time::sleep(std::time::Duration::from_millis(
+                                                150,
+                                            ))
+                                            .await;
+                                        }
+                                    }
+                                }
                             }
                         } else {
                             err_msg = Some("active deployment has no worker artifact".into());

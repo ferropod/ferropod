@@ -536,9 +536,9 @@
     return '<span class="badge badge-neutral">' + esc(env || 'ready') + '</span>';
   }
 
-  function resourceGroupField() {
+  function resourceGroupField(presetValue) {
     return '<div class="field"><label for="resource-group">' + esc(t('groups.label')) + '</label>' +
-      '<input id="resource-group" list="resource-group-options" maxlength="80" placeholder="' +
+      '<input id="resource-group" list="resource-group-options" maxlength="80" value="' + esc(presetValue || '') + '" placeholder="' +
       esc(t('groups.placeholder')) + '"><datalist id="resource-group-options"></datalist></div>';
   }
 
@@ -770,8 +770,22 @@
         '<div class="field"><label>' + esc(t('runtime.runtimeName')) + '</label>' +
         '<input type="text" id="cp-name" required placeholder="' + esc(t('projects.namePlaceholder')) + '"></div>' +
         resourceGroupField() +
-        '<div class="field"><label>' + esc(t('projects.healthCheckPath')) + ' (' + esc(t('common.optional')) + ')</label>' +
+        '<details class="adv-options"><summary>' + esc(t('common.advancedOptions')) + '</summary>' +
+        '<div class="adv-options-body stack gap-sm">' +
+        '<div class="field"><label>' + esc(t('common.description')) + '</label>' +
+        '<input type="text" id="cp-desc" placeholder="' + esc(t('common.descriptionPlaceholder')) + '"></div>' +
+        '<div class="form-grid">' +
+        '<div class="field"><label>' + esc(t('projects.healthCheckPath')) + '</label>' +
         '<input type="text" id="cp-hc" placeholder="' + esc(t('projects.healthCheckPlaceholder')) + '"></div>' +
+        '<div class="field"><label>' + esc(t('projects.maxConcurrency')) + '</label>' +
+        '<input type="number" id="cp-conc" min="1" value="64"></div>' +
+        '<div class="field"><label>' + esc(t('projects.timeoutMs')) + '</label>' +
+        '<input type="number" id="cp-timeout" min="10" placeholder="' + esc(t('projects.timeoutPlaceholder')) + '"></div>' +
+        '<div class="field"><label>' + esc(t('projects.wasmMaxMemoryMb')) + '</label>' +
+        '<input type="number" id="cp-mem" min="1" placeholder="' + esc(t('projects.wasmMaxMemoryPlaceholder')) + '"></div>' +
+        '</div>' +
+        '<label class="checkbox-row"><input type="checkbox" id="cp-priv"> ' + esc(t('projects.allowPrivateOutbound')) + '</label>' +
+        '</div></details>' +
         '</form>',
       footer:
         '<button type="button" class="btn" id="cp-cancel">' + esc(t('common.cancel')) + '</button>' +
@@ -783,10 +797,23 @@
           ev.preventDefault();
           var name = $('cp-name').value.trim();
           var hc = $('cp-hc').value.trim();
+          var desc = $('cp-desc').value.trim();
+          var concRaw = $('cp-conc').value.trim();
+          var timeoutRaw = $('cp-timeout').value.trim();
+          var memRaw = $('cp-mem').value.trim();
           try {
             var created = await api('/_api/v1/runtimes', {
               method: 'POST',
-              json: { name: name, group: selectedResourceGroup(), health_check_path: hc || null }
+              json: {
+                name: name,
+                group: selectedResourceGroup(),
+                description: desc || null,
+                health_check_path: hc || null,
+                max_concurrency: concRaw ? Number(concRaw) : 64,
+                timeout_ms: timeoutRaw ? Number(timeoutRaw) : null,
+                wasm_max_memory_mb: memRaw ? Number(memRaw) : null,
+                allow_private_outbound: $('cp-priv').checked ? true : null
+              }
             });
             closeModal();
             toast(t('runtime.created'), 'success');
@@ -794,6 +821,58 @@
           } catch (e) {
             toast(e.message, 'error');
           }
+        });
+      }
+    });
+  }
+
+  function openEditRuntimeModal(project) {
+    openModal({
+      title: t('common.editConfig') + ' · ' + project.name,
+      body:
+        '<form id="edit-proj-form" class="stack gap-md">' +
+        resourceGroupField(project.group || '') +
+        '<div class="field"><label>' + esc(t('common.description')) + '</label>' +
+        '<input type="text" id="ep-desc" value="' + esc(project.description || '') + '" placeholder="' + esc(t('common.descriptionPlaceholder')) + '"></div>' +
+        '<div class="form-grid">' +
+        '<div class="field"><label>' + esc(t('projects.healthCheckPath')) + '</label>' +
+        '<input type="text" id="ep-hc" value="' + esc(project.health_check_path || '/_health') + '"></div>' +
+        '<div class="field"><label>' + esc(t('projects.maxConcurrency')) + '</label>' +
+        '<input type="number" id="ep-conc" min="1" value="' + esc(project.max_concurrency || 64) + '"></div>' +
+        '<div class="field"><label>' + esc(t('projects.timeoutMs')) + '</label>' +
+        '<input type="number" id="ep-timeout" min="0" value="' + esc(project.timeout_ms || '') + '" placeholder="' + esc(t('projects.timeoutPlaceholder')) + '"></div>' +
+        '<div class="field"><label>' + esc(t('projects.wasmMaxMemoryMb')) + '</label>' +
+        '<input type="number" id="ep-mem" min="0" value="' + esc(project.wasm_max_memory_mb || '') + '" placeholder="' + esc(t('projects.wasmMaxMemoryPlaceholder')) + '"></div>' +
+        '</div>' +
+        '<label class="checkbox-row"><input type="checkbox" id="ep-priv"' + (project.allow_private_outbound ? ' checked' : '') + '> ' + esc(t('projects.allowPrivateOutbound')) + '</label>' +
+        '</form>',
+      footer:
+        '<button type="button" class="btn" id="ep-cancel">' + esc(t('common.cancel')) + '</button>' +
+        '<button type="submit" form="edit-proj-form" class="btn btn-primary">' + esc(t('common.save')) + '</button>',
+      onMount: function () {
+        loadResourceGroupOptions();
+        $('ep-cancel').addEventListener('click', closeModal);
+        $('edit-proj-form').addEventListener('submit', async function (ev) {
+          ev.preventDefault();
+          var timeoutRaw = $('ep-timeout').value.trim();
+          var memRaw = $('ep-mem').value.trim();
+          try {
+            await api('/_api/v1/runtimes/' + enc(project.id), {
+              method: 'PATCH',
+              json: {
+                group: $('resource-group').value.trim(),
+                description: $('ep-desc').value.trim(),
+                health_check_path: $('ep-hc').value.trim() || '/_health',
+                max_concurrency: Number($('ep-conc').value) || 64,
+                timeout_ms: timeoutRaw ? Number(timeoutRaw) : 0,
+                wasm_max_memory_mb: memRaw ? Number(memRaw) : 0,
+                allow_private_outbound: $('ep-priv').checked
+              }
+            });
+            closeModal();
+            toast(t('projects.updated'), 'success');
+            renderProjectDetail(project.id, true);
+          } catch (e) { toast(e.message, 'error'); }
         });
       }
     });
@@ -845,11 +924,12 @@
       '<div class="page-head">' +
       '<div><div class="row gap-xs" style="margin-bottom:6px;"><a href="#/runtime" class="btn btn-sm">' + esc(t('common.back')) + '</a></div>' +
       '<h2 class="page-title">' + esc(p.name) + '</h2>' +
-      '<p class="page-subtitle mono">' + esc(p.id) + (p.group ? ' · ' + esc(p.group) : '') + ' · ' + esc(t('projects.healthCheckPath')) + ': ' + esc(p.health_check_path) + '</p></div>' +
+      '<p class="page-subtitle mono">' + esc(p.id) + (p.group ? ' · ' + esc(p.group) : '') + ' · ' + esc(t('projects.healthCheckPath')) + ': ' + esc(p.health_check_path) + (p.description ? ' · ' + esc(p.description) : '') + '</p></div>' +
       (writable
         ? '<div class="row">' +
           (p.preview_deployment_id ? '<button type="button" class="btn" id="pd-promote-preview">' + esc(t('projectDetail.promotePreview')) + '</button>' : '') +
           (deps.length > 1 ? '<button type="button" class="btn" id="pd-rollback">' + esc(t('projectDetail.rollbackProd')) + '</button>' : '') +
+          '<button type="button" class="btn" id="pd-edit-runtime">' + esc(t('common.editConfig')) + '</button>' +
           '<button type="button" class="btn btn-primary" id="pd-new-dep">' + esc(t('projectDetail.newDeployment')) + '</button>' +
           (isAdmin() ? '<button type="button" class="btn btn-danger" id="pd-delete-runtime">' + esc(t('common.delete')) + '</button>' : '') +
           '</div>'
@@ -988,6 +1068,7 @@
     }
 
     if ($('pd-new-dep')) $('pd-new-dep').addEventListener('click', function () { openNewDeploymentModal(p); });
+    if ($('pd-edit-runtime')) $('pd-edit-runtime').addEventListener('click', function () { openEditRuntimeModal(p); });
     if ($('pd-delete-runtime')) {
       $('pd-delete-runtime').addEventListener('click', function () {
         confirmAction(t('projects.deleteConfirm', { name: p.name }), async function () {
@@ -1444,11 +1525,17 @@
       ? '<div class="panel"><div class="empty-state">' + esc(t('kv.selectNamespace')) + '</div></div>'
       : '<div class="panel">' +
         '<div class="panel-header"><div class="toolbar">' +
-        '<div><h3 class="panel-title mono">' + esc(state.selectedKvNs) + '</h3></div>' +
+        '<div><h3 class="panel-title mono">' + esc(state.selectedKvNs) + '</h3>' +
+        (nsMeta ? '<div class="muted text-xs">TTL: ' + esc(nsMeta.default_ttl_secs || 604800) + 's' +
+          (nsMeta.max_keys ? ' · Max Keys: ' + esc(nsMeta.max_keys) : '') +
+          (nsMeta.max_value_bytes ? ' · Max Value: ' + esc(formatBytes(nsMeta.max_value_bytes)) : '') +
+          (nsMeta.description ? ' · ' + esc(nsMeta.description) : '') + '</div>' : '') +
+        '</div>' +
         '<div class="row">' +
         '<input type="search" id="kv-prefix-input" style="width:190px;" value="' + esc(state.kvPrefix) + '" placeholder="' + esc(t('kv.prefixPlaceholder')) + '">' +
         '<button type="button" class="btn btn-sm" id="kv-filter-btn">' + esc(t('common.filter')) + '</button>' +
         (canWriteNs ? '<button type="button" class="btn btn-primary btn-sm" id="kv-put-btn">' + esc(t('kv.putKey')) + '</button>' : '') +
+        (canWriteNs && nsMeta ? '<button type="button" class="btn btn-sm" id="kv-edit-ns-btn">' + esc(t('common.editConfig')) + '</button>' : '') +
         (canWriteNs && nsMeta ? '<button type="button" class="btn btn-danger btn-sm" id="kv-del-ns-btn">' + esc(t('kv.deleteNamespace')) + '</button>' : '') +
         '</div></div></div>' +
         (keyRows
@@ -1501,6 +1588,11 @@
     if ($('kv-put-btn')) {
       $('kv-put-btn').addEventListener('click', function () {
         openKvPutModal(null);
+      });
+    }
+    if ($('kv-edit-ns-btn') && nsMeta) {
+      $('kv-edit-ns-btn').addEventListener('click', function () {
+        openEditKvNamespaceModal(nsMeta);
       });
     }
     if ($('kv-del-ns-btn') && nsMeta) {
@@ -1559,6 +1651,24 @@
         '<div class="field"><label>' + esc(t('kv.namespaceName')) + '</label><input type="text" id="kns-name" required placeholder="' + esc(t('kv.namespacePlaceholder')) + '"></div>' +
         resourceGroupField() +
         '<div class="field"><label>' + esc(t('common.project')) + '</label><select id="kns-proj">' + renderProjectSelectOptions('', true) + '</select></div>' +
+        '<div class="field"><label>' + esc(t('kv.defaultTtlSecs')) + '</label>' +
+        '<input type="number" id="kns-ttl" min="1" required value="604800">' +
+        '<div class="preset-chips">' +
+        '<button type="button" class="preset-chip-btn" data-kv-ttl="3600">' + esc(t('kv.ttlPreset1h')) + ' (3600s)</button>' +
+        '<button type="button" class="preset-chip-btn" data-kv-ttl="86400">' + esc(t('kv.ttlPreset1d')) + ' (86400s)</button>' +
+        '<button type="button" class="preset-chip-btn" data-kv-ttl="604800">' + esc(t('kv.ttlPreset7d')) + ' (604800s)</button>' +
+        '<button type="button" class="preset-chip-btn" data-kv-ttl="2592000">' + esc(t('kv.ttlPreset30d')) + ' (2592000s)</button>' +
+        '</div>' +
+        '<div class="muted text-xs">' + esc(t('kv.defaultTtlHint')) + '</div></div>' +
+        '<details class="adv-options"><summary>' + esc(t('common.advancedOptions')) + '</summary>' +
+        '<div class="adv-options-body stack gap-sm">' +
+        '<div class="field"><label>' + esc(t('common.description')) + '</label><input type="text" id="kns-desc" placeholder="' + esc(t('common.descriptionPlaceholder')) + '"></div>' +
+        '<div class="form-grid">' +
+        '<div class="field"><label>' + esc(t('kv.maxValueBytes')) + '</label><input type="number" id="kns-max-val" min="1" placeholder="1048576"></div>' +
+        '<div class="field"><label>' + esc(t('kv.maxKeys')) + '</label><input type="number" id="kns-max-keys" min="1" placeholder="100000"></div>' +
+        '</div>' +
+        '<label class="checkbox-row"><input type="checkbox" id="kns-eph"> ' + esc(t('kv.defaultEphemeral')) + '</label>' +
+        '</div></details>' +
         '</form>',
       footer:
         '<button type="button" class="btn" id="kns-cancel">' + esc(t('common.cancel')) + '</button>' +
@@ -1566,15 +1676,93 @@
       onMount: function () {
         loadResourceGroupOptions();
         $('kns-cancel').addEventListener('click', closeModal);
+        document.querySelectorAll('[data-kv-ttl]').forEach(function (chip) {
+          chip.addEventListener('click', function () {
+            $('kns-ttl').value = chip.getAttribute('data-kv-ttl');
+          });
+        });
         $('kv-ns-form').addEventListener('submit', async function (ev) {
           ev.preventDefault();
           var name = $('kns-name').value.trim();
           var pid = $('kns-proj').value || null;
+          var ttl = Number($('kns-ttl').value || 604800);
+          var desc = $('kns-desc').value.trim();
+          var maxValRaw = $('kns-max-val').value.trim();
+          var maxKeysRaw = $('kns-max-keys').value.trim();
           try {
-            await api('/_api/v1/kv', { method: 'POST', json: { name: name, group: selectedResourceGroup(), project_id: pid } });
+            await api('/_api/v1/kv', {
+              method: 'POST',
+              json: {
+                name: name,
+                group: selectedResourceGroup(),
+                project_id: pid,
+                description: desc || null,
+                default_ttl_secs: ttl,
+                default_ephemeral: $('kns-eph').checked,
+                max_value_bytes: maxValRaw ? Number(maxValRaw) : null,
+                max_keys: maxKeysRaw ? Number(maxKeysRaw) : null
+              }
+            });
             closeModal();
             state.selectedKvNs = name;
             toast(t('kv.namespaceCreated'), 'success');
+            renderKv(true);
+          } catch (e) { toast(e.message, 'error'); }
+        });
+      }
+    });
+  }
+
+  function openEditKvNamespaceModal(nsMeta) {
+    openModal({
+      title: t('common.editConfig') + ' · ' + nsMeta.name,
+      body:
+        '<form id="edit-kv-ns-form" class="stack gap-md">' +
+        resourceGroupField(nsMeta.group || '') +
+        '<div class="field"><label>' + esc(t('common.description')) + '</label><input type="text" id="ekns-desc" value="' + esc(nsMeta.description || '') + '" placeholder="' + esc(t('common.descriptionPlaceholder')) + '"></div>' +
+        '<div class="field"><label>' + esc(t('kv.defaultTtlSecs')) + '</label>' +
+        '<input type="number" id="ekns-ttl" min="1" required value="' + esc(nsMeta.default_ttl_secs || 604800) + '">' +
+        '<div class="preset-chips">' +
+        '<button type="button" class="preset-chip-btn" data-ekv-ttl="3600">' + esc(t('kv.ttlPreset1h')) + '</button>' +
+        '<button type="button" class="preset-chip-btn" data-ekv-ttl="86400">' + esc(t('kv.ttlPreset1d')) + '</button>' +
+        '<button type="button" class="preset-chip-btn" data-ekv-ttl="604800">' + esc(t('kv.ttlPreset7d')) + '</button>' +
+        '<button type="button" class="preset-chip-btn" data-ekv-ttl="2592000">' + esc(t('kv.ttlPreset30d')) + '</button>' +
+        '</div></div>' +
+        '<div class="form-grid">' +
+        '<div class="field"><label>' + esc(t('kv.maxValueBytes')) + '</label><input type="number" id="ekns-max-val" min="0" value="' + esc(nsMeta.max_value_bytes || '') + '" placeholder="' + esc(t('common.unlimited')) + '"></div>' +
+        '<div class="field"><label>' + esc(t('kv.maxKeys')) + '</label><input type="number" id="ekns-max-keys" min="0" value="' + esc(nsMeta.max_keys || '') + '" placeholder="' + esc(t('common.unlimited')) + '"></div>' +
+        '</div>' +
+        '<label class="checkbox-row"><input type="checkbox" id="ekns-eph"' + (nsMeta.default_ephemeral ? ' checked' : '') + '> ' + esc(t('kv.defaultEphemeral')) + '</label>' +
+        '</form>',
+      footer:
+        '<button type="button" class="btn" id="ekns-cancel">' + esc(t('common.cancel')) + '</button>' +
+        '<button type="submit" form="edit-kv-ns-form" class="btn btn-primary">' + esc(t('common.save')) + '</button>',
+      onMount: function () {
+        loadResourceGroupOptions();
+        $('ekns-cancel').addEventListener('click', closeModal);
+        document.querySelectorAll('[data-ekv-ttl]').forEach(function (chip) {
+          chip.addEventListener('click', function () {
+            $('ekns-ttl').value = chip.getAttribute('data-ekv-ttl');
+          });
+        });
+        $('edit-kv-ns-form').addEventListener('submit', async function (ev) {
+          ev.preventDefault();
+          var maxValRaw = $('ekns-max-val').value.trim();
+          var maxKeysRaw = $('ekns-max-keys').value.trim();
+          try {
+            await api('/_api/v1/kv/' + enc(nsMeta.name), {
+              method: 'PATCH',
+              json: {
+                group: $('resource-group').value.trim(),
+                description: $('ekns-desc').value.trim(),
+                default_ttl_secs: Number($('ekns-ttl').value || 604800),
+                default_ephemeral: $('ekns-eph').checked,
+                max_value_bytes: maxValRaw ? Number(maxValRaw) : 0,
+                max_keys: maxKeysRaw ? Number(maxKeysRaw) : 0
+              }
+            });
+            closeModal();
+            toast(t('kv.namespaceUpdated'), 'success');
             renderKv(true);
           } catch (e) { toast(e.message, 'error'); }
         });
@@ -1607,6 +1795,9 @@
   }
 
   function openKvPutModal(preset) {
+    var nsMeta = state.kvNamespaces.find(function (n) { return n.name === state.selectedKvNs; });
+    var defaultTtl = (nsMeta && nsMeta.default_ttl_secs) ? nsMeta.default_ttl_secs : 604800;
+    var defaultEph = Boolean(nsMeta && nsMeta.default_ephemeral);
     openModal({
       title: t('kv.putKey'),
       body:
@@ -1614,10 +1805,10 @@
         '<div class="field"><label>' + esc(t('kv.key')) + '</label><input type="text" id="kvp-key" required value="' + esc(preset ? preset.key : '') + '" placeholder="' + esc(t('kv.keyPlaceholder')) + '"></div>' +
         '<div class="field"><label>' + esc(t('kv.value')) + '</label><textarea id="kvp-val" placeholder="' + esc(t('kv.valuePlaceholder')) + '">' + esc(preset ? preset.value : '') + '</textarea></div>' +
         '<div class="form-grid">' +
-        '<div class="field"><label>' + esc(t('kv.ttlSecs')) + '</label><input type="number" id="kvp-ttl" min="0" placeholder="' + esc(t('kv.ttlPlaceholder')) + '"></div>' +
+        '<div class="field"><label>' + esc(t('kv.ttlSecs')) + '</label><input type="number" id="kvp-ttl" min="1" required value="' + esc(defaultTtl) + '" placeholder="' + esc(t('kv.ttlPlaceholder')) + '"></div>' +
         '<div class="field"><label>' + esc(t('kv.metadata')) + '</label><input type="text" id="kvp-meta" value="' + esc(preset ? preset.metadata : '') + '" placeholder="' + esc(t('kv.metadataPlaceholder')) + '"></div>' +
         '</div>' +
-        '<label class="checkbox-row"><input type="checkbox" id="kvp-eph"> ' + esc(t('kv.ephemeral')) + '</label>' +
+        '<label class="checkbox-row"><input type="checkbox" id="kvp-eph"' + (defaultEph ? ' checked' : '') + '> ' + esc(t('kv.ephemeral')) + '</label>' +
         '<div class="muted text-xs" style="margin-top:-8px;">' + esc(t('kv.ephemeralHint')) + '</div>' +
         '</form>',
       footer:
@@ -1636,7 +1827,7 @@
               json: {
                 value: $('kvp-val').value,
                 metadata: metaRaw || null,
-                ttl_secs: ttlRaw ? Number(ttlRaw) : null,
+                ttl_secs: ttlRaw ? Number(ttlRaw) : defaultTtl,
                 ephemeral: $('kvp-eph').checked
               }
             });
@@ -1651,12 +1842,14 @@
   }
 
   function openKvIncrModal(key) {
+    var nsMeta = state.kvNamespaces.find(function (n) { return n.name === state.selectedKvNs; });
+    var defaultTtl = (nsMeta && nsMeta.default_ttl_secs) ? nsMeta.default_ttl_secs : 604800;
     openModal({
       title: t('kv.incr') + ': ' + key,
       body:
         '<form id="kv-incr-form" class="stack gap-md">' +
         '<div class="field"><label>' + esc(t('kv.incrDelta')) + '</label><input type="number" id="kvi-delta" value="1" required></div>' +
-        '<div class="field"><label>' + esc(t('kv.ttlSecs')) + ' (' + esc(t('common.optional')) + ')</label><input type="number" id="kvi-ttl" min="0" placeholder="' + esc(t('kv.ttlPlaceholder')) + '"></div>' +
+        '<div class="field"><label>' + esc(t('kv.ttlSecs')) + '</label><input type="number" id="kvi-ttl" min="1" required value="' + esc(defaultTtl) + '" placeholder="' + esc(t('kv.ttlPlaceholder')) + '"></div>' +
         '</form>',
       footer:
         '<button type="button" class="btn" id="kvi-cancel">' + esc(t('common.cancel')) + '</button>' +
@@ -1671,7 +1864,7 @@
               method: 'POST',
               json: {
                 delta: Number($('kvi-delta').value || 1),
-                ttl_secs: ttlRaw ? Number(ttlRaw) : null
+                ttl_secs: ttlRaw ? Number(ttlRaw) : defaultTtl
               }
             });
             closeModal();
@@ -1863,32 +2056,57 @@
       title: t('queues.editConfig') + ' · ' + qCfg.name,
       body:
         '<form id="edit-queue-form" class="stack gap-md">' +
+        resourceGroupField(qCfg.group || '') +
+        '<div class="field"><label>' + esc(t('common.description')) + '</label><input type="text" id="eq-desc" value="' + esc(qCfg.description || '') + '" placeholder="' + esc(t('common.descriptionPlaceholder')) + '"></div>' +
+        '<div class="field"><label>' + esc(t('queues.consumerProject')) + '</label><select id="eq-cproj">' + renderProjectSelectOptions(qCfg.consumer_project_id || '', true) + '</select></div>' +
         '<div class="grid-2">' +
         '<div class="field"><label>' + esc(t('queues.maxConcurrency')) + '</label><input type="number" id="eq-conc" min="1" value="' + esc(qCfg.max_concurrency) + '"></div>' +
         '<div class="field"><label>' + esc(t('queues.rateLimit')) + '</label><input type="number" id="eq-rate" min="0" value="' + esc(qCfg.rate_limit_per_sec || '') + '" placeholder="unlimited"></div>' +
         '</div>' +
         '<div class="grid-2">' +
         '<div class="field"><label>' + esc(t('queues.batchSize')) + '</label><input type="number" id="eq-batch" min="1" value="' + esc(qCfg.batch_size) + '"></div>' +
-        '<div class="field"><label>' + esc(t('queues.maxAttempts')) + '</label><input type="number" id="eq-att" min="1" value="' + esc(qCfg.max_attempts) + '"></div>' +
+        '<div class="field"><label>' + esc(t('queues.leaseSecs')) + '</label><input type="number" id="eq-lease" min="1" value="' + esc(qCfg.lease_secs || 60) + '"></div>' +
         '</div>' +
+        '<div class="grid-2">' +
+        '<div class="field"><label>' + esc(t('queues.maxAttempts')) + '</label><input type="number" id="eq-att" min="1" value="' + esc(qCfg.max_attempts) + '"></div>' +
+        '<div class="field"><label>' + esc(t('queues.retryBackoffSecs')) + '</label><input type="number" id="eq-backoff" min="1" value="' + esc(qCfg.retry_backoff_secs || 5) + '"></div>' +
+        '</div>' +
+        '<div class="field"><label>' + esc(t('queues.dlqRetentionSecs')) + '</label><input type="number" id="eq-dlq" min="0" value="' + esc(qCfg.dlq_retention_secs || '') + '" placeholder="' + esc(t('common.unlimited')) + '"></div>' +
         '</form>',
       footer:
         '<button type="button" class="btn" id="eq-cancel">' + esc(t('common.cancel')) + '</button>' +
         '<button type="submit" form="edit-queue-form" class="btn btn-primary">' + esc(t('common.save')) + '</button>',
       onMount: function () {
+        loadResourceGroupOptions();
         $('eq-cancel').addEventListener('click', closeModal);
         $('edit-queue-form').addEventListener('submit', async function (ev) {
           ev.preventDefault();
           var rateRaw = $('eq-rate').value.trim();
+          var dlqRaw = $('eq-dlq').value.trim();
+          var cproj = $('eq-cproj').value;
           var body = {
+            group: $('resource-group').value.trim(),
+            description: $('eq-desc').value.trim(),
             max_concurrency: Number($('eq-conc').value) || 4,
             batch_size: Number($('eq-batch').value) || 20,
-            max_attempts: Number($('eq-att').value) || 5
+            lease_secs: Number($('eq-lease').value) || 60,
+            max_attempts: Number($('eq-att').value) || 5,
+            retry_backoff_secs: Number($('eq-backoff').value) || 5
           };
+          if (!cproj) {
+            body.clear_consumer_project = true;
+          } else {
+            body.consumer_project_id = cproj;
+          }
           if (rateRaw === '' || Number(rateRaw) <= 0) {
             body.clear_rate_limit = true;
           } else {
             body.rate_limit_per_sec = Number(rateRaw);
+          }
+          if (dlqRaw === '' || Number(dlqRaw) <= 0) {
+            body.clear_dlq_retention = true;
+          } else {
+            body.dlq_retention_secs = Number(dlqRaw);
           }
           try {
             await api('/_api/v1/queues/' + enc(qCfg.name), { method: 'PATCH', json: body });
@@ -1917,15 +2135,25 @@
     openModal({
       title: t('queues.new'),
       body:
-        '<form id="create-q-form" class="form-grid">' +
-        '<div class="field span-2"><label>' + esc(t('queues.name')) + '</label><input type="text" id="cq-name" required placeholder="' + esc(t('queues.namePlaceholder')) + '"></div>' +
+        '<form id="create-q-form" class="stack gap-md">' +
+        '<div class="field"><label>' + esc(t('queues.name')) + '</label><input type="text" id="cq-name" required placeholder="' + esc(t('queues.namePlaceholder')) + '"></div>' +
         resourceGroupField() +
+        '<div class="form-grid">' +
         '<div class="field"><label>' + esc(t('queues.producerProject')) + '</label><select id="cq-proj">' + renderProjectSelectOptions('', true) + '</select></div>' +
         '<div class="field"><label>' + esc(t('queues.consumerProject')) + '</label><select id="cq-cproj">' + renderProjectSelectOptions('', true) + '</select></div>' +
+        '</div>' +
+        '<details class="adv-options"><summary>' + esc(t('common.advancedOptions')) + '</summary>' +
+        '<div class="adv-options-body stack gap-sm">' +
+        '<div class="field"><label>' + esc(t('common.description')) + '</label><input type="text" id="cq-desc" placeholder="' + esc(t('common.descriptionPlaceholder')) + '"></div>' +
+        '<div class="form-grid">' +
         '<div class="field"><label>' + esc(t('queues.maxConcurrency')) + '</label><input type="number" id="cq-conc" value="4" min="1"></div>' +
+        '<div class="field"><label>' + esc(t('queues.rateLimit')) + '</label><input type="number" id="cq-rate" min="1" placeholder="unlimited"></div>' +
         '<div class="field"><label>' + esc(t('queues.batchSize')) + '</label><input type="number" id="cq-batch" value="20" min="1"></div>' +
         '<div class="field"><label>' + esc(t('queues.leaseSecs')) + '</label><input type="number" id="cq-lease" value="60" min="1"></div>' +
         '<div class="field"><label>' + esc(t('queues.maxAttempts')) + '</label><input type="number" id="cq-attempts" value="5" min="1"></div>' +
+        '<div class="field"><label>' + esc(t('queues.retryBackoffSecs')) + '</label><input type="number" id="cq-backoff" value="5" min="1"></div>' +
+        '<div class="field span-2"><label>' + esc(t('queues.dlqRetentionSecs')) + '</label><input type="number" id="cq-dlq" min="1" placeholder="' + esc(t('common.unlimited')) + '"></div>' +
+        '</div></div></details>' +
         '</form>',
       footer:
         '<button type="button" class="btn" id="cq-cancel">' + esc(t('common.cancel')) + '</button>' +
@@ -1936,18 +2164,25 @@
         $('create-q-form').addEventListener('submit', async function (ev) {
           ev.preventDefault();
           var name = $('cq-name').value.trim();
+          var rateRaw = $('cq-rate').value.trim();
+          var dlqRaw = $('cq-dlq').value.trim();
+          var descRaw = $('cq-desc').value.trim();
           try {
             await api('/_api/v1/queues', {
               method: 'POST',
               json: {
                 name: name,
                 group: selectedResourceGroup(),
+                description: descRaw || null,
                 project_id: $('cq-proj').value || null,
                 consumer_project_id: $('cq-cproj').value || null,
                 max_concurrency: Number($('cq-conc').value || 4),
+                rate_limit_per_sec: rateRaw ? Number(rateRaw) : null,
                 batch_size: Number($('cq-batch').value || 20),
                 lease_secs: Number($('cq-lease').value || 60),
-                max_attempts: Number($('cq-attempts').value || 5)
+                max_attempts: Number($('cq-attempts').value || 5),
+                retry_backoff_secs: Number($('cq-backoff').value || 5),
+                dlq_retention_secs: dlqRaw ? Number(dlqRaw) : null
               }
             });
             closeModal();
@@ -2077,6 +2312,7 @@
         '<div class="row">' +
         '<input type="search" id="blob-prefix-input" style="width:180px;" value="' + esc(state.blobPrefix) + '" placeholder="' + esc(t('blobs.prefixPlaceholder')) + '">' +
         '<button type="button" class="btn btn-sm" id="blob-filter-btn">' + esc(t('common.filter')) + '</button>' +
+        (canWriteBkt ? '<button type="button" class="btn btn-sm" id="blob-edit-bkt-btn">' + esc(t('common.editConfig')) + '</button>' : '') +
         (isAdmin() ? '<button type="button" class="btn btn-sm" id="blob-toggle-pub">' + esc(t('blobs.togglePublic')) + '</button>' : '') +
         (canWriteBkt ? '<button type="button" class="btn btn-danger btn-sm" id="blob-del-bkt-btn">' + esc(t('blobs.deleteBucket')) + '</button>' : '') +
         '</div></div></div>' +
@@ -2133,6 +2369,11 @@
           toast(t('blobs.bucketUpdated'), 'success');
           renderBlobs(true);
         } catch (e) { toast(e.message, 'error'); }
+      });
+    }
+    if ($('blob-edit-bkt-btn') && bCfg) {
+      $('blob-edit-bkt-btn').addEventListener('click', function () {
+        openEditBucketModal(bCfg);
       });
     }
     if ($('blob-del-bkt-btn') && bCfg) {
@@ -2252,6 +2493,19 @@
         resourceGroupField() +
         '<div class="field"><label>' + esc(t('common.project')) + '</label><select id="cb-proj">' + renderProjectSelectOptions('', true) + '</select></div>' +
         '<label class="checkbox-row"><input type="checkbox" id="cb-pub"> ' + esc(t('blobs.publicRead')) + '</label>' +
+        '<details class="adv-options"><summary>' + esc(t('common.advancedOptions')) + '</summary>' +
+        '<div class="adv-options-body stack gap-sm">' +
+        '<div class="field"><label>' + esc(t('common.description')) + '</label><input type="text" id="cb-desc" placeholder="' + esc(t('common.descriptionPlaceholder')) + '"></div>' +
+        '<div class="form-grid">' +
+        '<div class="field"><label>' + esc(t('blobs.maxObjectSizeMb')) + '</label><input type="number" id="cb-max-obj" min="1" placeholder="64"></div>' +
+        '<div class="field"><label>' + esc(t('blobs.quotaMb')) + '</label><input type="number" id="cb-quota" min="1" placeholder="1024"></div>' +
+        '</div>' +
+        '<div class="field"><label>' + esc(t('blobs.allowedContentTypes')) + '</label><input type="text" id="cb-types" placeholder="image/*,application/pdf,text/*"></div>' +
+        '<div class="form-grid">' +
+        '<div class="field"><label>' + esc(t('blobs.cacheControl')) + '</label><input type="text" id="cb-cache" placeholder="public, max-age=86400"></div>' +
+        '<div class="field"><label>' + esc(t('blobs.corsOrigins')) + '</label><input type="text" id="cb-cors" placeholder="*"></div>' +
+        '</div>' +
+        '</div></details>' +
         '</form>',
       footer:
         '<button type="button" class="btn" id="cb-cancel">' + esc(t('common.cancel')) + '</button>' +
@@ -2262,6 +2516,8 @@
         $('create-bkt-form').addEventListener('submit', async function (ev) {
           ev.preventDefault();
           var name = $('cb-name').value.trim();
+          var maxObjRaw = $('cb-max-obj').value.trim();
+          var quotaRaw = $('cb-quota').value.trim();
           try {
             await api('/_api/v1/buckets', {
               method: 'POST',
@@ -2269,12 +2525,67 @@
                 name: name,
                 group: selectedResourceGroup(),
                 project_id: $('cb-proj').value || null,
-                public_read: $('cb-pub').checked
+                public_read: $('cb-pub').checked,
+                description: $('cb-desc').value.trim() || null,
+                max_object_size_mb: maxObjRaw ? Number(maxObjRaw) : null,
+                quota_mb: quotaRaw ? Number(quotaRaw) : null,
+                allowed_content_types: $('cb-types').value.trim() || null,
+                cache_control: $('cb-cache').value.trim() || null,
+                cors_origins: $('cb-cors').value.trim() || null
               }
             });
             closeModal();
             state.selectedBucket = name;
             toast(t('blobs.bucketCreated'), 'success');
+            renderBlobs(true);
+          } catch (e) { toast(e.message, 'error'); }
+        });
+      }
+    });
+  }
+
+  function openEditBucketModal(bCfg) {
+    openModal({
+      title: t('common.editConfig') + ' · ' + bCfg.name,
+      body:
+        '<form id="edit-bkt-form" class="stack gap-md">' +
+        resourceGroupField(bCfg.group || '') +
+        '<div class="field"><label>' + esc(t('common.description')) + '</label><input type="text" id="eb-desc" value="' + esc(bCfg.description || '') + '" placeholder="' + esc(t('common.descriptionPlaceholder')) + '"></div>' +
+        (isAdmin() ? '<label class="checkbox-row"><input type="checkbox" id="eb-pub"' + (bCfg.public_read ? ' checked' : '') + '> ' + esc(t('blobs.publicRead')) + '</label>' : '') +
+        '<div class="form-grid">' +
+        '<div class="field"><label>' + esc(t('blobs.maxObjectSizeMb')) + '</label><input type="number" id="eb-max-obj" min="0" value="' + esc(bCfg.max_object_size_mb || '') + '" placeholder="' + esc(t('common.unlimited')) + '"></div>' +
+        '<div class="field"><label>' + esc(t('blobs.quotaMb')) + '</label><input type="number" id="eb-quota" min="0" value="' + esc(bCfg.quota_mb || '') + '" placeholder="' + esc(t('common.unlimited')) + '"></div>' +
+        '</div>' +
+        '<div class="field"><label>' + esc(t('blobs.allowedContentTypes')) + '</label><input type="text" id="eb-types" value="' + esc(bCfg.allowed_content_types || '') + '" placeholder="image/*,application/pdf,text/*"></div>' +
+        '<div class="form-grid">' +
+        '<div class="field"><label>' + esc(t('blobs.cacheControl')) + '</label><input type="text" id="eb-cache" value="' + esc(bCfg.cache_control || '') + '" placeholder="public, max-age=86400"></div>' +
+        '<div class="field"><label>' + esc(t('blobs.corsOrigins')) + '</label><input type="text" id="eb-cors" value="' + esc(bCfg.cors_origins || '') + '" placeholder="*"></div>' +
+        '</div>' +
+        '</form>',
+      footer:
+        '<button type="button" class="btn" id="eb-cancel">' + esc(t('common.cancel')) + '</button>' +
+        '<button type="submit" form="edit-bkt-form" class="btn btn-primary">' + esc(t('common.save')) + '</button>',
+      onMount: function () {
+        loadResourceGroupOptions();
+        $('eb-cancel').addEventListener('click', closeModal);
+        $('edit-bkt-form').addEventListener('submit', async function (ev) {
+          ev.preventDefault();
+          var maxObjRaw = $('eb-max-obj').value.trim();
+          var quotaRaw = $('eb-quota').value.trim();
+          var body = {
+            group: $('resource-group').value.trim(),
+            description: $('eb-desc').value.trim(),
+            max_object_size_mb: maxObjRaw ? Number(maxObjRaw) : 0,
+            quota_mb: quotaRaw ? Number(quotaRaw) : 0,
+            allowed_content_types: $('eb-types').value.trim(),
+            cache_control: $('eb-cache').value.trim(),
+            cors_origins: $('eb-cors').value.trim()
+          };
+          if ($('eb-pub')) body.public_read = $('eb-pub').checked;
+          try {
+            await api('/_api/v1/buckets/' + enc(bCfg.name), { method: 'PATCH', json: body });
+            closeModal();
+            toast(t('blobs.bucketUpdated'), 'success');
             renderBlobs(true);
           } catch (e) { toast(e.message, 'error'); }
         });
@@ -2409,9 +2720,15 @@
         }
         bodyHtml =
           '<div class="panel"><div class="panel-header"><div class="toolbar">' +
-          '<div><h3 class="panel-title mono">' + esc(dbMeta.name) + '</h3><div class="muted text-xs mono">' + esc(dbMeta.id) + '</div></div>' +
+          '<div><h3 class="panel-title mono">' + esc(dbMeta.name) + '</h3><div class="muted text-xs mono">' + esc(dbMeta.id) +
+          (dbMeta.read_only ? ' · Read-Only' : '') +
+          (dbMeta.max_rows ? ' · Max Rows: ' + esc(dbMeta.max_rows) : '') +
+          (dbMeta.max_size_mb ? ' · Max Size: ' + esc(dbMeta.max_size_mb) + ' MiB' : '') +
+          (dbMeta.description ? ' · ' + esc(dbMeta.description) : '') +
+          '</div></div>' +
           '<div class="row">' +
           '<button type="button" class="btn btn-sm" id="db-sample-btn">' + esc(t('dbs.sampleSelect')) + '</button>' +
+          (canWriteDb ? '<button type="button" class="btn btn-sm" id="db-edit-btn">' + esc(t('common.editConfig')) + '</button>' : '') +
           (canWriteDb ? '<button type="button" class="btn btn-danger btn-sm" id="db-delete-btn">' + esc(t('dbs.deleteDb')) + '</button>' : '') +
           '</div>' +
           '</div></div><div class="panel-body stack gap-md">' +
@@ -2488,6 +2805,7 @@
     }
     if ($('db-query-btn')) $('db-query-btn').addEventListener('click', function () { runDbQuery(dbMeta.id); });
     if ($('db-exec-btn')) $('db-exec-btn').addEventListener('click', function () { runDbExecute(dbMeta.id); });
+    if ($('db-edit-btn') && dbMeta) $('db-edit-btn').addEventListener('click', function () { openEditDbModal(dbMeta); });
     if ($('db-delete-btn') && dbMeta) {
       $('db-delete-btn').addEventListener('click', function () {
         var delId = dbMeta.id;
@@ -2533,10 +2851,16 @@
         '<input id="fts-name" required placeholder="' + esc(t('dbs.ftsIndexName')) + '">' +
         '<input id="fts-table" required placeholder="' + esc(t('dbs.ftsTable')) + '">' +
         '<input id="fts-columns" required placeholder="' + esc(t('dbs.ftsColumns')) + '">' +
+        '<select id="fts-tokenizer">' +
+        '<option value="unicode61">unicode61 (Default)</option>' +
+        '<option value="cjk_jieba">cjk_jieba (CJK / Chinese)</option>' +
+        '<option value="ngram3">ngram3 (Substring)</option>' +
+        '<option value="raw">raw (Exact)</option>' +
+        '</select>' +
         '<button type="submit" class="btn btn-primary">' + esc(t('dbs.ftsNewIndex')) + '</button></form>' : '') +
         (indexes.length ? indexes.map(function (idx) {
           return '<div class="panel"><div class="panel-body stack gap-sm"><strong>' + esc(idx.name) + '</strong>' +
-            '<span class="muted">' + esc(idx.table + ' (' + idx.columns.join(', ') + ')') + '</span>' +
+            '<span class="muted">' + esc(idx.table + ' (' + idx.columns.join(', ') + ')' + (idx.tokenizer ? ' · ' + idx.tokenizer : '')) + '</span>' +
             '<form class="row" data-fts-query="' + esc(idx.name) + '"><input name="query" required placeholder="' +
             esc(t('dbs.ftsTestPlaceholder')) + '"><button class="btn" type="submit">' + esc(t('common.search')) + '</button></form>' +
             '<pre class="code-block hidden" data-fts-result="' + esc(idx.name) + '"></pre>' +
@@ -2548,7 +2872,8 @@
         try {
           await api(path, { method: 'POST', json: {
             name: $('fts-name').value.trim(), table: $('fts-table').value.trim(),
-            columns: $('fts-columns').value.split(',').map(function (value) { return value.trim(); }).filter(Boolean)
+            columns: $('fts-columns').value.split(',').map(function (value) { return value.trim(); }).filter(Boolean),
+            tokenizer: $('fts-tokenizer') ? $('fts-tokenizer').value : null
           } });
           if (isCurrentFts()) renderDbFts(db, canWrite);
         } catch (e) { toast(e.message, 'error'); }
@@ -2641,6 +2966,17 @@
         '<div class="field"><label>' + esc(t('dbs.dbName')) + '</label><input type="text" id="cdb-name" required placeholder="' + esc(t('dbs.dbPlaceholder')) + '"></div>' +
         resourceGroupField() +
         '<div class="field"><label>' + esc(t('common.project')) + '</label><select id="cdb-proj">' + renderProjectSelectOptions('', true) + '</select></div>' +
+        '<details class="adv-options"><summary>' + esc(t('common.advancedOptions')) + '</summary>' +
+        '<div class="adv-options-body stack gap-sm">' +
+        '<div class="field"><label>' + esc(t('common.description')) + '</label><input type="text" id="cdb-desc" placeholder="' + esc(t('common.descriptionPlaceholder')) + '"></div>' +
+        '<div class="field"><label>' + esc(t('dbs.initSql')) + '</label><textarea id="cdb-init-sql" class="mono" rows="3" placeholder="' + esc(t('dbs.initSqlPlaceholder')) + '"></textarea></div>' +
+        '<div class="form-grid">' +
+        '<div class="field"><label>' + esc(t('dbs.maxRows')) + '</label><input type="number" id="cdb-max-rows" min="1" placeholder="1000000"></div>' +
+        '<div class="field"><label>' + esc(t('dbs.maxSizeMb')) + '</label><input type="number" id="cdb-max-size" min="1" placeholder="512"></div>' +
+        '</div>' +
+        '<label class="checkbox-row"><input type="checkbox" id="cdb-fk" checked> ' + esc(t('dbs.foreignKeys')) + '</label>' +
+        '<label class="checkbox-row"><input type="checkbox" id="cdb-ro"> ' + esc(t('dbs.readOnly')) + '</label>' +
+        '</div></details>' +
         '</form>',
       footer:
         '<button type="button" class="btn" id="cdb-cancel">' + esc(t('common.cancel')) + '</button>' +
@@ -2650,14 +2986,72 @@
         $('cdb-cancel').addEventListener('click', closeModal);
         $('create-db-form').addEventListener('submit', async function (ev) {
           ev.preventDefault();
+          var maxRowsRaw = $('cdb-max-rows').value.trim();
+          var maxSizeRaw = $('cdb-max-size').value.trim();
+          var initSqlRaw = $('cdb-init-sql').value.trim();
           try {
             var res = await api('/_api/v1/dbs', {
               method: 'POST',
-              json: { name: $('cdb-name').value.trim(), group: selectedResourceGroup(), project_id: $('cdb-proj').value || null }
+              json: {
+                name: $('cdb-name').value.trim(),
+                group: selectedResourceGroup(),
+                project_id: $('cdb-proj').value || null,
+                description: $('cdb-desc').value.trim() || null,
+                init_sql: initSqlRaw || null,
+                max_rows: maxRowsRaw ? Number(maxRowsRaw) : null,
+                max_size_mb: maxSizeRaw ? Number(maxSizeRaw) : null,
+                foreign_keys: $('cdb-fk').checked,
+                read_only: $('cdb-ro').checked
+              }
             });
             closeModal();
             state.selectedDbId = res.id;
             toast(t('dbs.created'), 'success');
+            renderDbs(true);
+          } catch (e) { toast(e.message, 'error'); }
+        });
+      }
+    });
+  }
+
+  function openEditDbModal(dbMeta) {
+    openModal({
+      title: t('common.editConfig') + ' · ' + dbMeta.name,
+      body:
+        '<form id="edit-db-form" class="stack gap-md">' +
+        resourceGroupField(dbMeta.group || '') +
+        '<div class="field"><label>' + esc(t('common.description')) + '</label><input type="text" id="edb-desc" value="' + esc(dbMeta.description || '') + '" placeholder="' + esc(t('common.descriptionPlaceholder')) + '"></div>' +
+        '<div class="form-grid">' +
+        '<div class="field"><label>' + esc(t('dbs.maxRows')) + '</label><input type="number" id="edb-max-rows" min="0" value="' + esc(dbMeta.max_rows || '') + '" placeholder="' + esc(t('common.unlimited')) + '"></div>' +
+        '<div class="field"><label>' + esc(t('dbs.maxSizeMb')) + '</label><input type="number" id="edb-max-size" min="0" value="' + esc(dbMeta.max_size_mb || '') + '" placeholder="' + esc(t('common.unlimited')) + '"></div>' +
+        '</div>' +
+        '<label class="checkbox-row"><input type="checkbox" id="edb-fk"' + (dbMeta.foreign_keys !== false ? ' checked' : '') + '> ' + esc(t('dbs.foreignKeys')) + '</label>' +
+        '<label class="checkbox-row"><input type="checkbox" id="edb-ro"' + (dbMeta.read_only ? ' checked' : '') + '> ' + esc(t('dbs.readOnly')) + '</label>' +
+        '</form>',
+      footer:
+        '<button type="button" class="btn" id="edb-cancel">' + esc(t('common.cancel')) + '</button>' +
+        '<button type="submit" form="edit-db-form" class="btn btn-primary">' + esc(t('common.save')) + '</button>',
+      onMount: function () {
+        loadResourceGroupOptions();
+        $('edb-cancel').addEventListener('click', closeModal);
+        $('edit-db-form').addEventListener('submit', async function (ev) {
+          ev.preventDefault();
+          var maxRowsRaw = $('edb-max-rows').value.trim();
+          var maxSizeRaw = $('edb-max-size').value.trim();
+          try {
+            await api('/_api/v1/dbs/' + enc(dbMeta.id), {
+              method: 'PATCH',
+              json: {
+                group: $('resource-group').value.trim(),
+                description: $('edb-desc').value.trim(),
+                max_rows: maxRowsRaw ? Number(maxRowsRaw) : 0,
+                max_size_mb: maxSizeRaw ? Number(maxSizeRaw) : 0,
+                foreign_keys: $('edb-fk').checked,
+                read_only: $('edb-ro').checked
+              }
+            });
+            closeModal();
+            toast(t('dbs.updated'), 'success');
             renderDbs(true);
           } catch (e) { toast(e.message, 'error'); }
         });
@@ -2710,7 +3104,7 @@
           }).join('') + '</div>' +
           '<div class="row gap-xs"><button class="btn btn-sm" id="search-prev"' + (searchState.offset === 0 ? ' disabled' : '') + '>' + esc(t('search.previousPage')) + '</button>' +
           '<button class="btn btn-sm" id="search-next"' + (!hasMoreDocs ? ' disabled' : '') + '>' + esc(t('search.nextPage')) + '</button></div>' +
-          (writable ? '<button class="btn btn-danger" id="search-delete-index">' + esc(t('search.deleteIndex')) + '</button>' : '') : '') +
+          (writable ? '<div class="row gap-xs"><button class="btn" id="search-edit-index">' + esc(t('common.editConfig')) + '</button><button class="btn btn-danger" id="search-delete-index">' + esc(t('search.deleteIndex')) + '</button></div>' : '') : '') +
         '</div></div>';
       $('search-index-select').addEventListener('change', function (event) {
         searchState.selected = event.target.value;
@@ -2726,19 +3120,79 @@
         searchState.offset += 100;
         renderSearch();
       });
+      if ($('search-edit-index') && selected) $('search-edit-index').addEventListener('click', function () {
+        openModal({
+          title: t('common.editConfig') + ' · ' + selected.name,
+          body:
+            '<form id="edit-search-index-form" class="stack gap-md">' +
+            resourceGroupField(selected.group || '') +
+            '<div class="field"><label>' + esc(t('common.description')) + '</label><input type="text" id="esi-desc" value="' + esc(selected.description || '') + '" placeholder="' + esc(t('common.descriptionPlaceholder')) + '"></div>' +
+            '<div class="field"><label>' + esc(t('search.writerBudgetMb')) + '</label><input type="number" id="esi-budget" min="15" max="256" value="' + esc(selected.writer_budget_mb || 20) + '"></div>' +
+            '</form>',
+          footer:
+            '<button type="button" class="btn" id="esi-cancel">' + esc(t('common.cancel')) + '</button>' +
+            '<button form="edit-search-index-form" class="btn btn-primary" type="submit">' + esc(t('common.save')) + '</button>',
+          onMount: function () {
+            loadResourceGroupOptions();
+            $('esi-cancel').addEventListener('click', closeModal);
+            $('edit-search-index-form').addEventListener('submit', async function (event) {
+              event.preventDefault();
+              try {
+                await api('/_api/v1/search/' + enc(selected.id), {
+                  method: 'PATCH',
+                  json: {
+                    group: $('resource-group').value.trim(),
+                    description: $('esi-desc').value.trim(),
+                    writer_budget_mb: Number($('esi-budget').value || 20)
+                  }
+                });
+                closeModal();
+                toast(t('search.indexUpdated'), 'success');
+                renderSearch();
+              } catch (e) { toast(e.message, 'error'); }
+            });
+          }
+        });
+      });
       if ($('search-create-index')) $('search-create-index').addEventListener('click', function () {
         openModal({
           title: t('search.newIndex'),
-          body: '<form id="search-index-form" class="stack gap-md"><div class="field"><label>' + esc(t('common.name')) +
-            '</label><input id="search-index-name" required></div><div class="field"><label>' + esc(t('common.project')) +
-            '</label><select id="search-index-owner">' + renderProjectSelectOptions('', true) + '</select></div></form>',
+          body: '<form id="search-index-form" class="stack gap-md">' +
+            '<div class="field"><label>' + esc(t('common.name')) + '</label><input id="search-index-name" required placeholder="' + esc(t('search.indexNamePlaceholder')) + '"></div>' +
+            resourceGroupField() +
+            '<div class="field"><label>' + esc(t('common.project')) + '</label><select id="search-index-owner">' + renderProjectSelectOptions('', true) + '</select></div>' +
+            '<details class="adv-options"><summary>' + esc(t('common.advancedOptions')) + '</summary>' +
+            '<div class="adv-options-body stack gap-sm">' +
+            '<div class="field"><label>' + esc(t('common.description')) + '</label><input type="text" id="search-index-desc" placeholder="' + esc(t('common.descriptionPlaceholder')) + '"></div>' +
+            '<div class="form-grid">' +
+            '<div class="field"><label>' + esc(t('search.tokenizer')) + '</label><select id="search-index-tok">' +
+            '<option value="cjk_jieba">cjk_jieba (CJK / Chinese & English)</option>' +
+            '<option value="unicode61">unicode61 (Standard)</option>' +
+            '<option value="ngram3">ngram3 (Substring)</option>' +
+            '<option value="raw">raw (Exact)</option>' +
+            '</select></div>' +
+            '<div class="field"><label>' + esc(t('search.writerBudgetMb')) + '</label><input type="number" id="search-index-budget" min="15" max="256" value="20"></div>' +
+            '</div>' +
+            '<div class="field"><label>' + esc(t('search.facetFields')) + '</label><input type="text" id="search-index-facets" placeholder="category,status,lang,source,level"></div>' +
+            '</div></details>' +
+            '</form>',
           footer: '<button form="search-index-form" class="btn btn-primary" type="submit">' + esc(t('common.create')) + '</button>',
           onMount: function () {
+            loadResourceGroupOptions();
             $('search-index-form').addEventListener('submit', async function (event) {
               event.preventDefault();
+              var facetsRaw = $('search-index-facets').value.trim();
+              var facets = facetsRaw ? facetsRaw.split(',').map(function (s) { return s.trim(); }).filter(Boolean) : null;
+              var budgetRaw = $('search-index-budget').value.trim();
               try {
                 var created = await api('/_api/v1/search', { method: 'POST', json: {
-                  name: $('search-index-name').value.trim(), project_id: $('search-index-owner').value || null
+                  name: $('search-index-name').value.trim(),
+                  group: selectedResourceGroup(),
+                  project_id: $('search-index-owner').value || null,
+                  description: $('search-index-desc').value.trim() || null,
+                  tokenizer: $('search-index-tok').value || null,
+                  writer_budget_mb: budgetRaw ? Number(budgetRaw) : null,
+                  facet_fields: facets
                 } });
                 searchState.selected = created.id;
                 searchState.offset = 0;

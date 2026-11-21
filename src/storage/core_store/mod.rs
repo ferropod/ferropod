@@ -9,7 +9,8 @@ use turso::{Database, Value as TursoValue};
 
 use crate::core::model::{Bindings, Deployment, FerroError, ObjectMeta, Project, Result};
 use crate::storage::tx::{
-    checkpoint_db, connect_db, ensure_resource_group_column, map_turso_err, open_turso_db,
+    checkpoint_db, connect_db, ensure_column, ensure_resource_group_column, map_turso_err,
+    open_turso_db,
 };
 
 const CORE_SCHEMA: &str = r#"
@@ -23,7 +24,11 @@ CREATE TABLE IF NOT EXISTS projects (
     health_check_path TEXT NOT NULL DEFAULT '/health',
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
-    resource_group TEXT
+    resource_group TEXT,
+    description TEXT,
+    timeout_ms INTEGER,
+    wasm_max_memory_mb INTEGER,
+    allow_private_outbound INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS production_history (
@@ -76,7 +81,12 @@ CREATE TABLE IF NOT EXISTS kv_namespaces (
     name TEXT PRIMARY KEY,
     project_id TEXT,
     created_at INTEGER NOT NULL,
-    resource_group TEXT
+    resource_group TEXT,
+    description TEXT,
+    default_ttl_secs INTEGER NOT NULL DEFAULT 604800,
+    default_ephemeral INTEGER NOT NULL DEFAULT 0,
+    max_value_bytes INTEGER,
+    max_keys INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS blob_buckets (
@@ -84,7 +94,13 @@ CREATE TABLE IF NOT EXISTS blob_buckets (
     project_id TEXT,
     public_read INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
-    resource_group TEXT
+    resource_group TEXT,
+    description TEXT,
+    max_object_size_mb INTEGER,
+    quota_mb INTEGER,
+    allowed_content_types TEXT,
+    cache_control TEXT,
+    cors_origins TEXT
 );
 
 CREATE TABLE IF NOT EXISTS blob_objects (
@@ -110,7 +126,12 @@ CREATE TABLE IF NOT EXISTS user_databases (
     name TEXT UNIQUE NOT NULL,
     project_id TEXT,
     created_at INTEGER NOT NULL,
-    resource_group TEXT
+    resource_group TEXT,
+    description TEXT,
+    max_rows INTEGER,
+    max_size_mb INTEGER,
+    foreign_keys INTEGER NOT NULL DEFAULT 0,
+    read_only INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS cron_jobs (
@@ -123,7 +144,11 @@ CREATE TABLE IF NOT EXISTS cron_jobs (
     last_run_at INTEGER,
     last_status TEXT,
     created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
+    updated_at INTEGER NOT NULL,
+    description TEXT,
+    timezone TEXT NOT NULL DEFAULT 'UTC',
+    timeout_ms INTEGER,
+    max_retries INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS user_db_fts_indexes (
@@ -159,6 +184,50 @@ impl TursoCoreStore {
             "blob_buckets",
         ] {
             ensure_resource_group_column(&conn, table).await?;
+        }
+        for (table, col, def) in [
+            ("projects", "description", "TEXT"),
+            ("projects", "timeout_ms", "INTEGER"),
+            ("projects", "wasm_max_memory_mb", "INTEGER"),
+            (
+                "projects",
+                "allow_private_outbound",
+                "INTEGER NOT NULL DEFAULT 0",
+            ),
+            ("kv_namespaces", "description", "TEXT"),
+            (
+                "kv_namespaces",
+                "default_ttl_secs",
+                "INTEGER NOT NULL DEFAULT 604800",
+            ),
+            (
+                "kv_namespaces",
+                "default_ephemeral",
+                "INTEGER NOT NULL DEFAULT 0",
+            ),
+            ("kv_namespaces", "max_value_bytes", "INTEGER"),
+            ("kv_namespaces", "max_keys", "INTEGER"),
+            ("blob_buckets", "description", "TEXT"),
+            ("blob_buckets", "max_object_size_mb", "INTEGER"),
+            ("blob_buckets", "quota_mb", "INTEGER"),
+            ("blob_buckets", "allowed_content_types", "TEXT"),
+            ("blob_buckets", "cache_control", "TEXT"),
+            ("blob_buckets", "cors_origins", "TEXT"),
+            ("user_databases", "description", "TEXT"),
+            ("user_databases", "max_rows", "INTEGER"),
+            ("user_databases", "max_size_mb", "INTEGER"),
+            (
+                "user_databases",
+                "foreign_keys",
+                "INTEGER NOT NULL DEFAULT 0",
+            ),
+            ("user_databases", "read_only", "INTEGER NOT NULL DEFAULT 0"),
+            ("cron_jobs", "description", "TEXT"),
+            ("cron_jobs", "timezone", "TEXT NOT NULL DEFAULT 'UTC'"),
+            ("cron_jobs", "timeout_ms", "INTEGER"),
+            ("cron_jobs", "max_retries", "INTEGER NOT NULL DEFAULT 0"),
+        ] {
+            ensure_column(&conn, table, col, def).await?;
         }
         Ok(Self {
             db,
@@ -221,6 +290,10 @@ pub(super) fn row_to_project(row: &turso::Row) -> Result<Project> {
         created_at: row.get(7).map_err(map_turso_err)?,
         updated_at: row.get(8).map_err(map_turso_err)?,
         group: opt_text(row, 9)?,
+        description: opt_text(row, 10)?,
+        timeout_ms: opt_i64(row, 11)?.and_then(|v| u64::try_from(v).ok()),
+        wasm_max_memory_mb: opt_i64(row, 12)?.and_then(|v| usize::try_from(v).ok()),
+        allow_private_outbound: opt_i64(row, 13)?.unwrap_or(0) != 0,
     })
 }
 

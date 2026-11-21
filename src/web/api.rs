@@ -21,8 +21,9 @@ use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 
 use crate::core::model::{
-    Bindings, EnqueueOpts, FerroError, JobStatus, LogQuery, QueueConfig, SearchFieldSchema,
-    SearchQueryInput, SqlValue, TargetEnv, TokenScope,
+    Bindings, BucketOpts, CronJobOpts, EnqueueOpts, FerroError, JobStatus, KvNamespaceOpts,
+    LogQuery, ProjectOpts, QueueConfig, SearchFieldSchema, SearchIndexOpts, SearchQueryInput,
+    SqlValue, TargetEnv, TokenScope, UserDbOpts, DEFAULT_KV_TTL_SECS,
 };
 use crate::core::service::{CreateDeploymentInput, PlatformService};
 use crate::gateway::guard::{authenticate_caller, ApiError};
@@ -53,7 +54,23 @@ struct StatusResp {
 struct CreateProjectReq {
     group: Option<String>,
     name: String,
+    description: Option<String>,
     health_check_path: Option<String>,
+    max_concurrency: Option<i64>,
+    timeout_ms: Option<u64>,
+    wasm_max_memory_mb: Option<usize>,
+    allow_private_outbound: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateProjectReq {
+    group: Option<String>,
+    description: Option<String>,
+    health_check_path: Option<String>,
+    max_concurrency: Option<i64>,
+    timeout_ms: Option<u64>,
+    wasm_max_memory_mb: Option<usize>,
+    allow_private_outbound: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -122,6 +139,22 @@ struct CreateKvNamespaceReq {
     group: Option<String>,
     name: String,
     project_id: Option<String>,
+    description: Option<String>,
+    default_ttl_secs: Option<u64>,
+    #[serde(default)]
+    default_ephemeral: bool,
+    max_value_bytes: Option<usize>,
+    max_keys: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateKvNamespaceReq {
+    group: Option<String>,
+    description: Option<String>,
+    default_ttl_secs: Option<u64>,
+    default_ephemeral: Option<bool>,
+    max_value_bytes: Option<usize>,
+    max_keys: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -151,11 +184,14 @@ struct CreateQueueReq {
     name: String,
     project_id: Option<String>,
     consumer_project_id: Option<String>,
+    description: Option<String>,
     max_concurrency: Option<i64>,
     rate_limit_per_sec: Option<i64>,
     batch_size: Option<i64>,
     lease_secs: Option<i64>,
     max_attempts: Option<i64>,
+    retry_backoff_secs: Option<i64>,
+    dlq_retention_secs: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -183,13 +219,26 @@ struct CreateBucketReq {
     group: Option<String>,
     name: String,
     project_id: Option<String>,
+    description: Option<String>,
     #[serde(default)]
     public_read: bool,
+    max_object_size_mb: Option<usize>,
+    quota_mb: Option<usize>,
+    allowed_content_types: Option<String>,
+    cache_control: Option<String>,
+    cors_origins: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct UpdateBucketReq {
-    public_read: bool,
+    group: Option<String>,
+    description: Option<String>,
+    public_read: Option<bool>,
+    max_object_size_mb: Option<usize>,
+    quota_mb: Option<usize>,
+    allowed_content_types: Option<String>,
+    cache_control: Option<String>,
+    cors_origins: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -209,6 +258,22 @@ struct CreateDbReq {
     group: Option<String>,
     name: String,
     project_id: Option<String>,
+    description: Option<String>,
+    init_sql: Option<String>,
+    max_rows: Option<usize>,
+    max_size_mb: Option<usize>,
+    foreign_keys: Option<bool>,
+    read_only: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateDbReq {
+    group: Option<String>,
+    description: Option<String>,
+    max_rows: Option<usize>,
+    max_size_mb: Option<usize>,
+    foreign_keys: Option<bool>,
+    read_only: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -251,7 +316,12 @@ pub fn router() -> Router<PlatformService> {
         .route("/tokens", get(list_tokens).post(create_token))
         .route("/tokens/{id}", delete(revoke_token))
         .route("/kv", get(kv_list_namespaces).post(kv_create_namespace))
-        .route("/kv/{ns}", get(kv_list).delete(kv_delete_namespace))
+        .route(
+            "/kv/{ns}",
+            get(kv_list)
+                .patch(kv_update_namespace)
+                .delete(kv_delete_namespace),
+        )
         .route("/kv/{ns}/{key}", get(kv_get).put(kv_put).delete(kv_delete))
         .route("/kv/{ns}/{key}/incr", post(kv_incr))
         .route("/queues", get(queue_list).post(queue_create))
@@ -268,7 +338,7 @@ pub fn router() -> Router<PlatformService> {
         )
         .route("/buckets/{name}/presign", post(bucket_presign))
         .route("/dbs", get(db_list).post(db_create))
-        .route("/dbs/{id}", delete(db_delete))
+        .route("/dbs/{id}", patch(db_update).delete(db_delete))
         .route("/dbs/{id}/schema", get(db_schema))
         .route("/dbs/{id}/query", post(db_query))
         .route("/dbs/{id}/execute", post(db_execute))
@@ -279,7 +349,10 @@ pub fn router() -> Router<PlatformService> {
             "/search",
             get(search_list_indexes).post(search_create_index),
         )
-        .route("/search/{id}", delete(search_delete_index))
+        .route(
+            "/search/{id}",
+            patch(search_update_index).delete(search_delete_index),
+        )
         .route("/search/{id}/commit", post(search_commit_index))
         .route(
             "/search/{id}/docs",
@@ -296,12 +369,13 @@ async fn list_resource_groups(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
     let caller = authenticate_caller(&svc, &headers, None).await?;
-    let (runtimes, dbs, namespaces, queues, buckets) = tokio::try_join!(
+    let (runtimes, dbs, namespaces, queues, buckets, search_indexes) = tokio::try_join!(
         svc.list_projects(&caller),
         svc.list_user_dbs(&caller),
         svc.list_kv_namespaces(&caller),
         svc.queue_list(&caller),
         svc.list_buckets(&caller),
+        svc.list_search_indexes(&caller),
     )
     .map_err(ApiError)?;
     let groups: std::collections::BTreeSet<_> = runtimes
@@ -311,6 +385,7 @@ async fn list_resource_groups(
         .chain(namespaces.into_iter().map(|r| r.group))
         .chain(queues.into_iter().map(|r| r.group))
         .chain(buckets.into_iter().map(|r| r.group))
+        .chain(search_indexes.into_iter().map(|r| r.group))
         .flatten()
         .collect();
     Ok(Json(groups))
@@ -321,7 +396,9 @@ fn runtime_routes(prefix: &str) -> Router<PlatformService> {
         .route(prefix, get(list_projects).post(create_project))
         .route(
             &format!("{prefix}/{{id}}"),
-            get(get_project).delete(delete_project),
+            get(get_project)
+                .patch(update_project)
+                .delete(delete_project),
         )
         .route(
             &format!("{prefix}/{{id}}/deployments"),
@@ -489,8 +566,11 @@ async fn metrics(
     let cpu_cores = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
+    let detected_budget = crate::config::detect_system_memory_bytes();
     let mem_budget_bytes = if profile.eq_ignore_ascii_case("lowmem") {
-        512 * 1024 * 1024
+        detected_budget.min(1024 * 1024 * 1024)
+    } else if detected_budget > 0 {
+        detected_budget
     } else if mem_total_bytes > 0 {
         mem_total_bytes
     } else {
@@ -712,15 +792,48 @@ async fn create_project(
 ) -> Result<impl IntoResponse, ApiError> {
     let caller = authenticate_caller(&svc, &headers, None).await?;
     let proj = svc
-        .create_grouped_project(
+        .create_project_with_opts(
             &caller,
             &req.name,
-            req.health_check_path.as_deref(),
-            req.group.as_deref(),
+            ProjectOpts {
+                group: req.group,
+                description: req.description,
+                health_check_path: req.health_check_path,
+                max_concurrency: req.max_concurrency,
+                timeout_ms: req.timeout_ms,
+                wasm_max_memory_mb: req.wasm_max_memory_mb,
+                allow_private_outbound: req.allow_private_outbound,
+            },
         )
         .await
         .map_err(ApiError)?;
     Ok((StatusCode::CREATED, Json(proj)))
+}
+
+async fn update_project(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateProjectReq>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let proj = svc
+        .update_project(
+            &caller,
+            &id,
+            ProjectOpts {
+                group: req.group,
+                description: req.description,
+                health_check_path: req.health_check_path,
+                max_concurrency: req.max_concurrency,
+                timeout_ms: req.timeout_ms,
+                wasm_max_memory_mb: req.wasm_max_memory_mb,
+                allow_private_outbound: req.allow_private_outbound,
+            },
+        )
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(proj))
 }
 
 async fn get_project(
@@ -1038,16 +1151,55 @@ async fn kv_create_namespace(
     Json(req): Json<CreateKvNamespaceReq>,
 ) -> Result<impl IntoResponse, ApiError> {
     let caller = authenticate_caller(&svc, &headers, None).await?;
+    if req.default_ttl_secs == Some(0) {
+        return Err(ApiError(FerroError::InvalidArgument(
+            "kv default_ttl_secs must be greater than 0 (KV entries must have an expiration)"
+                .into(),
+        )));
+    }
     let ns = svc
-        .create_grouped_kv_namespace(
+        .create_kv_namespace_with_opts(
             &caller,
             &req.name,
-            req.project_id.as_deref(),
-            req.group.as_deref(),
+            KvNamespaceOpts {
+                group: req.group,
+                project_id: req.project_id,
+                description: req.description,
+                default_ttl_secs: Some(req.default_ttl_secs.unwrap_or(DEFAULT_KV_TTL_SECS)),
+                default_ephemeral: Some(req.default_ephemeral),
+                max_value_bytes: req.max_value_bytes,
+                max_keys: req.max_keys,
+            },
         )
         .await
         .map_err(ApiError)?;
     Ok((StatusCode::CREATED, Json(ns)))
+}
+
+async fn kv_update_namespace(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Path(ns): Path<String>,
+    Json(req): Json<UpdateKvNamespaceReq>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let updated = svc
+        .update_kv_namespace(
+            &caller,
+            &ns,
+            KvNamespaceOpts {
+                group: req.group,
+                project_id: None,
+                description: req.description,
+                default_ttl_secs: req.default_ttl_secs,
+                default_ephemeral: req.default_ephemeral,
+                max_value_bytes: req.max_value_bytes,
+                max_keys: req.max_keys,
+            },
+        )
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(updated))
 }
 
 async fn kv_delete_namespace(
@@ -1112,6 +1264,11 @@ async fn kv_put(
     Json(req): Json<KvPutReq>,
 ) -> Result<impl IntoResponse, ApiError> {
     let caller = authenticate_caller(&svc, &headers, None).await?;
+    if req.ttl_secs == Some(0) {
+        return Err(ApiError(FerroError::InvalidArgument(
+            "kv ttl_secs must be greater than 0 (KV entries must have an expiration)".into(),
+        )));
+    }
     svc.kv_put(
         &caller,
         &ns,
@@ -1133,6 +1290,11 @@ async fn kv_incr(
     Json(req): Json<KvIncrReq>,
 ) -> Result<impl IntoResponse, ApiError> {
     let caller = authenticate_caller(&svc, &headers, None).await?;
+    if req.ttl_secs == Some(0) {
+        return Err(ApiError(FerroError::InvalidArgument(
+            "kv ttl_secs must be greater than 0 (KV entries must have an expiration)".into(),
+        )));
+    }
     let val = svc
         .kv_incr(&caller, &ns, &key, req.delta, req.ttl_secs)
         .await
@@ -1169,11 +1331,14 @@ async fn queue_create(
         name: req.name,
         project_id: req.project_id,
         consumer_project_id: req.consumer_project_id,
+        description: req.description,
         max_concurrency: req.max_concurrency.unwrap_or(4),
         rate_limit_per_sec: req.rate_limit_per_sec,
         batch_size: req.batch_size.unwrap_or(20),
         lease_secs: req.lease_secs.unwrap_or(svc.config().queue_lease_secs),
         max_attempts: req.max_attempts.unwrap_or(5),
+        retry_backoff_secs: req.retry_backoff_secs.unwrap_or(5).max(1),
+        dlq_retention_secs: req.dlq_retention_secs.filter(|v| *v > 0),
         created_at: Utc::now().timestamp(),
     };
     let saved = svc.queue_create(&caller, cfg).await.map_err(ApiError)?;
@@ -1192,12 +1357,19 @@ async fn queue_delete(
 
 #[derive(Debug, Deserialize)]
 struct UpdateQueueReq {
+    group: Option<String>,
+    description: Option<String>,
+    consumer_project_id: Option<String>,
+    clear_consumer_project: Option<bool>,
     max_concurrency: Option<i64>,
     rate_limit_per_sec: Option<i64>,
     clear_rate_limit: Option<bool>,
     batch_size: Option<i64>,
     lease_secs: Option<i64>,
     max_attempts: Option<i64>,
+    retry_backoff_secs: Option<i64>,
+    dlq_retention_secs: Option<i64>,
+    clear_dlq_retention: Option<bool>,
 }
 
 async fn queue_update(
@@ -1212,15 +1384,30 @@ async fn queue_update(
     } else {
         req.rate_limit_per_sec.map(Some)
     };
+    let consumer_opt = if req.clear_consumer_project.unwrap_or(false) {
+        Some(None)
+    } else {
+        req.consumer_project_id.map(Some)
+    };
+    let dlq_opt = if req.clear_dlq_retention.unwrap_or(false) {
+        Some(None)
+    } else {
+        req.dlq_retention_secs.map(Some)
+    };
     let updated = svc
-        .queue_update(
+        .queue_update_full(
             &caller,
             &name,
+            req.group,
+            req.description,
+            consumer_opt,
             req.max_concurrency,
             rate_opt,
             req.batch_size,
             req.lease_secs,
             req.max_attempts,
+            req.retry_backoff_secs,
+            dlq_opt,
         )
         .await
         .map_err(ApiError)?;
@@ -1321,12 +1508,20 @@ async fn bucket_create(
 ) -> Result<impl IntoResponse, ApiError> {
     let caller = authenticate_caller(&svc, &headers, None).await?;
     let b = svc
-        .create_grouped_bucket(
+        .create_bucket_with_opts(
             &caller,
             &req.name,
-            req.project_id.as_deref(),
-            req.public_read,
-            req.group.as_deref(),
+            BucketOpts {
+                group: req.group,
+                project_id: req.project_id,
+                description: req.description,
+                public_read: Some(req.public_read),
+                max_object_size_mb: req.max_object_size_mb,
+                quota_mb: req.quota_mb,
+                allowed_content_types: req.allowed_content_types,
+                cache_control: req.cache_control,
+                cors_origins: req.cors_origins,
+            },
         )
         .await
         .map_err(ApiError)?;
@@ -1340,10 +1535,25 @@ async fn bucket_update(
     Json(req): Json<UpdateBucketReq>,
 ) -> Result<impl IntoResponse, ApiError> {
     let caller = authenticate_caller(&svc, &headers, None).await?;
-    svc.set_bucket_public(&caller, &name, req.public_read)
+    let updated = svc
+        .update_bucket_with_opts(
+            &caller,
+            &name,
+            BucketOpts {
+                group: req.group,
+                project_id: None,
+                description: req.description,
+                public_read: req.public_read,
+                max_object_size_mb: req.max_object_size_mb,
+                quota_mb: req.quota_mb,
+                allowed_content_types: req.allowed_content_types,
+                cache_control: req.cache_control,
+                cors_origins: req.cors_origins,
+            },
+        )
         .await
         .map_err(ApiError)?;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(Json(updated))
 }
 
 async fn bucket_delete(
@@ -1360,15 +1570,24 @@ async fn bucket_delete(
 struct CreateCronReq {
     name: String,
     project_id: Option<String>,
+    description: Option<String>,
     schedule: String,
     target: String,
+    enabled: Option<bool>,
+    timezone: Option<String>,
+    timeout_ms: Option<u64>,
+    max_retries: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
 struct UpdateCronReq {
+    description: Option<String>,
     enabled: Option<bool>,
     schedule: Option<String>,
     target: Option<String>,
+    timezone: Option<String>,
+    timeout_ms: Option<u64>,
+    max_retries: Option<u32>,
 }
 
 async fn cron_list(
@@ -1386,12 +1605,19 @@ async fn cron_create(
 ) -> Result<impl IntoResponse, ApiError> {
     let caller = authenticate_caller(&svc, &headers, None).await?;
     let saved = svc
-        .create_cron_job(
+        .create_cron_job_with_opts(
             &caller,
             &req.name,
-            req.project_id.as_deref(),
-            &req.schedule,
-            &req.target,
+            CronJobOpts {
+                project_id: req.project_id,
+                description: req.description,
+                schedule: Some(req.schedule),
+                target: Some(req.target),
+                enabled: req.enabled,
+                timezone: req.timezone,
+                timeout_ms: req.timeout_ms,
+                max_retries: req.max_retries,
+            },
         )
         .await
         .map_err(ApiError)?;
@@ -1406,12 +1632,19 @@ async fn cron_update(
 ) -> Result<impl IntoResponse, ApiError> {
     let caller = authenticate_caller(&svc, &headers, None).await?;
     let updated = svc
-        .update_cron_job(
+        .update_cron_job_with_opts(
             &caller,
             &id,
-            req.enabled,
-            req.schedule.as_deref(),
-            req.target.as_deref(),
+            CronJobOpts {
+                project_id: None,
+                description: req.description,
+                schedule: req.schedule,
+                target: req.target,
+                enabled: req.enabled,
+                timezone: req.timezone,
+                timeout_ms: req.timeout_ms,
+                max_retries: req.max_retries,
+            },
         )
         .await
         .map_err(ApiError)?;
@@ -1469,19 +1702,51 @@ async fn db_create(
     Json(req): Json<CreateDbReq>,
 ) -> Result<impl IntoResponse, ApiError> {
     let caller = authenticate_caller(&svc, &headers, None).await?;
-    let id = svc
-        .create_grouped_user_db(
+    let meta = svc
+        .create_user_db_with_opts(
             &caller,
             &req.name,
-            req.project_id.as_deref(),
-            req.group.as_deref(),
+            UserDbOpts {
+                group: req.group,
+                project_id: req.project_id,
+                description: req.description,
+                init_sql: req.init_sql,
+                max_rows: req.max_rows,
+                max_size_mb: req.max_size_mb,
+                foreign_keys: req.foreign_keys,
+                read_only: req.read_only,
+            },
         )
         .await
         .map_err(ApiError)?;
-    Ok((
-        StatusCode::CREATED,
-        Json(serde_json::json!({ "id": id, "name": req.name })),
-    ))
+    Ok((StatusCode::CREATED, Json(meta)))
+}
+
+async fn db_update(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateDbReq>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let updated = svc
+        .update_user_db(
+            &caller,
+            &id,
+            UserDbOpts {
+                group: req.group,
+                project_id: None,
+                description: req.description,
+                init_sql: None,
+                max_rows: req.max_rows,
+                max_size_mb: req.max_size_mb,
+                foreign_keys: req.foreign_keys,
+                read_only: req.read_only,
+            },
+        )
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(updated))
 }
 
 async fn db_delete(
@@ -1610,10 +1875,21 @@ async fn db_fts_query(
 
 #[derive(Debug, Deserialize)]
 struct CreateSearchIndexReq {
+    group: Option<String>,
     name: String,
     project_id: Option<String>,
+    description: Option<String>,
     tokenizer: Option<String>,
+    writer_budget_mb: Option<usize>,
     schema: Option<Vec<SearchFieldSchema>>,
+    facet_fields: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateSearchIndexReq {
+    group: Option<String>,
+    description: Option<String>,
+    writer_budget_mb: Option<usize>,
 }
 
 async fn search_list_indexes(
@@ -1633,16 +1909,48 @@ async fn search_create_index(
 ) -> Result<impl IntoResponse, ApiError> {
     let caller = authenticate_caller(&svc, &headers, None).await?;
     let created = svc
-        .create_search_index(
+        .create_search_index_with_opts(
             &caller,
             &req.name,
-            req.project_id.as_deref(),
-            req.tokenizer.as_deref(),
-            req.schema,
+            SearchIndexOpts {
+                group: req.group,
+                project_id: req.project_id,
+                description: req.description,
+                tokenizer: req.tokenizer,
+                writer_budget_mb: req.writer_budget_mb,
+                schema: req.schema,
+                facet_fields: req.facet_fields,
+            },
         )
         .await
         .map_err(ApiError)?;
     Ok((StatusCode::CREATED, Json(created)))
+}
+
+async fn search_update_index(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateSearchIndexReq>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let updated = svc
+        .update_search_index(
+            &caller,
+            &id,
+            SearchIndexOpts {
+                group: req.group,
+                project_id: None,
+                description: req.description,
+                tokenizer: None,
+                writer_budget_mb: req.writer_budget_mb,
+                schema: None,
+                facet_fields: None,
+            },
+        )
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(updated))
 }
 
 async fn search_delete_index(

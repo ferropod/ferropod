@@ -7,7 +7,9 @@ use chrono::Utc;
 use turso::{transaction::TransactionBehavior, Value as TursoValue};
 use uuid::Uuid;
 
-use crate::core::model::{Deployment, FerroError, Project, Result, Route, RouteEntry, TargetEnv};
+use crate::core::model::{
+    Deployment, FerroError, Project, ProjectOpts, Result, Route, RouteEntry, TargetEnv,
+};
 use crate::core::traits::ProjectStore;
 use crate::storage::tx::{
     checkpoint_db, connect_db, copy_db_with_sidecars, map_turso_err, with_retry,
@@ -15,56 +17,128 @@ use crate::storage::tx::{
 
 use super::{opt_text, opt_text_param, row_to_deployment, row_to_project, TursoCoreStore};
 
+const SELECT_PROJECT: &str =
+    "SELECT id, name, active_deployment_id, preview_deployment_id, max_concurrency, access_policy_json, \
+     health_check_path, created_at, updated_at, resource_group, description, timeout_ms, wasm_max_memory_mb, allow_private_outbound \
+     FROM projects";
+
 #[async_trait]
 impl ProjectStore for TursoCoreStore {
-    async fn create_project(
-        &self,
-        name: &str,
-        health_check_path: Option<&str>,
-        group: Option<&str>,
-    ) -> Result<Project> {
+    async fn create_project_with_opts(&self, name: &str, opts: ProjectOpts) -> Result<Project> {
         let now = Utc::now().timestamp();
         let id = format!("prj_{}", Uuid::new_v4().simple());
-        let hcp = health_check_path.unwrap_or("/health").to_string();
-        let name_s = name.to_string();
+        let hcp = opts
+            .health_check_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("/health")
+            .to_string();
+        let max_concurrency = opts.max_concurrency.unwrap_or(64).max(1);
+        let timeout_ms = opts.timeout_ms.filter(|v| *v > 0);
+        let wasm_max_memory_mb = opts.wasm_max_memory_mb.filter(|v| *v > 0);
+        let allow_private_outbound = opts.allow_private_outbound.unwrap_or(false);
+        let description = opts
+            .description
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        let group = opts.group;
+
+        let proj = Project {
+            id: id.clone(),
+            name: name.to_string(),
+            description: description.clone(),
+            active_deployment_id: None,
+            preview_deployment_id: None,
+            max_concurrency,
+            timeout_ms,
+            wasm_max_memory_mb,
+            allow_private_outbound,
+            access_policy_json: None,
+            health_check_path: hcp.clone(),
+            created_at: now,
+            updated_at: now,
+            group: group.clone(),
+        };
+
+        let p = proj.clone();
         with_retry(|| {
             let db = self.db.clone();
-            let id = id.clone();
-            let name_s = name_s.clone();
-            let hcp = hcp.clone();
-            let group = group.map(str::to_owned);
+            let p = p.clone();
             async move {
                 let conn = db.connect()?;
                 conn.execute(
-                    "INSERT INTO projects (id, name, max_concurrency, health_check_path, created_at, updated_at, resource_group)
-                     VALUES (?1, ?2, 64, ?3, ?4, ?4, ?5)",
-                    (id, name_s, hcp, now, group),
+                    "INSERT INTO projects (id, name, max_concurrency, health_check_path, created_at, updated_at, resource_group, description, timeout_ms, wasm_max_memory_mb, allow_private_outbound)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    vec![
+                        TursoValue::Text(p.id),
+                        TursoValue::Text(p.name),
+                        TursoValue::Integer(p.max_concurrency),
+                        TursoValue::Text(p.health_check_path),
+                        TursoValue::Integer(p.created_at),
+                        opt_text_param(p.group),
+                        opt_text_param(p.description),
+                        p.timeout_ms
+                            .map(|v| TursoValue::Integer(v as i64))
+                            .unwrap_or(TursoValue::Null),
+                        p.wasm_max_memory_mb
+                            .map(|v| TursoValue::Integer(v as i64))
+                            .unwrap_or(TursoValue::Null),
+                        TursoValue::Integer(if p.allow_private_outbound { 1 } else { 0 }),
+                    ],
                 )
                 .await
             }
         })
         .await?;
 
-        Ok(Project {
-            id,
-            name: name.to_string(),
-            active_deployment_id: None,
-            preview_deployment_id: None,
-            max_concurrency: 64,
-            access_policy_json: None,
-            health_check_path: health_check_path.unwrap_or("/health").to_string(),
-            created_at: now,
-            updated_at: now,
-            group: group.map(str::to_owned),
+        Ok(proj)
+    }
+
+    async fn update_project(&self, project: &Project) -> Result<()> {
+        let p = project.clone();
+        let affected = with_retry(|| {
+            let db = self.db.clone();
+            let p = p.clone();
+            async move {
+                let conn = db.connect()?;
+                conn.execute(
+                    "UPDATE projects SET resource_group = ?1, description = ?2, health_check_path = ?3,
+                     max_concurrency = ?4, timeout_ms = ?5, wasm_max_memory_mb = ?6, allow_private_outbound = ?7, updated_at = ?8
+                     WHERE id = ?9",
+                    vec![
+                        opt_text_param(p.group),
+                        opt_text_param(p.description),
+                        TursoValue::Text(p.health_check_path),
+                        TursoValue::Integer(p.max_concurrency),
+                        p.timeout_ms
+                            .map(|v| TursoValue::Integer(v as i64))
+                            .unwrap_or(TursoValue::Null),
+                        p.wasm_max_memory_mb
+                            .map(|v| TursoValue::Integer(v as i64))
+                            .unwrap_or(TursoValue::Null),
+                        TursoValue::Integer(if p.allow_private_outbound { 1 } else { 0 }),
+                        TursoValue::Integer(p.updated_at),
+                        TursoValue::Text(p.id),
+                    ],
+                )
+                .await
+            }
         })
+        .await?;
+        if affected == 0 {
+            return Err(FerroError::NotFound(format!("project '{}'", project.id)));
+        }
+        Ok(())
     }
 
     async fn get_project(&self, id_or_name: &str) -> Result<Option<Project>> {
         let conn = connect_db(&self.db)?;
         let mut rows = conn
             .query(
-                "SELECT id, name, active_deployment_id, preview_deployment_id, max_concurrency, access_policy_json, health_check_path, created_at, updated_at, resource_group
-                 FROM projects WHERE id = ?1 OR name = ?1 ORDER BY CASE WHEN id = ?1 THEN 0 ELSE 1 END LIMIT 1",
+                &format!("{SELECT_PROJECT} WHERE id = ?1 OR name = ?1 ORDER BY CASE WHEN id = ?1 THEN 0 ELSE 1 END LIMIT 1"),
                 [id_or_name],
             )
             .await
@@ -79,11 +153,7 @@ impl ProjectStore for TursoCoreStore {
     async fn list_projects(&self) -> Result<Vec<Project>> {
         let conn = connect_db(&self.db)?;
         let mut rows = conn
-            .query(
-                "SELECT id, name, active_deployment_id, preview_deployment_id, max_concurrency, access_policy_json, health_check_path, created_at, updated_at, resource_group
-                 FROM projects ORDER BY created_at DESC",
-                (),
-            )
+            .query(&format!("{SELECT_PROJECT} ORDER BY created_at DESC"), ())
             .await
             .map_err(map_turso_err)?;
         let mut out = Vec::new();

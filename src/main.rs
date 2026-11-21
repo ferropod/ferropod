@@ -35,7 +35,7 @@ struct Cli {
 enum Commands {
     /// Start the ferropod server.
     Serve {
-        #[arg(long, env = "FERROPOD_PROFILE", default_value = "standard")]
+        #[arg(long, env = "FERROPOD_PROFILE", default_value = "auto")]
         profile: Profile,
         /// HTTP listen address (e.g. `0.0.0.0:80` or `127.0.0.1:8080`).
         #[arg(long, env = "FERROPOD_BIND", default_value = "127.0.0.1:8080")]
@@ -129,7 +129,7 @@ enum Commands {
         acme_email: Option<String>,
         #[arg(long, default_value_t = false)]
         http_redirect_https: bool,
-        #[arg(long, default_value = "low-mem")]
+        #[arg(long, default_value = "auto")]
         profile: Profile,
         #[arg(long, default_value = "/usr/local/bin/ferropod")]
         bin_path: PathBuf,
@@ -185,11 +185,13 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     let worker_threads = match &cli.command {
-        Commands::Serve { profile, .. } => match profile {
-            Profile::LowMem => 2,
-            Profile::Standard => std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(4),
+        Commands::Serve { profile, .. } => match profile.resolve() {
+            Profile::LowMem => ferropod::config::detect_cpu_cores().clamp(1, 2),
+            Profile::Standard | Profile::Auto => ferropod::config::detect_cpu_cores().clamp(2, 16),
+        },
+        Commands::Dev { .. } => match Profile::Auto.resolve() {
+            Profile::LowMem => ferropod::config::detect_cpu_cores().clamp(1, 2),
+            Profile::Standard | Profile::Auto => ferropod::config::detect_cpu_cores().clamp(2, 16),
         },
         _ => 2,
     };
@@ -300,7 +302,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         }
         Commands::Dev { bind, data_dir } => {
             let mut cfg = Config::for_profile(
-                Profile::Standard,
+                Profile::Auto,
                 bind,
                 data_dir,
                 "dev-insecure-master-key-change-me".to_string(),
@@ -372,6 +374,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             bin_path,
         } => {
             let prof_str = match profile {
+                Profile::Auto => "auto",
                 Profile::LowMem => "low-mem",
                 Profile::Standard => "standard",
             };

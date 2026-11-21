@@ -191,6 +191,15 @@ async fn get_object(
         );
     }
 
+    if let Ok(Some(b_meta)) = svc.get_bucket_meta(&bucket).await {
+        if let Some(cc) = b_meta.cache_control.as_deref() {
+            builder = builder.header(header::CACHE_CONTROL, cc);
+        }
+        if let Some(cors) = b_meta.cors_origins.as_deref() {
+            builder = builder.header(header::ACCESS_CONTROL_ALLOW_ORIGIN, cors);
+        }
+    }
+
     Ok(builder.body(Body::from_stream(stream)).unwrap())
 }
 
@@ -207,16 +216,25 @@ async fn head_object(
         .map_err(ApiError)?
         .ok_or_else(|| ApiError(FerroError::NotFound(format!("object '{bucket}/{key}'"))))?;
 
-    Ok(Response::builder()
+    let mut builder = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, meta.content_type)
         .header(header::CONTENT_LENGTH, meta.size.to_string())
         .header(header::ETAG, format!("\"{}\"", meta.sha256))
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
-        .header(header::CONTENT_SECURITY_POLICY, BLOB_CSP_HEADER)
-        .body(Body::empty())
-        .unwrap())
+        .header(header::CONTENT_SECURITY_POLICY, BLOB_CSP_HEADER);
+
+    if let Ok(Some(b_meta)) = svc.get_bucket_meta(&bucket).await {
+        if let Some(cc) = b_meta.cache_control.as_deref() {
+            builder = builder.header(header::CACHE_CONTROL, cc);
+        }
+        if let Some(cors) = b_meta.cors_origins.as_deref() {
+            builder = builder.header(header::ACCESS_CONTROL_ALLOW_ORIGIN, cors);
+        }
+    }
+
+    Ok(builder.body(Body::empty()).unwrap())
 }
 
 async fn delete_object(

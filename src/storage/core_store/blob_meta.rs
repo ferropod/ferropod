@@ -2,67 +2,157 @@ use async_trait::async_trait;
 use chrono::Utc;
 use turso::{transaction::TransactionBehavior, Value as TursoValue};
 
-use crate::core::model::{BucketMeta, FerroError, ObjectMeta, Result};
+use crate::core::model::{BucketMeta, BucketOpts, FerroError, ObjectMeta, Result};
 use crate::core::traits::BlobMetaStore;
 use crate::storage::tx::{connect_db, map_turso_err, with_retry};
 
-use super::{escape_like, opt_text, opt_text_param, row_to_object_meta, TursoCoreStore};
+use super::{escape_like, opt_i64, opt_text, opt_text_param, row_to_object_meta, TursoCoreStore};
+
+const SELECT_BUCKET: &str =
+    "SELECT name, project_id, public_read, created_at, resource_group, description, max_object_size_mb, quota_mb, allowed_content_types, cache_control, cors_origins FROM blob_buckets";
+
+fn row_to_bucket(row: &turso::Row) -> Result<BucketMeta> {
+    Ok(BucketMeta {
+        name: row.get(0).map_err(map_turso_err)?,
+        project_id: opt_text(row, 1)?,
+        public_read: row.get::<i64>(2).map_err(map_turso_err)? != 0,
+        created_at: row.get(3).map_err(map_turso_err)?,
+        group: opt_text(row, 4)?,
+        description: opt_text(row, 5)?,
+        max_object_size_mb: opt_i64(row, 6)?.and_then(|v| usize::try_from(v).ok()),
+        quota_mb: opt_i64(row, 7)?.and_then(|v| usize::try_from(v).ok()),
+        allowed_content_types: opt_text(row, 8)?,
+        cache_control: opt_text(row, 9)?,
+        cors_origins: opt_text(row, 10)?,
+    })
+}
 
 #[async_trait]
 impl BlobMetaStore for TursoCoreStore {
-    async fn create_bucket(
-        &self,
-        name: &str,
-        project_id: Option<&str>,
-        public_read: bool,
-        group: Option<&str>,
-    ) -> Result<BucketMeta> {
+    async fn create_bucket_with_opts(&self, name: &str, opts: BucketOpts) -> Result<BucketMeta> {
         let now = Utc::now().timestamp();
-        let pub_int: i64 = if public_read { 1 } else { 0 };
-        let name_s = name.to_string();
-        let proj_s = project_id.map(str::to_string);
+        let public_read = opts.public_read.unwrap_or(false);
+        let description = opts
+            .description
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        let max_object_size_mb = opts.max_object_size_mb.filter(|v| *v > 0);
+        let quota_mb = opts.quota_mb.filter(|v| *v > 0);
+        let allowed_content_types = opts
+            .allowed_content_types
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        let cache_control = opts
+            .cache_control
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        let cors_origins = opts
+            .cors_origins
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+
+        let meta = BucketMeta {
+            name: name.to_string(),
+            project_id: opts.project_id,
+            public_read,
+            created_at: now,
+            group: opts.group,
+            description,
+            max_object_size_mb,
+            quota_mb,
+            allowed_content_types,
+            cache_control,
+            cors_origins,
+        };
+
+        let m = meta.clone();
         with_retry(|| {
             let db = self.db.clone();
-            let name_s = name_s.clone();
-            let proj_s = proj_s.clone();
-            let group = group.map(str::to_owned);
+            let m = m.clone();
             async move {
                 let conn = db.connect()?;
                 conn.execute(
-                    "INSERT INTO blob_buckets (name, project_id, public_read, created_at, resource_group) VALUES (?1, ?2, ?3, ?4, ?5)",
-                    (name_s, proj_s, pub_int, now, group),
+                    "INSERT INTO blob_buckets (name, project_id, public_read, created_at, resource_group, description, max_object_size_mb, quota_mb, allowed_content_types, cache_control, cors_origins)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    vec![
+                        TursoValue::Text(m.name),
+                        opt_text_param(m.project_id),
+                        TursoValue::Integer(if m.public_read { 1 } else { 0 }),
+                        TursoValue::Integer(m.created_at),
+                        opt_text_param(m.group),
+                        opt_text_param(m.description),
+                        m.max_object_size_mb
+                            .map(|v| TursoValue::Integer(v as i64))
+                            .unwrap_or(TursoValue::Null),
+                        m.quota_mb
+                            .map(|v| TursoValue::Integer(v as i64))
+                            .unwrap_or(TursoValue::Null),
+                        opt_text_param(m.allowed_content_types),
+                        opt_text_param(m.cache_control),
+                        opt_text_param(m.cors_origins),
+                    ],
                 )
                 .await
             }
         })
         .await?;
 
-        Ok(BucketMeta {
-            name: name.to_string(),
-            project_id: project_id.map(str::to_string),
-            public_read,
-            created_at: now,
-            group: group.map(str::to_owned),
+        Ok(meta)
+    }
+
+    async fn update_bucket(&self, meta: &BucketMeta) -> Result<()> {
+        let m = meta.clone();
+        let affected = with_retry(|| {
+            let db = self.db.clone();
+            let m = m.clone();
+            async move {
+                let conn = db.connect()?;
+                conn.execute(
+                    "UPDATE blob_buckets SET public_read = ?1, resource_group = ?2, description = ?3,
+                     max_object_size_mb = ?4, quota_mb = ?5, allowed_content_types = ?6, cache_control = ?7, cors_origins = ?8
+                     WHERE name = ?9",
+                    vec![
+                        TursoValue::Integer(if m.public_read { 1 } else { 0 }),
+                        opt_text_param(m.group),
+                        opt_text_param(m.description),
+                        m.max_object_size_mb
+                            .map(|v| TursoValue::Integer(v as i64))
+                            .unwrap_or(TursoValue::Null),
+                        m.quota_mb
+                            .map(|v| TursoValue::Integer(v as i64))
+                            .unwrap_or(TursoValue::Null),
+                        opt_text_param(m.allowed_content_types),
+                        opt_text_param(m.cache_control),
+                        opt_text_param(m.cors_origins),
+                        TursoValue::Text(m.name),
+                    ],
+                )
+                .await
+            }
         })
+        .await?;
+        if affected == 0 {
+            return Err(FerroError::NotFound(format!("bucket '{}'", meta.name)));
+        }
+        Ok(())
     }
 
     async fn get_bucket(&self, name: &str) -> Result<Option<BucketMeta>> {
         let conn = connect_db(&self.db)?;
         let mut rows = conn
-            .query(
-                "SELECT name, project_id, public_read, created_at, resource_group FROM blob_buckets WHERE name = ?1",
-                [name],
-            )
+            .query(&format!("{SELECT_BUCKET} WHERE name = ?1"), [name])
             .await
             .map_err(map_turso_err)?;
         if let Some(row) = rows.next().await.map_err(map_turso_err)? {
-            Ok(Some(BucketMeta {
-                name: row.get(0).map_err(map_turso_err)?,
-                project_id: opt_text(&row, 1)?,
-                public_read: row.get::<i64>(2).map_err(map_turso_err)? != 0,
-                created_at: row.get(3).map_err(map_turso_err)?,
-                group: opt_text(&row, 4)?,
-            }))
+            Ok(Some(row_to_bucket(&row)?))
         } else {
             Ok(None)
         }
@@ -71,23 +161,31 @@ impl BlobMetaStore for TursoCoreStore {
     async fn list_buckets(&self) -> Result<Vec<BucketMeta>> {
         let conn = connect_db(&self.db)?;
         let mut rows = conn
-            .query(
-                "SELECT name, project_id, public_read, created_at, resource_group FROM blob_buckets ORDER BY name ASC",
-                (),
-            )
+            .query(&format!("{SELECT_BUCKET} ORDER BY name ASC"), ())
             .await
             .map_err(map_turso_err)?;
         let mut out = Vec::new();
         while let Some(row) = rows.next().await.map_err(map_turso_err)? {
-            out.push(BucketMeta {
-                name: row.get(0).map_err(map_turso_err)?,
-                project_id: opt_text(&row, 1)?,
-                public_read: row.get::<i64>(2).map_err(map_turso_err)? != 0,
-                created_at: row.get(3).map_err(map_turso_err)?,
-                group: opt_text(&row, 4)?,
-            });
+            out.push(row_to_bucket(&row)?);
         }
         Ok(out)
+    }
+
+    async fn total_bucket_bytes(&self, bucket: &str) -> Result<u64> {
+        let conn = connect_db(&self.db)?;
+        let mut rows = conn
+            .query(
+                "SELECT COALESCE(SUM(size), 0) FROM blob_objects WHERE bucket = ?1",
+                [bucket],
+            )
+            .await
+            .map_err(map_turso_err)?;
+        if let Some(row) = rows.next().await.map_err(map_turso_err)? {
+            let sum: i64 = row.get(0).map_err(map_turso_err)?;
+            Ok(sum.max(0) as u64)
+        } else {
+            Ok(0)
+        }
     }
 
     async fn set_bucket_public(&self, name: &str, public_read: bool) -> Result<()> {

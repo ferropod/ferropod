@@ -8,13 +8,14 @@ use turso::{transaction::TransactionBehavior, Database, Value as TursoValue};
 use uuid::Uuid;
 
 use crate::core::model::{
-    FerroError, Result, SearchFieldSchema, SearchHit, SearchIndexMeta, SearchQueryInput,
-    SearchQueryResult,
+    FerroError, Result, SearchFieldSchema, SearchHit, SearchIndexMeta, SearchIndexOpts,
+    SearchQueryInput, SearchQueryResult,
 };
 use crate::core::traits::SearchStore;
 use crate::storage::core_store::{opt_text, opt_text_param};
 use crate::storage::tx::{
-    checkpoint_db, connect_db, copy_db_with_sidecars, map_turso_err, open_turso_db, with_retry,
+    checkpoint_db, connect_db, copy_db_with_sidecars, ensure_column, map_turso_err, open_turso_db,
+    with_retry,
 };
 
 const SEARCH_SCHEMA: &str = r#"
@@ -28,7 +29,9 @@ CREATE TABLE IF NOT EXISTS search_indexes (
     writer_budget_mb INTEGER NOT NULL DEFAULT 15,
     schema_json TEXT NOT NULL,
     created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
+    updated_at INTEGER NOT NULL,
+    resource_group TEXT,
+    description TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_search_name_proj
     ON search_indexes (name, COALESCE(project_id, ''));
@@ -59,14 +62,19 @@ impl TursoSearchStore {
         conn.execute_batch(SEARCH_SCHEMA)
             .await
             .map_err(map_turso_err)?;
+        ensure_column(&conn, "search_indexes", "resource_group", "TEXT").await?;
+        ensure_column(&conn, "search_indexes", "description", "TEXT").await?;
         Ok(Self {
             db,
             db_path: path.to_path_buf(),
         })
     }
 
-    fn default_schema(tokenizer: &str) -> Vec<SearchFieldSchema> {
-        vec![
+    pub fn build_schema_with_facets(
+        tokenizer: &str,
+        facet_fields: Option<&[String]>,
+    ) -> Vec<SearchFieldSchema> {
+        let mut fields = vec![
             SearchFieldSchema {
                 name: "id".into(),
                 field_type: "keyword".into(),
@@ -91,15 +99,28 @@ impl TursoSearchStore {
                 indexed: true,
                 fast: false,
             },
-            SearchFieldSchema {
-                name: "category".into(),
-                field_type: "facet".into(),
-                tokenizer: "raw".into(),
-                stored: true,
-                indexed: true,
-                fast: true,
-            },
-        ]
+        ];
+        let facets: Vec<String> = match facet_fields {
+            Some(list) if !list.is_empty() => list
+                .iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty() && !matches!(s.as_str(), "id" | "title" | "body"))
+                .collect(),
+            _ => vec!["category".into()],
+        };
+        for f in facets {
+            if !fields.iter().any(|existing| existing.name == f) {
+                fields.push(SearchFieldSchema {
+                    name: f,
+                    field_type: "facet".into(),
+                    tokenizer: "raw".into(),
+                    stored: true,
+                    indexed: true,
+                    fast: true,
+                });
+            }
+        }
+        fields
     }
 
     fn row_to_index_meta(row: &turso::Row) -> Result<SearchIndexMeta> {
@@ -118,6 +139,8 @@ impl TursoSearchStore {
             created_at: row.get(8).map_err(map_turso_err)?,
             updated_at: row.get(9).map_err(map_turso_err)?,
             doc_count: row.get::<i64>(10).map_err(map_turso_err)?.max(0) as usize,
+            group: opt_text(row, 11)?,
+            description: opt_text(row, 12)?,
         })
     }
 }
@@ -354,12 +377,10 @@ pub fn score_json_document(doc: &serde_json::Value, query: &str, fuzzy: bool) ->
 
 #[async_trait]
 impl SearchStore for TursoSearchStore {
-    async fn create_index(
+    async fn create_index_with_opts(
         &self,
         name: &str,
-        project_id: Option<&str>,
-        tokenizer: &str,
-        schema: Option<Vec<SearchFieldSchema>>,
+        opts: SearchIndexOpts,
     ) -> Result<SearchIndexMeta> {
         let now = Utc::now().timestamp_millis();
         let clean_slug: String = name
@@ -377,19 +398,38 @@ impl SearchStore for TursoSearchStore {
             clean_slug,
             &Uuid::new_v4().simple().to_string()[..6]
         );
-        let schema_vec = schema.unwrap_or_else(|| Self::default_schema(tokenizer));
+        let tokenizer = opts
+            .tokenizer
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("jieba+ngram")
+            .to_string();
+        let writer_budget_mb = opts.writer_budget_mb.unwrap_or(15).clamp(1, 256);
+        let description = opts
+            .description
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        let schema_vec = match opts.schema {
+            Some(s) if !s.is_empty() => s,
+            _ => Self::build_schema_with_facets(&tokenizer, opts.facet_fields.as_deref()),
+        };
         let schema_json = serde_json::to_string(&schema_vec)
             .map_err(|e| FerroError::Internal(anyhow::anyhow!("encode search schema: {e}")))?;
 
         let meta = SearchIndexMeta {
+            group: opts.group,
             id: id.clone(),
             name: name.to_string(),
-            project_id: project_id.map(str::to_string),
-            tokenizer: tokenizer.to_string(),
+            project_id: opts.project_id,
+            description,
+            tokenizer,
             doc_count: 0,
             segments: 1,
             disk_bytes: 16384,
-            writer_budget_mb: 15,
+            writer_budget_mb,
             created_at: now,
             updated_at: now,
             schema: schema_vec,
@@ -403,8 +443,8 @@ impl SearchStore for TursoSearchStore {
             async move {
                 let conn = db.connect()?;
                 conn.execute(
-                    "INSERT INTO search_indexes (id, name, project_id, tokenizer, segments, disk_bytes, writer_budget_mb, schema_json, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    "INSERT INTO search_indexes (id, name, project_id, tokenizer, segments, disk_bytes, writer_budget_mb, schema_json, created_at, updated_at, resource_group, description)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                     vec![
                         TursoValue::Text(m.id),
                         TursoValue::Text(m.name),
@@ -416,6 +456,8 @@ impl SearchStore for TursoSearchStore {
                         TursoValue::Text(schema_json),
                         TursoValue::Integer(m.created_at),
                         TursoValue::Integer(m.updated_at),
+                        opt_text_param(m.group),
+                        opt_text_param(m.description),
                     ],
                 )
                 .await
@@ -425,13 +467,48 @@ impl SearchStore for TursoSearchStore {
         Ok(meta)
     }
 
+    async fn update_index(&self, meta: &SearchIndexMeta) -> Result<()> {
+        let schema_json = serde_json::to_string(&meta.schema)
+            .map_err(|e| FerroError::Internal(anyhow::anyhow!("encode search schema: {e}")))?;
+        let m = meta.clone();
+        let affected = with_retry(|| {
+            let db = self.db.clone();
+            let m = m.clone();
+            let schema_json = schema_json.clone();
+            async move {
+                let conn = db.connect()?;
+                conn.execute(
+                    "UPDATE search_indexes SET resource_group = ?1, description = ?2, tokenizer = ?3,
+                     writer_budget_mb = ?4, schema_json = ?5, updated_at = ?6
+                     WHERE id = ?7",
+                    vec![
+                        opt_text_param(m.group),
+                        opt_text_param(m.description),
+                        TursoValue::Text(m.tokenizer),
+                        TursoValue::Integer(m.writer_budget_mb.max(1) as i64),
+                        TursoValue::Text(schema_json),
+                        TursoValue::Integer(m.updated_at),
+                        TursoValue::Text(m.id),
+                    ],
+                )
+                .await
+            }
+        })
+        .await?;
+        if affected == 0 {
+            return Err(FerroError::NotFound(format!("search index '{}'", meta.id)));
+        }
+        Ok(())
+    }
+
     async fn get_index(&self, id_or_name: &str) -> Result<Option<SearchIndexMeta>> {
         let conn = connect_db(&self.db)?;
         let mut rows = conn
             .query(
                 "SELECT s.id, s.name, s.project_id, s.tokenizer, s.segments, s.disk_bytes, s.writer_budget_mb,
                         s.schema_json, s.created_at, s.updated_at,
-                        (SELECT COUNT(*) FROM search_docs d WHERE d.index_id = s.id)
+                        (SELECT COUNT(*) FROM search_docs d WHERE d.index_id = s.id),
+                        s.resource_group, s.description
                  FROM search_indexes s
                  WHERE s.id = ?1 OR s.name = ?1
                  ORDER BY CASE WHEN s.id = ?1 THEN 0 ELSE 1 END
@@ -453,7 +530,8 @@ impl SearchStore for TursoSearchStore {
             .query(
                 "SELECT s.id, s.name, s.project_id, s.tokenizer, s.segments, s.disk_bytes, s.writer_budget_mb,
                         s.schema_json, s.created_at, s.updated_at,
-                        (SELECT COUNT(*) FROM search_docs d WHERE d.index_id = s.id)
+                        (SELECT COUNT(*) FROM search_docs d WHERE d.index_id = s.id),
+                        s.resource_group, s.description
                  FROM search_indexes s
                  ORDER BY s.updated_at DESC",
                 (),

@@ -743,6 +743,32 @@ rclone sync ./data/backups remote:ferropod-backups</pre>
               <label for="cr-target">${esc(t('ops.target'))}</label>
               <input type="text" id="cr-target" class="mono" required value="/_internal/cron">
             </div>
+            <details style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px 12px;background:var(--surface-subtle);">
+              <summary style="cursor:pointer;font-size:12.5px;font-weight:600;color:var(--text-secondary);">${esc(t('common.advancedOptions'))}</summary>
+              <div class="stack gap-sm" style="margin-top:10px;">
+                <div class="field">
+                  <label for="cr-desc">${esc(t('common.description'))}</label>
+                  <input type="text" id="cr-desc" placeholder="${esc(t('common.descriptionPlaceholder'))}">
+                </div>
+                <div class="row">
+                  <div class="field" style="flex:1 1 130px;">
+                    <label for="cr-tz">${esc(t('ops.timezone'))}</label>
+                    <input type="text" id="cr-tz" value="UTC" placeholder="UTC">
+                  </div>
+                  <div class="field" style="flex:1 1 130px;">
+                    <label for="cr-timeout">${esc(t('ops.timeoutMs'))}</label>
+                    <input type="text" id="cr-timeout" placeholder="10000">
+                  </div>
+                  <div class="field" style="flex:1 1 110px;">
+                    <label for="cr-retries">${esc(t('ops.maxRetries'))}</label>
+                    <input type="text" id="cr-retries" value="0" placeholder="0">
+                  </div>
+                </div>
+                <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;cursor:pointer;">
+                  <input type="checkbox" id="cr-enabled" checked> ${esc(t('ops.enableImmediately'))}
+                </label>
+              </div>
+            </details>
           </div>
           <div class="dialog-foot">
             <button type="button" class="btn" data-close-dlg="new-cron-dialog">${esc(t('common.cancel'))}</button>
@@ -828,11 +854,21 @@ rclone sync ./data/backups remote:ferropod-backups</pre>
           emitToast(this, t('tokens.selectProject'), 'error');
           return;
         }
+        const timeoutRaw = (root.getElementById('cr-timeout')?.value || '').trim();
+        const retriesRaw = (root.getElementById('cr-retries')?.value || '').trim();
+        const descRaw = (root.getElementById('cr-desc')?.value || '').trim();
+        const tzRaw = (root.getElementById('cr-tz')?.value || '').trim();
+        const enabledEl = root.getElementById('cr-enabled');
         const payload = {
           name: root.getElementById('cr-name').value.trim(),
           project_id: pid,
           schedule: root.getElementById('cr-schedule').value.trim(),
-          target: root.getElementById('cr-target').value.trim()
+          target: root.getElementById('cr-target').value.trim(),
+          description: descRaw || null,
+          timezone: tzRaw || 'UTC',
+          timeout_ms: timeoutRaw ? Number(timeoutRaw) : null,
+          max_retries: retriesRaw ? Number(retriesRaw) : 0,
+          enabled: enabledEl ? Boolean(enabledEl.checked) : true
         };
         root.getElementById('new-cron-dialog').close();
         this.createCron(payload);
