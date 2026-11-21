@@ -33,6 +33,7 @@ interface bucket {
 }
 
 interface env {
+    get: func(key: string) -> option<string>;
     secret: func(key: string) -> option<string>;
 }
 

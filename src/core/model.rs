@@ -38,6 +38,8 @@ pub struct Bindings {
     pub queue: HashMap<String, String>,
     #[serde(default)]
     pub bucket: HashMap<String, String>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
 }
 
 /// Project entity stored in `core.db`.
