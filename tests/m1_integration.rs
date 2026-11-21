@@ -1928,3 +1928,20 @@ async fn changing_runtime_env_creates_a_ready_version_and_keeps_secrets_separate
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn scoped_queue_creation_cannot_replace_another_project_queue() {
+    let h = setup_harness().await;
+    let app = build_router(h.svc.clone());
+    let a = h.svc.create_project(&h.admin, "queue-owner-a", None).await.unwrap();
+    let b = h.svc.create_project(&h.admin, "queue-owner-b", None).await.unwrap();
+    let (_, token_a) = h.svc.create_token(&h.admin, "queue-a", TokenScope::Project(a.id.clone()), None).await.unwrap();
+    let (_, token_b) = h.svc.create_token(&h.admin, "queue-b", TokenScope::Project(b.id.clone()), None).await.unwrap();
+    let payload = serde_json::json!({"name": "shared-name"});
+    let (status, _) = json_req(&app, Method::POST, "/_api/v1/queues", Some(&token_a), Some(payload.clone())).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _) = json_req(&app, Method::POST, "/_api/v1/queues", Some(&token_b), Some(payload)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let queues = h.svc.queue_list(&h.admin).await.unwrap();
+    assert_eq!(queues.iter().find(|q| q.name == "shared-name").unwrap().project_id.as_deref(), Some(a.id.as_str()));
+}
