@@ -26,6 +26,13 @@ CREATE TABLE IF NOT EXISTS projects (
     resource_group TEXT
 );
 
+CREATE TABLE IF NOT EXISTS production_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id TEXT NOT NULL,
+    deployment_id TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_production_history ON production_history (project_id, id DESC);
+
 CREATE TABLE IF NOT EXISTS deployments (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL,

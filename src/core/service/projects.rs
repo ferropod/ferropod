@@ -167,15 +167,19 @@ impl PlatformService {
                 .await?
                 .ok_or_else(|| FerroError::NotFound(format!("bucket '{bucket}'")))?;
             Self::require_resource_write(
-                caller,
+                &Caller::project("deployment", proj.id.clone()),
                 meta.project_id.as_deref(),
                 &format!("bucket '{bucket}'"),
             )?;
         }
         for ns in input.bindings.kv.values() {
-            let meta = self.registry.get_kv_namespace(ns).await?;
-            let owner = meta.as_ref().and_then(|m| m.project_id.as_deref());
-            Self::require_resource_write(caller, owner, &format!("kv namespace '{ns}'"))?;
+            let meta = self.registry.get_kv_namespace(ns).await?
+                .ok_or_else(|| FerroError::NotFound(format!("kv namespace '{ns}'")))?;
+            Self::require_resource_write(
+                &Caller::project("deployment", proj.id.clone()),
+                meta.project_id.as_deref(),
+                &format!("kv namespace '{ns}'"),
+            )?;
         }
         for db_ref in input.bindings.db.values() {
             let meta = self
@@ -184,7 +188,7 @@ impl PlatformService {
                 .await?
                 .ok_or_else(|| FerroError::NotFound(format!("user db '{db_ref}'")))?;
             Self::require_resource_write(
-                caller,
+                &Caller::project("deployment", proj.id.clone()),
                 meta.project_id.as_deref(),
                 &format!("database '{db_ref}'"),
             )?;
@@ -196,7 +200,7 @@ impl PlatformService {
                 .await?
                 .ok_or_else(|| FerroError::NotFound(format!("queue '{q_name}'")))?;
             Self::require_resource_write(
-                caller,
+                &Caller::project("deployment", proj.id.clone()),
                 cfg.project_id.as_deref(),
                 &format!("queue '{q_name}'"),
             )?;
@@ -208,7 +212,7 @@ impl PlatformService {
                 .await?
                 .ok_or_else(|| FerroError::NotFound(format!("search index '{s_ref}'")))?;
             Self::require_resource_write(
-                caller,
+                &Caller::project("deployment", proj.id.clone()),
                 meta.project_id.as_deref(),
                 &format!("search index '{s_ref}'"),
             )?;
@@ -243,9 +247,10 @@ impl PlatformService {
 
         if let Some(ref rel) = dep.artifact_path {
             let clean = rel.trim_start_matches('/');
-            if !clean.is_empty() && self.config.artifacts_dir().join(clean).exists() {
-                self.runtime.preload_deployment(&dep).await?;
+            if clean.is_empty() {
+                return Err(FerroError::InvalidArgument("artifact path cannot be empty".into()));
             }
+            self.runtime.preload_deployment(&dep).await?;
         }
 
         let saved = self
@@ -376,9 +381,7 @@ impl PlatformService {
                 d
             }
             None => {
-                let deps = self.projects.list_deployments(&proj.id).await?;
-                deps.into_iter()
-                    .find(|d| Some(d.id.as_str()) != proj.active_deployment_id.as_deref())
+                self.projects.previous_production_deployment(&proj.id).await?
                     .ok_or_else(|| {
                         FerroError::InvalidArgument("no previous deployment to roll back to".into())
                     })?

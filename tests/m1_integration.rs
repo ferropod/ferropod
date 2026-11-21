@@ -1861,13 +1861,13 @@ async fn changing_runtime_env_creates_a_ready_version_and_keeps_secrets_separate
     let unrelated = h.svc.create_project(&h.admin, "unrelated-worker", None).await.unwrap();
     let path = format!("/_api/v1/runtimes/{}", runtime.id);
 
+    h.svc.create_kv_namespace(&h.admin, "state", Some(&runtime.id)).await.unwrap();
     let (status, body) = json_req(
         &app,
         Method::POST,
         &format!("{path}/deployments"),
         token,
         Some(serde_json::json!({
-            "artifact_path": "shared.cwasm",
             "bindings": { "env": { "MODE": "prod" }, "kv": { "STATE": "state" } },
             "crons": ["0 * * * *"],
             "target_env": "prod"

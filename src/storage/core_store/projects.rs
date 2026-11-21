@@ -105,6 +105,7 @@ impl ProjectStore for TursoCoreStore {
                 let tx = conn
                     .transaction_with_behavior(TransactionBehavior::Concurrent)
                     .await?;
+                tx.execute("DELETE FROM production_history WHERE project_id = ?1", [id_s.as_str()]).await?;
                 tx.execute("DELETE FROM routes WHERE project_id = ?1", [id_s.as_str()])
                     .await?;
                 tx.execute("DELETE FROM secrets WHERE project_id = ?1", [id_s.as_str()])
@@ -142,6 +143,12 @@ impl ProjectStore for TursoCoreStore {
 
                 match target_env {
                     Some(TargetEnv::Prod) => {
+                        tx.execute(
+                            "INSERT INTO production_history (project_id, deployment_id)
+                             SELECT id, active_deployment_id FROM projects
+                             WHERE id = ?1 AND active_deployment_id IS NOT NULL",
+                            [dep.project_id.as_str()],
+                        ).await?;
                         tx.execute(
                             "UPDATE deployments SET status = 'ready' WHERE project_id = ?1 AND status = 'active'",
                             [dep.project_id.as_str()],
@@ -251,6 +258,23 @@ impl ProjectStore for TursoCoreStore {
         Ok(out)
     }
 
+    async fn previous_production_deployment(&self, project_id: &str) -> Result<Option<Deployment>> {
+        let conn = connect_db(&self.db)?;
+        let mut rows = conn.query(
+            "SELECT d.id, d.project_id, d.artifact_path, d.assets_bucket, d.assets_prefix,
+                    d.spa_fallback, d.bindings_json, d.crons_json, d.status, d.created_at
+             FROM production_history h JOIN deployments d ON d.id = h.deployment_id
+             JOIN projects p ON p.id = h.project_id
+             WHERE h.project_id = ?1 AND h.deployment_id != p.active_deployment_id
+             ORDER BY h.id DESC LIMIT 1",
+            [project_id],
+        ).await.map_err(map_turso_err)?;
+        match rows.next().await.map_err(map_turso_err)? {
+            Some(row) => Ok(Some(row_to_deployment(&row)?)),
+            None => Ok(None),
+        }
+    }
+
     async fn set_active_deployment(&self, project_id: &str, deployment_id: &str) -> Result<()> {
         let now = Utc::now().timestamp();
         let pid = project_id.to_string();
@@ -264,6 +288,12 @@ impl ProjectStore for TursoCoreStore {
                 let tx = conn
                     .transaction_with_behavior(TransactionBehavior::Concurrent)
                     .await?;
+                tx.execute(
+                    "INSERT INTO production_history (project_id, deployment_id)
+                     SELECT id, active_deployment_id FROM projects
+                     WHERE id = ?1 AND active_deployment_id IS NOT NULL AND active_deployment_id != ?2",
+                    (pid.as_str(), did.as_str()),
+                ).await?;
                 tx.execute(
                     "UPDATE deployments SET status = 'ready' WHERE project_id = ?1 AND status = 'active'",
                     [pid.as_str()],

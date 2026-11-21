@@ -31,6 +31,7 @@ pub trait ProjectStore: Send + Sync {
     async fn get_deployment(&self, id: &str) -> Result<Option<Deployment>>;
     async fn list_deployments(&self, project_id: &str) -> Result<Vec<Deployment>>;
     async fn set_active_deployment(&self, project_id: &str, deployment_id: &str) -> Result<()>;
+    async fn previous_production_deployment(&self, project_id: &str) -> Result<Option<Deployment>>;
     async fn set_preview_deployment(&self, project_id: &str, deployment_id: &str) -> Result<()>;
 
     async fn upsert_route(&self, route: Route, expected_owner: Option<&str>) -> Result<()>;
