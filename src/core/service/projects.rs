@@ -81,6 +81,17 @@ impl PlatformService {
         name: &str,
         health_check_path: Option<&str>,
     ) -> Result<Project> {
+        self.create_grouped_project(caller, name, health_check_path, None).await
+    }
+
+    pub async fn create_grouped_project(
+        &self,
+        caller: &Caller,
+        name: &str,
+        health_check_path: Option<&str>,
+        group: Option<&str>,
+    ) -> Result<Project> {
+        let group = super::normalize_resource_group(group)?;
         Self::require_admin(caller)?;
         let name = name.trim();
         if name.is_empty() {
@@ -88,7 +99,7 @@ impl PlatformService {
                 "project name cannot be empty".into(),
             ));
         }
-        let proj = self.projects.create_project(name, health_check_path).await?;
+        let proj = self.projects.create_project(name, health_check_path, group).await?;
         self.audit(
             Some(&proj.id),
             &caller.actor,

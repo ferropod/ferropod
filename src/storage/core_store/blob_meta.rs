@@ -15,6 +15,7 @@ impl BlobMetaStore for TursoCoreStore {
         name: &str,
         project_id: Option<&str>,
         public_read: bool,
+        group: Option<&str>,
     ) -> Result<BucketMeta> {
         let now = Utc::now().timestamp();
         let pub_int: i64 = if public_read { 1 } else { 0 };
@@ -24,11 +25,12 @@ impl BlobMetaStore for TursoCoreStore {
             let db = self.db.clone();
             let name_s = name_s.clone();
             let proj_s = proj_s.clone();
+            let group = group.map(str::to_owned);
             async move {
                 let conn = db.connect()?;
                 conn.execute(
-                    "INSERT INTO blob_buckets (name, project_id, public_read, created_at) VALUES (?1, ?2, ?3, ?4)",
-                    (name_s, proj_s, pub_int, now),
+                    "INSERT INTO blob_buckets (name, project_id, public_read, created_at, resource_group) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    (name_s, proj_s, pub_int, now, group),
                 )
                 .await
             }
@@ -40,6 +42,7 @@ impl BlobMetaStore for TursoCoreStore {
             project_id: project_id.map(str::to_string),
             public_read,
             created_at: now,
+            group: group.map(str::to_owned),
         })
     }
 
@@ -47,7 +50,7 @@ impl BlobMetaStore for TursoCoreStore {
         let conn = connect_db(&self.db)?;
         let mut rows = conn
             .query(
-                "SELECT name, project_id, public_read, created_at FROM blob_buckets WHERE name = ?1",
+                "SELECT name, project_id, public_read, created_at, resource_group FROM blob_buckets WHERE name = ?1",
                 [name],
             )
             .await
@@ -58,6 +61,7 @@ impl BlobMetaStore for TursoCoreStore {
                 project_id: opt_text(&row, 1)?,
                 public_read: row.get::<i64>(2).map_err(map_turso_err)? != 0,
                 created_at: row.get(3).map_err(map_turso_err)?,
+                group: opt_text(&row, 4)?,
             }))
         } else {
             Ok(None)
@@ -68,7 +72,7 @@ impl BlobMetaStore for TursoCoreStore {
         let conn = connect_db(&self.db)?;
         let mut rows = conn
             .query(
-                "SELECT name, project_id, public_read, created_at FROM blob_buckets ORDER BY name ASC",
+                "SELECT name, project_id, public_read, created_at, resource_group FROM blob_buckets ORDER BY name ASC",
                 (),
             )
             .await
@@ -80,6 +84,7 @@ impl BlobMetaStore for TursoCoreStore {
                 project_id: opt_text(&row, 1)?,
                 public_read: row.get::<i64>(2).map_err(map_turso_err)? != 0,
                 created_at: row.get(3).map_err(map_turso_err)?,
+                group: opt_text(&row, 4)?,
             });
         }
         Ok(out)

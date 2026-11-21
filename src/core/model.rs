@@ -47,6 +47,8 @@ pub struct Bindings {
 /// Project entity stored in `core.db`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
+    #[serde(default)]
+    pub group: Option<String>,
     pub id: String,
     pub name: String,
     pub active_deployment_id: Option<String>,
@@ -258,6 +260,8 @@ pub enum BlobAuth<'a> {
 /// KV namespace ownership metadata stored in `core.db`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KvNamespaceMeta {
+    #[serde(default)]
+    pub group: Option<String>,
     pub name: String,
     pub project_id: Option<String>,
     pub created_at: i64,
@@ -266,6 +270,8 @@ pub struct KvNamespaceMeta {
 /// User database registry metadata stored in `core.db`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserDbMeta {
+    #[serde(default)]
+    pub group: Option<String>,
     pub id: String,
     pub name: String,
     pub project_id: Option<String>,
@@ -350,6 +356,8 @@ pub struct EnqueueOpts {
 /// Queue configuration metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueueConfig {
+    #[serde(default)]
+    pub group: Option<String>,
     pub name: String,
     pub project_id: Option<String>,
     pub consumer_project_id: Option<String>,
@@ -373,6 +381,8 @@ pub struct QueueStats {
 /// Native Blob bucket metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BucketMeta {
+    #[serde(default)]
+    pub group: Option<String>,
     pub name: String,
     pub project_id: Option<String>,
     pub public_read: bool,

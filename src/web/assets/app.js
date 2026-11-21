@@ -11,7 +11,6 @@
 
   var ROUTES = [
     'overview',
-    'projects',
     'routes',
     'runtime',
     'kv',
@@ -70,7 +69,6 @@
       windowSecs: '3600',
       limit: '100'
     },
-    projectSearch: '',
     routeSearch: ''
   };
 
@@ -393,10 +391,18 @@
     var raw = (window.location.hash || '#/overview').replace(/^#\/?/, '');
     var parts = raw.split('/').filter(Boolean);
     var route = parts[0] || 'overview';
+    if (route === 'projects') {
+      history.replaceState(null, '', '#/runtime' + (parts[1] ? '/' + parts[1] : ''));
+      route = 'runtime';
+    }
     if (ROUTES.indexOf(route) === -1) route = 'overview';
     if (route === 'tokens' && !isAdmin()) route = 'overview';
     state.currentRoute = route;
-    state.projectId = route === 'projects' && parts[1] ? decodeURIComponent(parts[1]) : null;
+    var runtimeId = route === 'runtime' && parts[1] ? decodeURIComponent(parts[1]) : null;
+    if (runtimeId !== state.projectId && !state.pendingRuntimeTab) state.projectTab = 'deployments';
+    if (state.pendingRuntimeTab) state.projectTab = state.pendingRuntimeTab;
+    state.pendingRuntimeTab = null;
+    state.projectId = runtimeId;
   }
 
   function navigate(hash) {
@@ -508,6 +514,39 @@
     return '<span class="badge badge-neutral">' + esc(env || 'ready') + '</span>';
   }
 
+  function resourceGroupField() {
+    return '<div class="field"><label for="resource-group">' + esc(t('groups.label')) + '</label>' +
+      '<input id="resource-group" list="resource-group-options" maxlength="80" placeholder="' +
+      esc(t('groups.placeholder')) + '"><datalist id="resource-group-options"></datalist></div>';
+  }
+
+  function loadResourceGroupOptions() {
+    var options = $('resource-group-options');
+    api('/_api/v1/resource-groups').then(function (groups) {
+      if (options.isConnected) options.innerHTML = (groups || []).map(function (name) {
+        return '<option value="' + esc(name) + '"></option>';
+      }).join('');
+    }).catch(function (e) { toast(e.message, 'error'); });
+  }
+
+  function selectedResourceGroup() {
+    return $('resource-group').value.trim() || null;
+  }
+
+  function groupedMenu(items, renderItem) {
+    var groups = new Map();
+    items.forEach(function (item) {
+      var name = item.group || '';
+      if (!groups.has(name)) groups.set(name, []);
+      groups.get(name).push(item);
+    });
+    if (groups.size === 1 && groups.has('')) return items.map(renderItem).join('');
+    return Array.from(groups.keys()).sort().map(function (name) {
+      return '<div class="nav-group-label">' + esc(name || t('groups.ungrouped')) + '</div>' +
+        groups.get(name).map(renderItem).join('');
+    }).join('');
+  }
+
   function renderProjectSelectOptions(selectedId, includeGlobal) {
     var html = includeGlobal
       ? '<option value="">' + esc(t('common.allProjects')) + '</option>'
@@ -521,11 +560,10 @@
   function renderCurrentRoute(fetchData) {
     updateNavActive();
     if (state.currentRoute === 'overview') return renderOverview(fetchData);
-    if (state.currentRoute === 'projects') {
-      return state.projectId ? renderProjectDetail(state.projectId, fetchData) : renderProjects(fetchData);
-    }
     if (state.currentRoute === 'routes') return renderRoutes(fetchData);
-    if (state.currentRoute === 'runtime') return renderRuntime(fetchData);
+    if (state.currentRoute === 'runtime') {
+      return state.projectId ? renderProjectDetail(state.projectId, fetchData) : renderRuntime();
+    }
     if (state.currentRoute === 'kv') return renderKv(fetchData);
     if (state.currentRoute === 'queues') return renderQueues(fetchData);
     if (state.currentRoute === 'blobs') return renderBlobs(fetchData);
@@ -606,7 +644,7 @@
         var results = await Promise.all([
           api('/_api/v1/status'),
           api('/_healthz'),
-          api('/_api/v1/projects'),
+          api('/_api/v1/runtimes'),
           api('/_api/v1/routes')
         ]);
         state.status = results[0];
@@ -627,7 +665,7 @@
 
     var projRows = state.projects.slice(0, 5).map(function (p) {
       return '<tr>' +
-        '<td data-label="' + esc(t('common.name')) + '"><a href="#/projects/' + enc(p.id) + '" class="text-strong">' + esc(p.name) + '</a></td>' +
+        '<td data-label="' + esc(t('common.name')) + '"><a href="#/runtime/' + enc(p.id) + '" class="text-strong">' + esc(p.name) + '</a></td>' +
         '<td data-label="' + esc(t('projects.activeDeployment')) + '" class="mono text-xs">' + esc(p.active_deployment_id || '-') + '</td>' +
         '<td data-label="' + esc(t('projects.previewDeployment')) + '" class="mono text-xs">' + esc(p.preview_deployment_id || '-') + '</td>' +
         '</tr>';
@@ -655,14 +693,14 @@
       '<div><div class="muted text-xs">' + esc(t('overview.scope')) + '</div><div><span class="badge badge-accent">' + esc(st.scope || '-') + '</span></div></div>' +
       '</div>' +
       '<div class="row">' +
-      '<a href="#/projects" class="btn btn-sm">' + esc(t('nav.projects')) + '</a>' +
+      '<a href="#/runtime" class="btn btn-sm">' + esc(t('nav.runtime')) + '</a>' +
       '<a href="#/logs" class="btn btn-sm">' + esc(t('nav.logs')) + '</a>' +
       '<a href="#/updates" class="btn btn-sm">' + esc(t('nav.updates')) + '</a>' +
       '</div></div></div>' +
 
       '<div class="stats-grid">' +
-      statCard(t('overview.projects'), st.projects, '#/projects') +
-      statCard(t('overview.routes'), st.routes, '#/projects') +
+      statCard(t('overview.projects'), st.projects, '#/runtime') +
+      statCard(t('overview.routes'), st.routes, '#/routes') +
       statCard(t('overview.kvNamespaces'), st.kv_namespaces, '#/kv') +
       statCard(t('overview.queues'), st.queues, '#/queues') +
       statCard(t('overview.buckets'), st.buckets, '#/blobs') +
@@ -673,12 +711,12 @@
       '<fp-perf-monitor id="overview-perf-monitor"></fp-perf-monitor>' +
 
       '<div class="grid-2">' +
-      '<div class="panel"><div class="panel-header"><h3 class="panel-title">' + esc(t('overview.recentProjects')) + '</h3><a href="#/projects" class="btn btn-ghost btn-sm">' + esc(t('common.view')) + '</a></div>' +
+      '<div class="panel"><div class="panel-header"><h3 class="panel-title">' + esc(t('overview.recentProjects')) + '</h3><a href="#/runtime" class="btn btn-ghost btn-sm">' + esc(t('common.view')) + '</a></div>' +
       (projRows
         ? '<div class="table-wrap"><table class="data-table stack-mobile"><thead><tr><th>' + esc(t('common.name')) + '</th><th>' + esc(t('projects.activeDeployment')) + '</th><th>' + esc(t('projects.previewDeployment')) + '</th></tr></thead><tbody>' + projRows + '</tbody></table></div>'
         : '<div class="empty-state">' + esc(t('common.empty')) + '</div>') +
       '</div>' +
-      '<div class="panel"><div class="panel-header"><h3 class="panel-title">' + esc(t('overview.recentRoutes')) + '</h3><a href="#/projects" class="btn btn-ghost btn-sm">' + esc(t('common.view')) + '</a></div>' +
+      '<div class="panel"><div class="panel-header"><h3 class="panel-title">' + esc(t('overview.recentRoutes')) + '</h3><a href="#/routes" class="btn btn-ghost btn-sm">' + esc(t('common.view')) + '</a></div>' +
       (routeRows
         ? '<div class="table-wrap"><table class="data-table stack-mobile"><thead><tr><th>' + esc(t('routes.host')) + '</th><th>' + esc(t('routes.project')) + '</th><th>' + esc(t('routes.targetEnv')) + '</th></tr></thead><tbody>' + routeRows + '</tbody></table></div>'
         : '<div class="empty-state">' + esc(t('common.empty')) + '</div>') +
@@ -699,100 +737,16 @@
       '</a>';
   }
 
-  // --- 2. Projects & Detail ---
+  // --- 2. Runtime details ---
 
-  async function renderProjects(fetchData) {
-    var root = $('view-root');
-    if (fetchData) {
-      root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
-      try {
-        var res = await Promise.all([
-          api('/_api/v1/projects'),
-          api('/_api/v1/routes').catch(function () { return []; })
-        ]);
-        state.projects = res[0] || [];
-        state.routes = res[1] || [];
-      } catch (e) {
-        root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
-        return;
-      }
-    }
-
-    var q = state.projectSearch.trim().toLowerCase();
-    var filtered = state.projects.filter(function (p) {
-      if (!q) return true;
-      var pRoutes = state.routes.filter(function (r) { return r.project_id === p.id; });
-      var hostMatch = pRoutes.some(function (r) { return r.host.toLowerCase().indexOf(q) !== -1; });
-      return p.name.toLowerCase().indexOf(q) !== -1 || p.id.toLowerCase().indexOf(q) !== -1 || hostMatch;
-    });
-
-    var rows = filtered.map(function (p) {
-      var canDel = canWriteProject(p.id);
-      var pRoutes = state.routes.filter(function (r) { return r.project_id === p.id; });
-      var routesBadges = pRoutes.length
-        ? pRoutes.map(function (r) { return '<span class="badge badge-info mono">' + esc(r.host) + '</span>'; }).join(' ')
-        : '<span class="muted text-xs">-</span>';
-      return '<tr>' +
-        '<td data-label="' + esc(t('common.name')) + '"><a href="#/projects/' + enc(p.id) + '" class="text-strong">' + esc(p.name) + '</a><div class="muted mono text-xs">' + esc(p.id) + '</div></td>' +
-        '<td data-label="' + esc(t('nav.routes')) + '"><div class="row gap-xs">' + routesBadges + '</div></td>' +
-        '<td data-label="' + esc(t('projects.activeDeployment')) + '" class="mono text-xs">' + esc(p.active_deployment_id || '-') + '</td>' +
-        '<td data-label="' + esc(t('common.createdAt')) + '" class="text-xs muted">' + esc(formatTime(p.created_at)) + '</td>' +
-        '<td class="cell-actions-td"><div class="cell-actions">' +
-        '<a href="#/projects/' + enc(p.id) + '" class="btn btn-sm">' + esc(t('common.detail')) + '</a>' +
-        (canDel ? '<button type="button" class="btn btn-danger btn-sm" data-del-project="' + esc(p.id) + '" data-proj-name="' + esc(p.name) + '">' + esc(t('common.delete')) + '</button>' : '') +
-        '</div></td></tr>';
-    }).join('');
-
-    root.innerHTML =
-      '<div class="page-head"><div><h2 class="page-title">' + esc(t('projects.title')) + '</h2>' +
-      '<p class="page-subtitle">' + esc(t('projects.subtitle')) + '</p></div>' +
-      (isAdmin() ? '<button type="button" class="btn btn-primary" id="new-project-btn">' + esc(t('projects.new')) + '</button>' : '') +
-      '</div>' +
-      (!isAdmin() && isReadonly() ? '<div class="alert alert-info">' + esc(t('common.readonlyHint')) + '</div>' : '') +
-      '<div class="panel"><div class="panel-header"><div class="toolbar">' +
-      '<div class="toolbar-filters"><input type="search" id="proj-search-input" style="max-width:300px;" value="' + esc(state.projectSearch) + '" placeholder="' + esc(t('projects.searchPlaceholder')) + '"></div>' +
-      '</div></div>' +
-      (rows
-        ? '<div class="table-wrap"><table class="data-table stack-mobile"><thead><tr><th>' + esc(t('common.name')) + '</th><th>' + esc(t('nav.routes')) + '</th><th>' + esc(t('projects.activeDeployment')) + '</th><th>' + esc(t('common.createdAt')) + '</th><th class="th-actions">' + esc(t('common.actions')) + '</th></tr></thead><tbody>' + rows + '</tbody></table></div>'
-        : '<div class="empty-state">' + esc(t('projects.empty')) + '</div>') +
-      '</div>';
-
-    var sInput = $('proj-search-input');
-    if (sInput) {
-      sInput.addEventListener('input', function (e) {
-        state.projectSearch = e.target.value;
-        renderProjects(false);
-        var el = $('proj-search-input');
-        if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
-      });
-    }
-    var newBtn = $('new-project-btn');
-    if (newBtn) newBtn.addEventListener('click', openCreateProjectModal);
-
-    root.querySelectorAll('[data-del-project]').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        var pid = btn.getAttribute('data-del-project');
-        var pname = btn.getAttribute('data-proj-name');
-        confirmAction(t('projects.deleteConfirm', { name: pname }), async function () {
-          try {
-            await api('/_api/v1/projects/' + enc(pid), { method: 'DELETE' });
-            toast(t('projects.deleted'), 'success');
-            renderProjects(true);
-          } catch (e) {
-            toast(e.message, 'error');
-          }
-        });
-      });
-    });
-  }
-
-  function openCreateProjectModal() {
+  function openCreateRuntimeModal() {
     openModal({
-      title: t('projects.new'),
+      title: t('runtime.newRuntime'),
       body:
         '<form id="create-proj-form" class="stack gap-md">' +
-        '<div class="field"><label>' + esc(t('projects.name')) + '</label>' +
+        '<div class="field"><label>' + esc(t('runtime.runtimeName')) + '</label>' +
         '<input type="text" id="cp-name" required placeholder="' + esc(t('projects.namePlaceholder')) + '"></div>' +
+        resourceGroupField() +
         '<div class="field"><label>' + esc(t('projects.healthCheckPath')) + ' (' + esc(t('common.optional')) + ')</label>' +
         '<input type="text" id="cp-hc" placeholder="' + esc(t('projects.healthCheckPlaceholder')) + '"></div>' +
         '</form>',
@@ -800,19 +754,20 @@
         '<button type="button" class="btn" id="cp-cancel">' + esc(t('common.cancel')) + '</button>' +
         '<button type="submit" form="create-proj-form" class="btn btn-primary">' + esc(t('common.create')) + '</button>',
       onMount: function () {
+        loadResourceGroupOptions();
         $('cp-cancel').addEventListener('click', closeModal);
         $('create-proj-form').addEventListener('submit', async function (ev) {
           ev.preventDefault();
           var name = $('cp-name').value.trim();
           var hc = $('cp-hc').value.trim();
           try {
-            var created = await api('/_api/v1/projects', {
+            var created = await api('/_api/v1/runtimes', {
               method: 'POST',
-              json: { name: name, health_check_path: hc || null }
+              json: { name: name, group: selectedResourceGroup(), health_check_path: hc || null }
             });
             closeModal();
-            toast(t('projects.created'), 'success');
-            navigate('#/projects/' + enc(created.id));
+            toast(t('runtime.created'), 'success');
+            navigate('#/runtime/' + enc(created.id));
           } catch (e) {
             toast(e.message, 'error');
           }
@@ -827,8 +782,8 @@
       root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
       try {
         var reqs = [
-          api('/_api/v1/projects/' + enc(id)),
-          api('/_api/v1/projects/' + enc(id) + '/deployments'),
+          api('/_api/v1/runtimes/' + enc(id)),
+          api('/_api/v1/runtimes/' + enc(id) + '/deployments'),
           api('/_api/v1/routes'),
           api('/_api/v1/buckets')
         ];
@@ -839,7 +794,7 @@
         state.buckets = res[3] || [];
         if (canWriteProject(state.detailProject.id)) {
           try {
-            state.detailSecrets = (await api('/_api/v1/projects/' + enc(id) + '/secrets')) || [];
+            state.detailSecrets = (await api('/_api/v1/runtimes/' + enc(id) + '/secrets')) || [];
           } catch (_) {
             state.detailSecrets = [];
           }
@@ -861,14 +816,15 @@
 
     var headerHtml =
       '<div class="page-head">' +
-      '<div><div class="row gap-xs" style="margin-bottom:6px;"><a href="#/projects" class="btn btn-sm">' + esc(t('common.back')) + '</a></div>' +
+      '<div><div class="row gap-xs" style="margin-bottom:6px;"><a href="#/runtime" class="btn btn-sm">' + esc(t('common.back')) + '</a></div>' +
       '<h2 class="page-title">' + esc(p.name) + '</h2>' +
-      '<p class="page-subtitle mono">' + esc(p.id) + ' · ' + esc(t('projects.healthCheckPath')) + ': ' + esc(p.health_check_path) + '</p></div>' +
+      '<p class="page-subtitle mono">' + esc(p.id) + (p.group ? ' · ' + esc(p.group) : '') + ' · ' + esc(t('projects.healthCheckPath')) + ': ' + esc(p.health_check_path) + '</p></div>' +
       (writable
         ? '<div class="row">' +
           (p.preview_deployment_id ? '<button type="button" class="btn" id="pd-promote-preview">' + esc(t('projectDetail.promotePreview')) + '</button>' : '') +
           (deps.length > 1 ? '<button type="button" class="btn" id="pd-rollback">' + esc(t('projectDetail.rollbackProd')) + '</button>' : '') +
           '<button type="button" class="btn btn-primary" id="pd-new-dep">' + esc(t('projectDetail.newDeployment')) + '</button>' +
+          (isAdmin() ? '<button type="button" class="btn btn-danger" id="pd-delete-runtime">' + esc(t('common.delete')) + '</button>' : '') +
           '</div>'
         : '') +
       '</div>';
@@ -998,10 +954,21 @@
     }
 
     if ($('pd-new-dep')) $('pd-new-dep').addEventListener('click', function () { openNewDeploymentModal(p); });
+    if ($('pd-delete-runtime')) {
+      $('pd-delete-runtime').addEventListener('click', function () {
+        confirmAction(t('projects.deleteConfirm', { name: p.name }), async function () {
+          try {
+            await api('/_api/v1/runtimes/' + enc(p.id), { method: 'DELETE' });
+            toast(t('projects.deleted'), 'success');
+            navigate('#/runtime');
+          } catch (e) { toast(e.message, 'error'); }
+        });
+      });
+    }
     if ($('pd-promote-preview')) {
       $('pd-promote-preview').addEventListener('click', async function () {
         try {
-          var dep = await api('/_api/v1/projects/' + enc(p.id) + '/promote', { method: 'POST', json: {} });
+          var dep = await api('/_api/v1/runtimes/' + enc(p.id) + '/promote', { method: 'POST', json: {} });
           toast(t('projectDetail.promoteDone', { id: dep.id }), 'success');
           renderProjectDetail(p.id, true);
         } catch (e) { toast(e.message, 'error'); }
@@ -1010,7 +977,7 @@
     if ($('pd-rollback')) {
       $('pd-rollback').addEventListener('click', async function () {
         try {
-          var dep = await api('/_api/v1/projects/' + enc(p.id) + '/rollback', { method: 'POST', json: {} });
+          var dep = await api('/_api/v1/runtimes/' + enc(p.id) + '/rollback', { method: 'POST', json: {} });
           toast(t('projectDetail.rollbackDone', { id: dep.id }), 'success');
           renderProjectDetail(p.id, true);
         } catch (e) { toast(e.message, 'error'); }
@@ -1021,7 +988,7 @@
       btn.addEventListener('click', async function () {
         var depId = btn.getAttribute('data-promote-dep');
         try {
-          var dep = await api('/_api/v1/projects/' + enc(p.id) + '/promote', {
+          var dep = await api('/_api/v1/runtimes/' + enc(p.id) + '/promote', {
             method: 'POST',
             json: { deployment_id: depId }
           });
@@ -1034,7 +1001,7 @@
       btn.addEventListener('click', async function () {
         var depId = btn.getAttribute('data-rollback-dep');
         try {
-          var dep = await api('/_api/v1/projects/' + enc(p.id) + '/rollback', {
+          var dep = await api('/_api/v1/runtimes/' + enc(p.id) + '/rollback', {
             method: 'POST',
             json: { deployment_id: depId }
           });
@@ -1050,7 +1017,7 @@
         var key = $('sec-key').value.trim();
         var value = $('sec-val').value;
         try {
-          await api('/_api/v1/projects/' + enc(p.id) + '/secrets', {
+          await api('/_api/v1/runtimes/' + enc(p.id) + '/secrets', {
             method: 'POST',
             json: { key: key, value: value }
           });
@@ -1072,7 +1039,7 @@
         var key = btn.getAttribute('data-del-secret');
         confirmAction(t('projectDetail.secretDeleteConfirm', { key: key }), async function () {
           try {
-            await api('/_api/v1/projects/' + enc(p.id) + '/secrets/' + enc(key), { method: 'DELETE' });
+            await api('/_api/v1/runtimes/' + enc(p.id) + '/secrets/' + enc(key), { method: 'DELETE' });
             toast(t('projectDetail.secretDeleted'), 'success');
             renderProjectDetail(p.id, true);
           } catch (e) { toast(e.message, 'error'); }
@@ -1147,7 +1114,7 @@
           var artifact = $('dep-artifact').value.trim() || null;
 
           try {
-            await api('/_api/v1/projects/' + enc(project.id) + '/deployments', {
+            await api('/_api/v1/runtimes/' + enc(project.id) + '/deployments', {
               method: 'POST',
               json: {
                 artifact_path: artifact,
@@ -1175,7 +1142,7 @@
     if (fetchData) {
       root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
       try {
-        var res = await Promise.all([api('/_api/v1/routes'), api('/_api/v1/projects')]);
+        var res = await Promise.all([api('/_api/v1/routes'), api('/_api/v1/runtimes')]);
         state.routes = res[0] || [];
         state.projects = res[1] || [];
       } catch (e) {
@@ -1195,7 +1162,7 @@
       var writable = canWriteProject(r.project_id);
       return '<tr>' +
         '<td data-label="' + esc(t('routes.host')) + '" class="mono text-strong">' + esc(r.host) + '</td>' +
-        '<td data-label="' + esc(t('routes.project')) + '"><a href="#/projects/' + enc(r.project_id) + '">' + esc(projectNameById(r.project_id)) + '</a></td>' +
+        '<td data-label="' + esc(t('routes.project')) + '"><a href="#/runtime/' + enc(r.project_id) + '">' + esc(projectNameById(r.project_id)) + '</a></td>' +
         '<td data-label="' + esc(t('routes.targetEnv')) + '">' + renderBadgesForEnv(r.target_env) + '</td>' +
         '<td class="cell-actions-td"><div class="cell-actions">' +
         (writable ? '<button type="button" class="btn btn-sm" data-edit-route="' + esc(r.host) + '" data-route-proj="' + esc(r.project_id) + '" data-route-env="' + esc(r.target_env) + '">' + esc(t('common.edit')) + '</button>' : '') +
@@ -1298,7 +1265,7 @@
     if (fetchData) {
       root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
       try {
-        var res = await Promise.all([api('/_api/v1/kv'), api('/_api/v1/projects')]);
+        var res = await Promise.all([api('/_api/v1/kv'), api('/_api/v1/runtimes')]);
         state.kvNamespaces = res[0] || [];
         state.projects = res[1] || [];
         if (!state.selectedKvNs && state.kvNamespaces.length) {
@@ -1317,12 +1284,12 @@
     var canWriteNs = !isReadonly() && (isAdmin() || (nsMeta && canWriteResource(nsMeta.project_id)));
 
     var nsMenu = state.kvNamespaces.length
-      ? state.kvNamespaces.map(function (n) {
+      ? groupedMenu(state.kvNamespaces, function (n) {
           return '<button type="button" class="list-menu-item' + (n.name === state.selectedKvNs ? ' active' : '') + '" data-select-ns="' + esc(n.name) + '">' +
             '<span class="truncate">' + esc(n.name) + '</span>' +
             (n.project_id ? '<span class="badge badge-neutral text-xs">' + esc(projectNameById(n.project_id)) + '</span>' : '') +
             '</button>';
-        }).join('')
+        })
       : '<div class="empty-state" style="padding:20px 10px;">' + esc(t('kv.noNamespaces')) + '</div>';
 
     var keyRows = state.kvKeys.map(function (k) {
@@ -1455,19 +1422,21 @@
       body:
         '<form id="kv-ns-form" class="stack gap-md">' +
         '<div class="field"><label>' + esc(t('kv.namespaceName')) + '</label><input type="text" id="kns-name" required placeholder="' + esc(t('kv.namespacePlaceholder')) + '"></div>' +
+        resourceGroupField() +
         '<div class="field"><label>' + esc(t('common.project')) + '</label><select id="kns-proj">' + renderProjectSelectOptions('', true) + '</select></div>' +
         '</form>',
       footer:
         '<button type="button" class="btn" id="kns-cancel">' + esc(t('common.cancel')) + '</button>' +
         '<button type="submit" form="kv-ns-form" class="btn btn-primary">' + esc(t('common.create')) + '</button>',
       onMount: function () {
+        loadResourceGroupOptions();
         $('kns-cancel').addEventListener('click', closeModal);
         $('kv-ns-form').addEventListener('submit', async function (ev) {
           ev.preventDefault();
           var name = $('kns-name').value.trim();
           var pid = $('kns-proj').value || null;
           try {
-            await api('/_api/v1/kv', { method: 'POST', json: { name: name, project_id: pid } });
+            await api('/_api/v1/kv', { method: 'POST', json: { name: name, group: selectedResourceGroup(), project_id: pid } });
             closeModal();
             state.selectedKvNs = name;
             toast(t('kv.namespaceCreated'), 'success');
@@ -1587,7 +1556,7 @@
     if (fetchData) {
       root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
       try {
-        var res = await Promise.all([api('/_api/v1/queues'), api('/_api/v1/projects')]);
+        var res = await Promise.all([api('/_api/v1/queues'), api('/_api/v1/runtimes')]);
         state.queues = res[0] || [];
         state.projects = res[1] || [];
         if (!state.selectedQueue && state.queues.length) {
@@ -1606,11 +1575,11 @@
     var canWriteQ = qCfg && canWriteResource(qCfg.project_id);
 
     var qMenu = state.queues.length
-      ? state.queues.map(function (q) {
+      ? groupedMenu(state.queues, function (q) {
           return '<button type="button" class="list-menu-item' + (q.name === state.selectedQueue ? ' active' : '') + '" data-select-queue="' + esc(q.name) + '">' +
             '<span class="truncate">' + esc(q.name) + '</span>' +
             '<span class="badge badge-neutral text-xs">c:' + esc(q.max_concurrency) + '</span></button>';
-        }).join('')
+        })
       : '<div class="empty-state" style="padding:20px 10px;">' + esc(t('queues.empty')) + '</div>';
 
     var detailHtml = '';
@@ -1808,6 +1777,7 @@
       body:
         '<form id="create-q-form" class="form-grid">' +
         '<div class="field span-2"><label>' + esc(t('queues.name')) + '</label><input type="text" id="cq-name" required placeholder="' + esc(t('queues.namePlaceholder')) + '"></div>' +
+        resourceGroupField() +
         '<div class="field"><label>' + esc(t('queues.producerProject')) + '</label><select id="cq-proj">' + renderProjectSelectOptions('', true) + '</select></div>' +
         '<div class="field"><label>' + esc(t('queues.consumerProject')) + '</label><select id="cq-cproj">' + renderProjectSelectOptions('', true) + '</select></div>' +
         '<div class="field"><label>' + esc(t('queues.maxConcurrency')) + '</label><input type="number" id="cq-conc" value="4" min="1"></div>' +
@@ -1819,6 +1789,7 @@
         '<button type="button" class="btn" id="cq-cancel">' + esc(t('common.cancel')) + '</button>' +
         '<button type="submit" form="create-q-form" class="btn btn-primary">' + esc(t('common.create')) + '</button>',
       onMount: function () {
+        loadResourceGroupOptions();
         $('cq-cancel').addEventListener('click', closeModal);
         $('create-q-form').addEventListener('submit', async function (ev) {
           ev.preventDefault();
@@ -1828,6 +1799,7 @@
               method: 'POST',
               json: {
                 name: name,
+                group: selectedResourceGroup(),
                 project_id: $('cq-proj').value || null,
                 consumer_project_id: $('cq-cproj').value || null,
                 max_concurrency: Number($('cq-conc').value || 4),
@@ -1903,7 +1875,7 @@
     if (fetchData) {
       root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
       try {
-        var res = await Promise.all([api('/_api/v1/buckets'), api('/_api/v1/projects')]);
+        var res = await Promise.all([api('/_api/v1/buckets'), api('/_api/v1/runtimes')]);
         state.buckets = res[0] || [];
         state.projects = res[1] || [];
         if (!state.selectedBucket && state.buckets.length) {
@@ -1922,13 +1894,13 @@
     var canWriteBkt = bCfg && canWriteResource(bCfg.project_id);
 
     var bMenu = state.buckets.length
-      ? state.buckets.map(function (b) {
+      ? groupedMenu(state.buckets, function (b) {
           var badge = b.public_read
             ? '<span class="badge badge-success">' + esc(t('blobs.public')) + '</span>'
             : '<span class="badge badge-neutral">' + esc(t('blobs.private')) + '</span>';
           return '<button type="button" class="list-menu-item' + (b.name === state.selectedBucket ? ' active' : '') + '" data-select-bucket="' + esc(b.name) + '">' +
             '<span class="truncate">' + esc(b.name) + '</span>' + badge + '</button>';
-        }).join('')
+        })
       : '<div class="empty-state" style="padding:20px 10px;">' + esc(t('blobs.noBuckets')) + '</div>';
 
     var rightHtml = '';
@@ -2131,6 +2103,7 @@
       body:
         '<form id="create-bkt-form" class="stack gap-md">' +
         '<div class="field"><label>' + esc(t('blobs.bucketName')) + '</label><input type="text" id="cb-name" required placeholder="' + esc(t('blobs.bucketPlaceholder')) + '"></div>' +
+        resourceGroupField() +
         '<div class="field"><label>' + esc(t('common.project')) + '</label><select id="cb-proj">' + renderProjectSelectOptions('', true) + '</select></div>' +
         '<label class="checkbox-row"><input type="checkbox" id="cb-pub"> ' + esc(t('blobs.publicRead')) + '</label>' +
         '</form>',
@@ -2138,6 +2111,7 @@
         '<button type="button" class="btn" id="cb-cancel">' + esc(t('common.cancel')) + '</button>' +
         '<button type="submit" form="create-bkt-form" class="btn btn-primary">' + esc(t('common.create')) + '</button>',
       onMount: function () {
+        loadResourceGroupOptions();
         $('cb-cancel').addEventListener('click', closeModal);
         $('create-bkt-form').addEventListener('submit', async function (ev) {
           ev.preventDefault();
@@ -2147,6 +2121,7 @@
               method: 'POST',
               json: {
                 name: name,
+                group: selectedResourceGroup(),
                 project_id: $('cb-proj').value || null,
                 public_read: $('cb-pub').checked
               }
@@ -2210,7 +2185,7 @@
     if (fetchData) {
       root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
       try {
-        var res = await Promise.all([api('/_api/v1/dbs'), api('/_api/v1/projects')]);
+        var res = await Promise.all([api('/_api/v1/dbs'), api('/_api/v1/runtimes')]);
         state.dbs = res[0] || [];
         state.projects = res[1] || [];
         if (!state.selectedDbId && state.dbs.length) {
@@ -2231,12 +2206,12 @@
     var canWriteDb = dbMeta && canWriteResource(dbMeta.project_id);
 
     var dbMenu = state.dbs.length
-      ? state.dbs.map(function (d) {
+      ? groupedMenu(state.dbs, function (d) {
           return '<button type="button" class="list-menu-item' + (d.id === state.selectedDbId ? ' active' : '') + '" data-select-db="' + esc(d.id) + '">' +
             '<span class="truncate">' + esc(d.name) + '</span>' +
             (d.project_id ? '<span class="badge badge-neutral text-xs">' + esc(projectNameById(d.project_id)) + '</span>' : '') +
             '</button>';
-        }).join('')
+        })
       : '<div class="empty-state" style="padding:20px 10px;">' + esc(t('dbs.noDbs')) + '</div>';
 
     var rightHtml = '';
@@ -2452,19 +2427,21 @@
       body:
         '<form id="create-db-form" class="stack gap-md">' +
         '<div class="field"><label>' + esc(t('dbs.dbName')) + '</label><input type="text" id="cdb-name" required placeholder="' + esc(t('dbs.dbPlaceholder')) + '"></div>' +
+        resourceGroupField() +
         '<div class="field"><label>' + esc(t('common.project')) + '</label><select id="cdb-proj">' + renderProjectSelectOptions('', true) + '</select></div>' +
         '</form>',
       footer:
         '<button type="button" class="btn" id="cdb-cancel">' + esc(t('common.cancel')) + '</button>' +
         '<button type="submit" form="create-db-form" class="btn btn-primary">' + esc(t('common.create')) + '</button>',
       onMount: function () {
+        loadResourceGroupOptions();
         $('cdb-cancel').addEventListener('click', closeModal);
         $('create-db-form').addEventListener('submit', async function (ev) {
           ev.preventDefault();
           try {
             var res = await api('/_api/v1/dbs', {
               method: 'POST',
-              json: { name: $('cdb-name').value.trim(), project_id: $('cdb-proj').value || null }
+              json: { name: $('cdb-name').value.trim(), group: selectedResourceGroup(), project_id: $('cdb-proj').value || null }
             });
             closeModal();
             state.selectedDbId = res.id;
@@ -2485,7 +2462,7 @@
       await ensureSearchBundle();
       if (fetchData && !state.projects.length) {
         try {
-          state.projects = (await api('/_api/v1/projects')) || [];
+          state.projects = (await api('/_api/v1/runtimes')) || [];
         } catch (_) {}
       }
     } catch (e) {
@@ -2500,28 +2477,14 @@
     root.appendChild(wb);
   }
 
-  async function renderRuntime(fetchData) {
+  async function renderRuntime() {
     var root = $('view-root');
     root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
-    var resources = { dbs: [], kvNamespaces: [], queues: [], buckets: [] };
     try {
       await ensureRuntimeComponent();
-      var res = await Promise.all([
-        fetchData || !state.projects.length ? api('/_api/v1/projects') : Promise.resolve(state.projects),
-        fetchData || !state.routes.length ? api('/_api/v1/routes').catch(function () { return []; }) : Promise.resolve(state.routes),
-        api('/_api/v1/dbs').catch(function () { return []; }),
-        api('/_api/v1/kv').catch(function () { return []; }),
-        api('/_api/v1/queues').catch(function () { return []; }),
-        api('/_api/v1/buckets').catch(function () { return []; })
-      ]);
+      var res = await Promise.all([api('/_api/v1/runtimes'), api('/_api/v1/routes')]);
       state.projects = res[0] || [];
       state.routes = res[1] || [];
-      resources = {
-        dbs: res[2] || [],
-        kvNamespaces: res[3] || [],
-        queues: res[4] || [],
-        buckets: res[5] || []
-      };
     } catch (e) {
       root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
       return;
@@ -2529,14 +2492,11 @@
     root.innerHTML = '';
     var rp = document.createElement('fp-runtime-panel');
     rp.token = state.token || readStoredToken();
-    rp.canWrite = !isReadonly();
+    rp.canWrite = isAdmin();
     rp.status = state.status;
     rp.projects = state.projects;
     rp.routes = state.routes;
-    rp.resources = resources;
-    rp.addEventListener('fp-runtime-created', function () {
-      renderRuntime(true);
-    });
+    rp.addEventListener('fp-create-runtime', openCreateRuntimeModal);
     root.appendChild(rp);
   }
 
@@ -2547,7 +2507,7 @@
       await ensureOpsComponent();
       if (fetchData && !state.projects.length) {
         try {
-          state.projects = (await api('/_api/v1/projects')) || [];
+          state.projects = (await api('/_api/v1/runtimes')) || [];
         } catch (_) {}
       }
     } catch (e) {
@@ -2585,7 +2545,7 @@
     if (fetchData) {
       root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
       try {
-        var res = await Promise.all([api('/_api/v1/tokens'), api('/_api/v1/projects')]);
+        var res = await Promise.all([api('/_api/v1/tokens'), api('/_api/v1/runtimes')]);
         state.tokens = res[0] || [];
         state.projects = res[1] || [];
       } catch (e) {
@@ -2805,7 +2765,7 @@
     var root = $('view-root');
     if (fetchData && !state.projects.length) {
       try {
-        state.projects = (await api('/_api/v1/projects')) || [];
+        state.projects = (await api('/_api/v1/runtimes')) || [];
       } catch (_) {}
     }
     if (fetchData && state.logsTab === 'history') {
@@ -2984,7 +2944,7 @@
     document.addEventListener('fp-navigate', function (ev) {
       if (ev.detail && ev.detail.hash) {
         if (ev.detail.projectTab) {
-          state.projectTab = ev.detail.projectTab;
+          state.pendingRuntimeTab = ev.detail.projectTab;
         }
         navigate(ev.detail.hash);
       }

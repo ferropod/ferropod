@@ -30,6 +30,17 @@ impl PlatformService {
         name: &str,
         project_id: Option<&str>,
     ) -> Result<String> {
+        self.create_grouped_user_db(caller, name, project_id, None).await
+    }
+
+    pub async fn create_grouped_user_db(
+        &self,
+        caller: &Caller,
+        name: &str,
+        project_id: Option<&str>,
+        group: Option<&str>,
+    ) -> Result<String> {
+        let group = super::normalize_resource_group(group)?;
         let name = name.trim();
         if name.is_empty() {
             return Err(FerroError::InvalidArgument(
@@ -53,7 +64,7 @@ impl PlatformService {
 
         let id = format!("db_{}", Uuid::new_v4().simple());
         self.registry
-            .register_user_db(&id, name, resolved_pid.as_deref())
+            .register_user_db(&id, name, resolved_pid.as_deref(), group)
             .await?;
         if let Err(e) = self.db.create_db(&id).await {
             let _ = self.registry.delete_user_db(&id).await;

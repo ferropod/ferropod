@@ -19,7 +19,12 @@ use super::{opt_text, opt_text_param, row_to_deployment, row_to_project, TursoCo
 
 #[async_trait]
 impl ProjectStore for TursoCoreStore {
-    async fn create_project(&self, name: &str, health_check_path: Option<&str>) -> Result<Project> {
+    async fn create_project(
+        &self,
+        name: &str,
+        health_check_path: Option<&str>,
+        group: Option<&str>,
+    ) -> Result<Project> {
         let now = Utc::now().timestamp();
         let id = format!("prj_{}", Uuid::new_v4().simple());
         let hcp = health_check_path.unwrap_or("/health").to_string();
@@ -29,12 +34,13 @@ impl ProjectStore for TursoCoreStore {
             let id = id.clone();
             let name_s = name_s.clone();
             let hcp = hcp.clone();
+            let group = group.map(str::to_owned);
             async move {
                 let conn = db.connect()?;
                 conn.execute(
-                    "INSERT INTO projects (id, name, max_concurrency, health_check_path, created_at, updated_at)
-                     VALUES (?1, ?2, 64, ?3, ?4, ?4)",
-                    (id, name_s, hcp, now),
+                    "INSERT INTO projects (id, name, max_concurrency, health_check_path, created_at, updated_at, resource_group)
+                     VALUES (?1, ?2, 64, ?3, ?4, ?4, ?5)",
+                    (id, name_s, hcp, now, group),
                 )
                 .await
             }
@@ -51,6 +57,7 @@ impl ProjectStore for TursoCoreStore {
             health_check_path: health_check_path.unwrap_or("/health").to_string(),
             created_at: now,
             updated_at: now,
+            group: group.map(str::to_owned),
         })
     }
 
@@ -58,7 +65,7 @@ impl ProjectStore for TursoCoreStore {
         let conn = connect_db(&self.db)?;
         let mut rows = conn
             .query(
-                "SELECT id, name, active_deployment_id, preview_deployment_id, max_concurrency, access_policy_json, health_check_path, created_at, updated_at
+                "SELECT id, name, active_deployment_id, preview_deployment_id, max_concurrency, access_policy_json, health_check_path, created_at, updated_at, resource_group
                  FROM projects WHERE id = ?1 OR name = ?1 LIMIT 1",
                 [id_or_name],
             )
@@ -75,7 +82,7 @@ impl ProjectStore for TursoCoreStore {
         let conn = connect_db(&self.db)?;
         let mut rows = conn
             .query(
-                "SELECT id, name, active_deployment_id, preview_deployment_id, max_concurrency, access_policy_json, health_check_path, created_at, updated_at
+                "SELECT id, name, active_deployment_id, preview_deployment_id, max_concurrency, access_policy_json, health_check_path, created_at, updated_at, resource_group
                  FROM projects ORDER BY created_at DESC",
                 (),
             )

@@ -282,3 +282,15 @@ impl PlatformService {
         }
     }
 }
+
+fn normalize_resource_group(group: Option<&str>) -> Result<Option<&str>> {
+    let group = group.map(str::trim).filter(|name| !name.is_empty());
+    if let Some(name) = group {
+        if name.chars().count() > 80 || name.chars().any(char::is_control) {
+            return Err(FerroError::InvalidArgument(
+                "resource group must be at most 80 characters and contain no control characters".into(),
+            ));
+        }
+    }
+    Ok(group)
+}

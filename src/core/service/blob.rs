@@ -99,6 +99,18 @@ impl PlatformService {
         project_id: Option<&str>,
         public_read: bool,
     ) -> Result<BucketMeta> {
+        self.create_grouped_bucket(caller, name, project_id, public_read, None).await
+    }
+
+    pub async fn create_grouped_bucket(
+        &self,
+        caller: &Caller,
+        name: &str,
+        project_id: Option<&str>,
+        public_read: bool,
+        group: Option<&str>,
+    ) -> Result<BucketMeta> {
+        let group = super::normalize_resource_group(group)?;
         let name = name.trim();
         if name.is_empty() || name.contains('/') {
             return Err(FerroError::InvalidArgument(format!(
@@ -122,7 +134,7 @@ impl PlatformService {
 
         let meta = self
             .objects
-            .create_bucket(name, resolved_pid.as_deref(), public_read)
+            .create_bucket(name, resolved_pid.as_deref(), public_read, group)
             .await?;
         self.audit(
             resolved_pid.as_deref(),

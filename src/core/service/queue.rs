@@ -47,6 +47,7 @@ impl PlatformService {
         caller: &Caller,
         mut cfg: QueueConfig,
     ) -> Result<QueueConfig> {
+        cfg.group = super::normalize_resource_group(cfg.group.as_deref())?.map(str::to_owned);
         cfg.name = cfg.name.trim().to_string();
         if cfg.name.is_empty() {
             return Err(FerroError::InvalidArgument(

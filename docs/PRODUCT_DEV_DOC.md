@@ -60,7 +60,6 @@ flowchart TD
 | 模块 | 后台路由 | 后端状态 | 前端状态 | 项目隔离 | 已知缺口 / 备注 |
 | :--- | :--- | :---: | :---: | :---: | :--- |
 | **概览与实时性能监控** | `#/overview` | ✅ | ✅ | ✅ | 真实 `/proc` 指标（RSS / 宿主机内存 / Load / FD / Uptime）+ 5s SVG 实时折线 |
-| **项目管理 (Workspace)** | `#/projects` | ✅ | ✅ | ✅ | 顶层项目隔离容器（路线 B）：聚合部署版本、可视化资源绑定 (Bindings)、内置 rustls / rustls-acme (TLS-ALPN-01) 域名路由与 Secrets |
 | **运行时 (Runtime)** | `#/runtime` | ✅ | ✅ | ✅ | Wasmtime AOT `.cwasm` 运行时、预编译上传、WIT v0.2 Host Bindings、出站 HTTP 与实时 Invoke 调试台 |
 | **Secrets 密钥** | 项目详情内 | ✅ | ✅ | ✅ | AES-256-GCM 静态加密，按 `project_id` 强隔离 |
 | **KV 存储** | `#/kv` | ✅ | ✅ | ✅ | 命名空间创建/列表/删除 + 键值 CRUD + TTL + 内存临时模式 + 原子自增 |
@@ -75,6 +74,8 @@ flowchart TD
 | **系统更新** | `#/update` | ✅ | ✅ | ✅ (`admin`) | 版本信息、Release 列表检查与自更新触发 |
 
 ---
+
+运行时、数据库、KV 命名空间、队列和存储桶可在各自页面按名称分组。创建资源时选择已有分组或输入新名称。同名分组可包含多种资源和多个运行时。资源归属与令牌作用域仍通过运行时 ID 管理。
 
 ## 4. 安全与多项目隔离 (RBAC)
 
@@ -109,7 +110,7 @@ flowchart TD
 | `perf_component.js` | `<fp-perf-monitor>` 实时性能监控（SVG 折线） | **ESM 动态 `import()` 懒加载**（`#/overview`） |
 | `search_mock.js` / `search_components.js` | `<fp-search-workbench>`、`<fp-db-fts-panel>`、`<fp-log-search-panel>` | **ESM 动态 `import()` 懒加载**（`#/search`、`#/dbs` FTS、`#/logs`） |
 | `ops_component.js` | `<fp-ops-center>` 备份快照 + 定时任务中心 | **ESM 动态 `import()` 懒加载**（`#/ops`） |
-| `runtime_component.js` | `<fp-runtime-panel>` 运行时工作台 + `<fp-project-bindings>` 可视化资源绑定 | **ESM 动态 `import()` 懒加载**（`#/runtime`、`#/projects/:id`） |
+| `runtime_component.js` | `<fp-runtime-panel>` 运行时工作台 + `<fp-project-bindings>` 可视化资源绑定 | **ESM 动态 `import()` 懒加载**（`#/runtime`、`#/runtime/:id`） |
 | `update_component.js` | 系统版本与更新中心组件 | **ESM 动态 `import()` 懒加载**（`#/updates`） |
 
 ### 5.3 传输与缓存优化

@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 use turso::{Database, Value as TursoValue};
 
 use crate::core::model::{Bindings, Deployment, FerroError, ObjectMeta, Project, Result};
-use crate::storage::tx::{checkpoint_db, connect_db, map_turso_err, open_turso_db};
+use crate::storage::tx::{
+    checkpoint_db, connect_db, ensure_resource_group_column, map_turso_err, open_turso_db,
+};
 
 const CORE_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS projects (
@@ -20,7 +22,8 @@ CREATE TABLE IF NOT EXISTS projects (
     access_policy_json TEXT,
     health_check_path TEXT NOT NULL DEFAULT '/health',
     created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
+    updated_at INTEGER NOT NULL,
+    resource_group TEXT
 );
 
 CREATE TABLE IF NOT EXISTS deployments (
@@ -65,14 +68,16 @@ CREATE TABLE IF NOT EXISTS api_tokens (
 CREATE TABLE IF NOT EXISTS kv_namespaces (
     name TEXT PRIMARY KEY,
     project_id TEXT,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    resource_group TEXT
 );
 
 CREATE TABLE IF NOT EXISTS blob_buckets (
     name TEXT PRIMARY KEY,
     project_id TEXT,
     public_read INTEGER NOT NULL DEFAULT 0,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    resource_group TEXT
 );
 
 CREATE TABLE IF NOT EXISTS blob_objects (
@@ -97,7 +102,8 @@ CREATE TABLE IF NOT EXISTS user_databases (
     id TEXT PRIMARY KEY,
     name TEXT UNIQUE NOT NULL,
     project_id TEXT,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    resource_group TEXT
 );
 
 CREATE TABLE IF NOT EXISTS cron_jobs (
@@ -139,6 +145,9 @@ impl TursoCoreStore {
         conn.execute_batch(CORE_SCHEMA)
             .await
             .map_err(map_turso_err)?;
+        for table in ["projects", "kv_namespaces", "user_databases", "blob_buckets"] {
+            ensure_resource_group_column(&conn, table).await?;
+        }
         Ok(Self {
             db,
             db_path: path.to_path_buf(),
@@ -199,6 +208,7 @@ pub(super) fn row_to_project(row: &turso::Row) -> Result<Project> {
         health_check_path: row.get(6).map_err(map_turso_err)?,
         created_at: row.get(7).map_err(map_turso_err)?,
         updated_at: row.get(8).map_err(map_turso_err)?,
+        group: opt_text(row, 9)?,
     })
 }
 

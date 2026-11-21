@@ -13,7 +13,8 @@ use crate::core::model::{
 };
 use crate::core::traits::QueueStore;
 use crate::storage::tx::{
-    checkpoint_db, connect_db, copy_db_with_sidecars, map_turso_err, open_turso_db, with_retry,
+    checkpoint_db, connect_db, copy_db_with_sidecars, ensure_resource_group_column, map_turso_err,
+    open_turso_db, with_retry,
 };
 
 const QUEUE_SCHEMA: &str = r#"
@@ -26,7 +27,8 @@ CREATE TABLE IF NOT EXISTS queues (
     batch_size INTEGER NOT NULL DEFAULT 20,
     lease_secs INTEGER NOT NULL DEFAULT 60,
     max_attempts INTEGER NOT NULL DEFAULT 5,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    resource_group TEXT
 );
 
 CREATE TABLE IF NOT EXISTS jobs (
@@ -76,6 +78,8 @@ impl TursoQueueStore {
         conn.execute_batch(QUEUE_SCHEMA)
             .await
             .map_err(map_turso_err)?;
+
+        ensure_resource_group_column(&conn, "queues").await?;
 
         let (ingest_tx, ingest_rx) = mpsc::channel::<IngestItem>(4_096);
         let notify = Arc::new(Notify::new());
@@ -212,8 +216,8 @@ impl QueueStore for TursoQueueStore {
             async move {
                 let conn = db.connect()?;
                 conn.execute(
-                    "INSERT INTO queues (name, project_id, consumer_project_id, max_concurrency, rate_limit_per_sec, batch_size, lease_secs, max_attempts, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                    "INSERT INTO queues (name, project_id, consumer_project_id, max_concurrency, rate_limit_per_sec, batch_size, lease_secs, max_attempts, created_at, resource_group)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                      ON CONFLICT(name) DO UPDATE SET
                         project_id = excluded.project_id,
                         consumer_project_id = excluded.consumer_project_id,
@@ -221,7 +225,8 @@ impl QueueStore for TursoQueueStore {
                         rate_limit_per_sec = excluded.rate_limit_per_sec,
                         batch_size = excluded.batch_size,
                         lease_secs = excluded.lease_secs,
-                        max_attempts = excluded.max_attempts",
+                        max_attempts = excluded.max_attempts,
+                        resource_group = excluded.resource_group",
                     vec![
                         TursoValue::Text(cfg.name),
                         cfg.project_id.map(TursoValue::Text).unwrap_or(TursoValue::Null),
@@ -232,6 +237,7 @@ impl QueueStore for TursoQueueStore {
                         TursoValue::Integer(cfg.lease_secs),
                         TursoValue::Integer(cfg.max_attempts),
                         TursoValue::Integer(cfg.created_at),
+                        cfg.group.map(TursoValue::Text).unwrap_or(TursoValue::Null),
                     ],
                 )
                 .await
@@ -245,7 +251,7 @@ impl QueueStore for TursoQueueStore {
         let conn = connect_db(&self.db)?;
         let mut rows = conn
             .query(
-                "SELECT name, project_id, consumer_project_id, max_concurrency, rate_limit_per_sec, batch_size, lease_secs, max_attempts, created_at
+                "SELECT name, project_id, consumer_project_id, max_concurrency, rate_limit_per_sec, batch_size, lease_secs, max_attempts, created_at, resource_group
                  FROM queues WHERE name = ?1 LIMIT 1",
                 [name],
             )
@@ -262,6 +268,7 @@ impl QueueStore for TursoQueueStore {
                 lease_secs: row.get(6).map_err(map_turso_err)?,
                 max_attempts: row.get(7).map_err(map_turso_err)?,
                 created_at: row.get(8).map_err(map_turso_err)?,
+                group: opt_text(&row, 9)?,
             }))
         } else {
             Ok(None)
@@ -272,7 +279,7 @@ impl QueueStore for TursoQueueStore {
         let conn = connect_db(&self.db)?;
         let mut rows = conn
             .query(
-                "SELECT name, project_id, consumer_project_id, max_concurrency, rate_limit_per_sec, batch_size, lease_secs, max_attempts, created_at
+                "SELECT name, project_id, consumer_project_id, max_concurrency, rate_limit_per_sec, batch_size, lease_secs, max_attempts, created_at, resource_group
                  FROM queues ORDER BY name ASC",
                 (),
             )
@@ -290,6 +297,7 @@ impl QueueStore for TursoQueueStore {
                 lease_secs: row.get(6).map_err(map_turso_err)?,
                 max_attempts: row.get(7).map_err(map_turso_err)?,
                 created_at: row.get(8).map_err(map_turso_err)?,
+                group: opt_text(&row, 9)?,
             });
         }
         Ok(out)

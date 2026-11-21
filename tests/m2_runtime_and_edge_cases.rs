@@ -177,6 +177,7 @@ async fn http_worker_and_all_wit_v2_host_bindings() {
         .queue_create(
             &h.admin,
             QueueConfig {
+                group: None,
                 name: "app-q".into(),
                 project_id: Some(proj.id.clone()),
                 consumer_project_id: None,
@@ -518,6 +519,7 @@ async fn queue_consumer_ack_retry_dead_and_dlq_replay() {
         .queue_create(
             &h.admin,
             QueueConfig {
+                group: None,
                 name: "jobs".into(),
                 project_id: Some(proj.id.clone()),
                 consumer_project_id: Some(proj.id.clone()),

@@ -51,6 +51,7 @@ struct StatusResp {
 
 #[derive(Debug, Deserialize)]
 struct CreateProjectReq {
+    group: Option<String>,
     name: String,
     health_check_path: Option<String>,
 }
@@ -118,6 +119,7 @@ struct CreateTokenReq {
 
 #[derive(Debug, Deserialize)]
 struct CreateKvNamespaceReq {
+    group: Option<String>,
     name: String,
     project_id: Option<String>,
 }
@@ -145,6 +147,7 @@ struct KvListQuery {
 
 #[derive(Debug, Deserialize)]
 struct CreateQueueReq {
+    group: Option<String>,
     name: String,
     project_id: Option<String>,
     consumer_project_id: Option<String>,
@@ -177,6 +180,7 @@ struct ReplayDlqReq {
 
 #[derive(Debug, Deserialize)]
 struct CreateBucketReq {
+    group: Option<String>,
     name: String,
     project_id: Option<String>,
     #[serde(default)]
@@ -202,6 +206,7 @@ fn default_presign_ttl() -> u64 {
 
 #[derive(Debug, Deserialize)]
 struct CreateDbReq {
+    group: Option<String>,
     name: String,
     project_id: Option<String>,
 }
@@ -229,6 +234,7 @@ pub fn router() -> Router<PlatformService> {
     Router::new()
         .route("/status", get(status))
         .route("/metrics", get(metrics))
+        .route("/resource-groups", get(list_resource_groups))
         .route("/system/info", get(system_info))
         .route("/system/update/check", get(system_update_check))
         .route("/system/releases", get(system_releases))
@@ -238,21 +244,8 @@ pub fn router() -> Router<PlatformService> {
         .route("/crons", get(cron_list).post(cron_create))
         .route("/crons/{id}", patch(cron_update).delete(cron_delete))
         .route("/crons/{id}/run", post(cron_run))
-        .route("/projects", get(list_projects).post(create_project))
-        .route("/projects/{id}", get(get_project).delete(delete_project))
-        .route(
-            "/projects/{id}/deployments",
-            get(list_deployments).post(create_deployment),
-        )
-        .route(
-            "/projects/{id}/artifacts/{*path}",
-            put(upload_artifact).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
-        )
-        .route("/projects/{id}/invoke", post(invoke_project))
-        .route("/projects/{id}/promote", post(promote_deployment))
-        .route("/projects/{id}/rollback", post(rollback_deployment))
-        .route("/projects/{id}/secrets", get(list_secrets).post(set_secret))
-        .route("/projects/{id}/secrets/{key}", delete(delete_secret))
+        .merge(runtime_routes("/runtimes"))
+        .merge(runtime_routes("/projects"))
         .route("/routes", get(list_routes).post(upsert_route))
         .route("/routes/{host}", delete(delete_route))
         .route("/tokens", get(list_tokens).post(create_token))
@@ -293,6 +286,50 @@ pub fn router() -> Router<PlatformService> {
         .route("/search/{id}/query", post(search_query_index))
         .route("/logs", get(logs_query))
         .route("/logs/stream", get(logs_stream))
+}
+
+async fn list_resource_groups(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let (runtimes, dbs, namespaces, queues, buckets) = tokio::try_join!(
+        svc.list_projects(&caller),
+        svc.list_user_dbs(&caller),
+        svc.list_kv_namespaces(&caller),
+        svc.queue_list(&caller),
+        svc.list_buckets(&caller),
+    )
+    .map_err(ApiError)?;
+    let groups: std::collections::BTreeSet<_> = runtimes
+        .into_iter()
+        .map(|r| r.group)
+        .chain(dbs.into_iter().map(|r| r.group))
+        .chain(namespaces.into_iter().map(|r| r.group))
+        .chain(queues.into_iter().map(|r| r.group))
+        .chain(buckets.into_iter().map(|r| r.group))
+        .flatten()
+        .collect();
+    Ok(Json(groups))
+}
+
+fn runtime_routes(prefix: &str) -> Router<PlatformService> {
+    Router::new()
+        .route(prefix, get(list_projects).post(create_project))
+        .route(&format!("{prefix}/{{id}}"), get(get_project).delete(delete_project))
+        .route(
+            &format!("{prefix}/{{id}}/deployments"),
+            get(list_deployments).post(create_deployment),
+        )
+        .route(
+            &format!("{prefix}/{{id}}/artifacts/{{*path}}"),
+            put(upload_artifact).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
+        )
+        .route(&format!("{prefix}/{{id}}/invoke"), post(invoke_project))
+        .route(&format!("{prefix}/{{id}}/promote"), post(promote_deployment))
+        .route(&format!("{prefix}/{{id}}/rollback"), post(rollback_deployment))
+        .route(&format!("{prefix}/{{id}}/secrets"), get(list_secrets).post(set_secret))
+        .route(&format!("{prefix}/{{id}}/secrets/{{key}}"), delete(delete_secret))
 }
 
 async fn status(
@@ -618,7 +655,12 @@ async fn create_project(
 ) -> Result<impl IntoResponse, ApiError> {
     let caller = authenticate_caller(&svc, &headers, None).await?;
     let proj = svc
-        .create_project(&caller, &req.name, req.health_check_path.as_deref())
+        .create_grouped_project(
+            &caller,
+            &req.name,
+            req.health_check_path.as_deref(),
+            req.group.as_deref(),
+        )
         .await
         .map_err(ApiError)?;
     Ok((StatusCode::CREATED, Json(proj)))
@@ -909,7 +951,12 @@ async fn kv_create_namespace(
 ) -> Result<impl IntoResponse, ApiError> {
     let caller = authenticate_caller(&svc, &headers, None).await?;
     let ns = svc
-        .create_kv_namespace(&caller, &req.name, req.project_id.as_deref())
+        .create_grouped_kv_namespace(
+            &caller,
+            &req.name,
+            req.project_id.as_deref(),
+            req.group.as_deref(),
+        )
         .await
         .map_err(ApiError)?;
     Ok((StatusCode::CREATED, Json(ns)))
@@ -1030,6 +1077,7 @@ async fn queue_create(
 ) -> Result<impl IntoResponse, ApiError> {
     let caller = authenticate_caller(&svc, &headers, None).await?;
     let cfg = QueueConfig {
+        group: req.group,
         name: req.name,
         project_id: req.project_id,
         consumer_project_id: req.consumer_project_id,
@@ -1185,7 +1233,13 @@ async fn bucket_create(
 ) -> Result<impl IntoResponse, ApiError> {
     let caller = authenticate_caller(&svc, &headers, None).await?;
     let b = svc
-        .create_bucket(&caller, &req.name, req.project_id.as_deref(), req.public_read)
+        .create_grouped_bucket(
+            &caller,
+            &req.name,
+            req.project_id.as_deref(),
+            req.public_read,
+            req.group.as_deref(),
+        )
         .await
         .map_err(ApiError)?;
     Ok((StatusCode::CREATED, Json(b)))
@@ -1326,7 +1380,12 @@ async fn db_create(
 ) -> Result<impl IntoResponse, ApiError> {
     let caller = authenticate_caller(&svc, &headers, None).await?;
     let id = svc
-        .create_user_db(&caller, &req.name, req.project_id.as_deref())
+        .create_grouped_user_db(
+            &caller,
+            &req.name,
+            req.project_id.as_deref(),
+            req.group.as_deref(),
+        )
         .await
         .map_err(ApiError)?;
     Ok((

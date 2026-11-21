@@ -25,6 +25,17 @@ impl PlatformService {
         name: &str,
         project_id: Option<&str>,
     ) -> Result<KvNamespaceMeta> {
+        self.create_grouped_kv_namespace(caller, name, project_id, None).await
+    }
+
+    pub async fn create_grouped_kv_namespace(
+        &self,
+        caller: &Caller,
+        name: &str,
+        project_id: Option<&str>,
+        group: Option<&str>,
+    ) -> Result<KvNamespaceMeta> {
+        let group = super::normalize_resource_group(group)?;
         let name = name.trim();
         if name.is_empty() {
             return Err(FerroError::InvalidArgument(
@@ -48,7 +59,7 @@ impl PlatformService {
 
         let meta = self
             .registry
-            .create_kv_namespace(name, resolved_pid.as_deref())
+            .create_kv_namespace(name, resolved_pid.as_deref(), group)
             .await?;
         self.audit(
             resolved_pid.as_deref(),

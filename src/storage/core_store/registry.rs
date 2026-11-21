@@ -10,7 +10,13 @@ use super::{opt_i64, opt_text, TursoCoreStore};
 
 #[async_trait]
 impl RegistryStore for TursoCoreStore {
-    async fn register_user_db(&self, id: &str, name: &str, project_id: Option<&str>) -> Result<()> {
+    async fn register_user_db(
+        &self,
+        id: &str,
+        name: &str,
+        project_id: Option<&str>,
+        group: Option<&str>,
+    ) -> Result<()> {
         let now = Utc::now().timestamp();
         let id_s = id.to_string();
         let name_s = name.to_string();
@@ -20,11 +26,12 @@ impl RegistryStore for TursoCoreStore {
             let id_s = id_s.clone();
             let name_s = name_s.clone();
             let proj_s = proj_s.clone();
+            let group = group.map(str::to_owned);
             async move {
                 let conn = db.connect()?;
                 conn.execute(
-                    "INSERT INTO user_databases (id, name, project_id, created_at) VALUES (?1, ?2, ?3, ?4)",
-                    (id_s, name_s, proj_s, now),
+                    "INSERT INTO user_databases (id, name, project_id, created_at, resource_group) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    (id_s, name_s, proj_s, now, group),
                 )
                 .await
             }
@@ -55,7 +62,7 @@ impl RegistryStore for TursoCoreStore {
         let conn = connect_db(&self.db)?;
         let mut rows = conn
             .query(
-                "SELECT id, name, project_id, created_at FROM user_databases WHERE id = ?1 OR name = ?1 LIMIT 1",
+                "SELECT id, name, project_id, created_at, resource_group FROM user_databases WHERE id = ?1 OR name = ?1 LIMIT 1",
                 [id_or_name],
             )
             .await
@@ -66,6 +73,7 @@ impl RegistryStore for TursoCoreStore {
                 name: row.get(1).map_err(map_turso_err)?,
                 project_id: opt_text(&row, 2)?,
                 created_at: row.get(3).map_err(map_turso_err)?,
+                group: opt_text(&row, 4)?,
             }))
         } else {
             Ok(None)
@@ -76,7 +84,7 @@ impl RegistryStore for TursoCoreStore {
         let conn = connect_db(&self.db)?;
         let mut rows = conn
             .query(
-                "SELECT id, name, project_id, created_at FROM user_databases ORDER BY created_at DESC",
+                "SELECT id, name, project_id, created_at, resource_group FROM user_databases ORDER BY created_at DESC",
                 (),
             )
             .await
@@ -88,6 +96,7 @@ impl RegistryStore for TursoCoreStore {
                 name: row.get(1).map_err(map_turso_err)?,
                 project_id: opt_text(&row, 2)?,
                 created_at: row.get(3).map_err(map_turso_err)?,
+                group: opt_text(&row, 4)?,
             });
         }
         Ok(out)
@@ -97,6 +106,7 @@ impl RegistryStore for TursoCoreStore {
         &self,
         name: &str,
         project_id: Option<&str>,
+        group: Option<&str>,
     ) -> Result<KvNamespaceMeta> {
         let now = Utc::now().timestamp();
         let name_s = name.to_string();
@@ -105,11 +115,12 @@ impl RegistryStore for TursoCoreStore {
             let db = self.db.clone();
             let name_s = name_s.clone();
             let proj_s = proj_s.clone();
+            let group = group.map(str::to_owned);
             async move {
                 let conn = db.connect()?;
                 conn.execute(
-                    "INSERT INTO kv_namespaces (name, project_id, created_at) VALUES (?1, ?2, ?3)",
-                    (name_s, proj_s, now),
+                    "INSERT INTO kv_namespaces (name, project_id, created_at, resource_group) VALUES (?1, ?2, ?3, ?4)",
+                    (name_s, proj_s, now, group),
                 )
                 .await
             }
@@ -120,6 +131,7 @@ impl RegistryStore for TursoCoreStore {
             name: name.to_string(),
             project_id: project_id.map(str::to_string),
             created_at: now,
+            group: group.map(str::to_owned),
         })
     }
 
@@ -127,7 +139,7 @@ impl RegistryStore for TursoCoreStore {
         let conn = connect_db(&self.db)?;
         let mut rows = conn
             .query(
-                "SELECT name, project_id, created_at FROM kv_namespaces WHERE name = ?1 LIMIT 1",
+                "SELECT name, project_id, created_at, resource_group FROM kv_namespaces WHERE name = ?1 LIMIT 1",
                 [name],
             )
             .await
@@ -137,6 +149,7 @@ impl RegistryStore for TursoCoreStore {
                 name: row.get(0).map_err(map_turso_err)?,
                 project_id: opt_text(&row, 1)?,
                 created_at: row.get(2).map_err(map_turso_err)?,
+                group: opt_text(&row, 3)?,
             }))
         } else {
             Ok(None)
@@ -147,7 +160,7 @@ impl RegistryStore for TursoCoreStore {
         let conn = connect_db(&self.db)?;
         let mut rows = conn
             .query(
-                "SELECT name, project_id, created_at FROM kv_namespaces ORDER BY name ASC",
+                "SELECT name, project_id, created_at, resource_group FROM kv_namespaces ORDER BY name ASC",
                 (),
             )
             .await
@@ -158,6 +171,7 @@ impl RegistryStore for TursoCoreStore {
                 name: row.get(0).map_err(map_turso_err)?,
                 project_id: opt_text(&row, 1)?,
                 created_at: row.get(2).map_err(map_turso_err)?,
+                group: opt_text(&row, 3)?,
             });
         }
         Ok(out)

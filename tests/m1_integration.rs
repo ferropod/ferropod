@@ -259,6 +259,7 @@ async fn queue_microbatch_claim_ack_nack_dlq_and_lease_reap() {
         .queue_create(
             &h.admin,
             QueueConfig {
+                group: None,
                 name: "jobs".into(),
                 project_id: None,
                 consumer_project_id: None,
@@ -713,6 +714,7 @@ async fn multi_project_rbac_and_isolation() {
         .queue_create(
             &h.admin,
             QueueConfig {
+                group: None,
                 name: "q_a".into(),
                 project_id: Some(proj_a.id.clone()),
                 consumer_project_id: None,
@@ -730,6 +732,7 @@ async fn multi_project_rbac_and_isolation() {
         .queue_create(
             &h.admin,
             QueueConfig {
+                group: None,
                 name: "q_b".into(),
                 project_id: Some(proj_b.id.clone()),
                 consumer_project_id: Some(proj_a.id.clone()),
@@ -1777,4 +1780,74 @@ async fn test_manual_https_end_to_end_with_http_redirect() {
 
     let _ = tx.send(());
     server_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn resources_can_share_a_group_without_sharing_access() {
+    let h = setup_harness().await;
+    let app = build_router(h.svc.clone());
+    let admin = Some(h.admin_token.as_str());
+
+    let (status, runtime) = json_req(
+        &app,
+        Method::POST,
+        "/_api/v1/runtimes",
+        admin,
+        Some(serde_json::json!({"name": "grouped-worker", "group": " 分析 "})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{}", String::from_utf8_lossy(&runtime));
+    let runtime: serde_json::Value = serde_json::from_slice(&runtime).unwrap();
+    let id = runtime["id"].as_str().unwrap();
+    assert_eq!(runtime["group"], "分析");
+    let (_, legacy) = json_req(&app, Method::GET, &format!("/_api/v1/projects/{id}"), admin, None).await;
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&legacy).unwrap(), runtime);
+
+    for (kind, names) in [
+        ("runtimes", ["second-worker", "third-worker"]),
+        ("dbs", ["analytics-db", "events-db"]),
+        ("kv", ["analytics-kv", "events-kv"]),
+        ("queues", ["analytics-queue", "events-queue"]),
+        ("buckets", ["analytics-assets", "events-assets"]),
+    ] {
+        let path = format!("/_api/v1/{kind}");
+        for name in names {
+            let (status, body) = json_req(
+                &app,
+                Method::POST,
+                &path,
+                admin,
+                Some(serde_json::json!({"name": name, "group": "分析"})),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{path}: {}", String::from_utf8_lossy(&body));
+        }
+        let (status, body) = json_req(&app, Method::GET, &path, admin, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let resources: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        for name in names {
+            assert!(resources.iter().any(|r| r["name"] == name && r["group"] == "分析"));
+        }
+    }
+
+    let (_, admin_groups) = json_req(&app, Method::GET, "/_api/v1/resource-groups", admin, None).await;
+    assert_eq!(serde_json::from_slice::<Vec<String>>(&admin_groups).unwrap(), ["分析"]);
+
+    let other = h.svc.create_project(&h.admin, "ungrouped-worker", None).await.unwrap();
+    let (_, scoped_token) = h.svc.create_token(
+        &h.admin,
+        "group-scope",
+        TokenScope::Project(other.id),
+        None,
+    ).await.unwrap();
+    let (status, scoped_groups) = json_req(
+        &app,
+        Method::GET,
+        "/_api/v1/resource-groups",
+        Some(&scoped_token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(serde_json::from_slice::<Vec<String>>(&scoped_groups).unwrap().is_empty());
 }

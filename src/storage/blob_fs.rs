@@ -77,9 +77,10 @@ impl ObjectStore for FsBlobStore {
         name: &str,
         project_id: Option<&str>,
         public_read: bool,
+        group: Option<&str>,
     ) -> Result<BucketMeta> {
         Self::validate_name(name)?;
-        self.meta.create_bucket(name, project_id, public_read).await
+        self.meta.create_bucket(name, project_id, public_read, group).await
     }
 
     async fn get_bucket(&self, name: &str) -> Result<Option<BucketMeta>> {

@@ -13,7 +13,12 @@ use crate::core::model::{
 
 #[async_trait]
 pub trait ProjectStore: Send + Sync {
-    async fn create_project(&self, name: &str, health_check_path: Option<&str>) -> Result<Project>;
+    async fn create_project(
+        &self,
+        name: &str,
+        health_check_path: Option<&str>,
+        group: Option<&str>,
+    ) -> Result<Project>;
     async fn get_project(&self, id_or_name: &str) -> Result<Option<Project>>;
     async fn list_projects(&self) -> Result<Vec<Project>>;
     async fn delete_project(&self, id: &str) -> Result<()>;
@@ -75,7 +80,13 @@ pub trait TokenStore: Send + Sync {
 
 #[async_trait]
 pub trait RegistryStore: Send + Sync {
-    async fn register_user_db(&self, id: &str, name: &str, project_id: Option<&str>) -> Result<()>;
+    async fn register_user_db(
+        &self,
+        id: &str,
+        name: &str,
+        project_id: Option<&str>,
+        group: Option<&str>,
+    ) -> Result<()>;
     async fn delete_user_db(&self, id: &str) -> Result<()>;
     async fn get_user_db(&self, id_or_name: &str) -> Result<Option<UserDbMeta>>;
     async fn list_user_dbs(&self) -> Result<Vec<UserDbMeta>>;
@@ -84,6 +95,7 @@ pub trait RegistryStore: Send + Sync {
         &self,
         name: &str,
         project_id: Option<&str>,
+        group: Option<&str>,
     ) -> Result<KvNamespaceMeta>;
     async fn get_kv_namespace(&self, name: &str) -> Result<Option<KvNamespaceMeta>>;
     async fn list_kv_namespaces(&self) -> Result<Vec<KvNamespaceMeta>>;
@@ -107,6 +119,7 @@ pub trait BlobMetaStore: Send + Sync {
         name: &str,
         project_id: Option<&str>,
         public_read: bool,
+        group: Option<&str>,
     ) -> Result<BucketMeta>;
     async fn get_bucket(&self, name: &str) -> Result<Option<BucketMeta>>;
     async fn list_buckets(&self) -> Result<Vec<BucketMeta>>;
@@ -221,6 +234,7 @@ pub trait ObjectStore: Send + Sync {
         name: &str,
         project_id: Option<&str>,
         public_read: bool,
+        group: Option<&str>,
     ) -> Result<BucketMeta>;
     async fn get_bucket(&self, name: &str) -> Result<Option<BucketMeta>>;
     async fn list_buckets(&self) -> Result<Vec<BucketMeta>>;

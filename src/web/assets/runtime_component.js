@@ -296,10 +296,8 @@ class FpRuntimePanel extends HTMLElement {
     this._status = null;
     this._projects = [];
     this._routes = [];
-    this._resources = { dbs: [], kvNamespaces: [], queues: [], buckets: [] };
     this._token = '';
     this._canWrite = true;
-    this._creating = false;
     this._invoke = {
       projectId: '',
       method: 'GET',
@@ -313,7 +311,6 @@ class FpRuntimePanel extends HTMLElement {
   set status(v) { this._status = v; if (this.isConnected) this.render(); }
   set token(v) { this._token = String(v || ''); }
   set canWrite(v) { this._canWrite = Boolean(v); if (this.isConnected) this.render(); }
-  set resources(r) { this._resources = r || { dbs: [], kvNamespaces: [], queues: [], buckets: [] }; if (this.isConnected) this.render(); }
   set projects(list) {
     this._projects = Array.isArray(list) ? list : [];
     if (!this._invoke.projectId && this._projects.length) {
@@ -329,70 +326,6 @@ class FpRuntimePanel extends HTMLElement {
     if (tok) h.Authorization = 'Bearer ' + tok;
     if (json) h['Content-Type'] = 'application/json';
     return h;
-  }
-
-  async createRuntime(opts) {
-    const { t } = getI18n();
-    this._creating = true;
-    this.render();
-    try {
-      let projectId = opts.projectId;
-      if (!projectId) {
-        const pRes = await fetch('/_api/v1/projects', {
-          method: 'POST',
-          headers: this._authHeaders(true),
-          body: JSON.stringify({
-            name: opts.newName,
-            health_check_path: opts.healthPath || '/health'
-          })
-        });
-        if (!pRes.ok) throw new Error((await pRes.text()) || `HTTP ${pRes.status}`);
-        const createdProj = await pRes.json();
-        projectId = createdProj.id;
-      }
-
-      const bindings = { kv: {}, db: {}, queue: {}, bucket: {}, env: {} };
-      if (opts.bindDb) bindings.db.DB = opts.bindDb;
-      if (opts.bindKv) bindings.kv.KV = opts.bindKv;
-      if (opts.bindQueue) bindings.queue.QUEUE = opts.bindQueue;
-      if (opts.envText) {
-        String(opts.envText).split(/\r?\n/).forEach((line) => {
-          const trimmed = line.trim();
-          if (!trimmed || trimmed.startsWith('#')) return;
-          const eq = trimmed.indexOf('=');
-          if (eq > 0) {
-            const k = trimmed.slice(0, eq).trim();
-            const v = trimmed.slice(eq + 1).trim();
-            if (k) bindings.env[k] = v;
-          }
-        });
-      }
-
-      const depPayload = {
-        artifact_path: opts.mode === 'wasm' ? (opts.artifactPath || 'workers/app.cwasm') : null,
-        assets_bucket: opts.mode === 'static' ? (opts.assetsBucket || null) : null,
-        assets_prefix: opts.mode === 'static' ? (opts.assetsPrefix || null) : null,
-        spa_fallback: opts.mode === 'static' ? Boolean(opts.spaFallback) : false,
-        bindings,
-        crons: [],
-        target_env: opts.targetEnv || 'prod'
-      };
-
-      const dRes = await fetch('/_api/v1/projects/' + encodeURIComponent(projectId) + '/deployments', {
-        method: 'POST',
-        headers: this._authHeaders(true),
-        body: JSON.stringify(depPayload)
-      });
-      if (!dRes.ok) throw new Error((await dRes.text()) || `HTTP ${dRes.status}`);
-
-      emitToast(this, t('runtime.created'), 'success');
-      this.dispatchEvent(new CustomEvent('fp-runtime-created', { bubbles: true, composed: true }));
-    } catch (err) {
-      emitToast(this, err.message, 'error');
-    } finally {
-      this._creating = false;
-      this.render();
-    }
   }
 
   connectedCallback() {
@@ -419,7 +352,7 @@ class FpRuntimePanel extends HTMLElement {
           body: txt
         };
       } else if (proj) {
-        const res = await fetch('/_api/v1/projects/' + encodeURIComponent(proj.id) + '/invoke', {
+        const res = await fetch('/_api/v1/runtimes/' + encodeURIComponent(proj.id) + '/invoke', {
           method: 'POST',
           headers: this._authHeaders(true),
           body: JSON.stringify({
@@ -468,13 +401,23 @@ class FpRuntimePanel extends HTMLElement {
     const memLimit = isLowMem ? '32 MiB / instance' : '128 MiB / instance';
     const maxConc = isLowMem ? '16 concurrent' : '64 concurrent';
 
-    const workloadRows = this._projects.map((p) => {
+    const runtimes = [...this._projects].sort((a, b) =>
+      (a.group || '').localeCompare(b.group || '') || a.name.localeCompare(b.name)
+    );
+    const hasGroups = runtimes.some((runtime) => runtime.group);
+    let lastGroup;
+    const workloadRows = runtimes.map((p) => {
       const pRoutes = this._routes.filter((r) => r.project_id === p.id);
       const hasActive = Boolean(p.active_deployment_id);
-      return `
+      const group = p.group || '';
+      const heading = group !== lastGroup && hasGroups
+        ? `<tr><th colspan="6">${esc(group || t('groups.ungrouped'))}</th></tr>`
+        : '';
+      lastGroup = group;
+      return `${heading}
         <tr>
           <td>
-            <button type="button" class="link-pill text-strong" data-go-hash="#/projects/${encodeURIComponent(p.id)}">${esc(p.name)}</button>
+            <button type="button" class="link-pill text-strong" data-go-hash="#/runtime/${encodeURIComponent(p.id)}">${esc(p.name)}</button>
             <div class="muted mono text-xs" style="margin-top:3px;">${esc(p.id)}</div>
           </td>
           <td>
@@ -490,7 +433,7 @@ class FpRuntimePanel extends HTMLElement {
           </td>
           <td class="mono text-xs">${esc(p.max_concurrency)}</td>
           <td class="row gap-xs">
-            <button type="button" class="btn btn-sm" data-go-hash="#/projects/${encodeURIComponent(p.id)}" data-open-bindings="1">${esc(t('runtime.manageBindings'))}</button>
+            <button type="button" class="btn btn-sm" data-go-hash="#/runtime/${encodeURIComponent(p.id)}" data-open-bindings="1">${esc(t('runtime.manageBindings'))}</button>
             <button type="button" class="btn btn-sm" data-pick-invoke="${esc(p.id)}">${esc(t('runtime.testInvoke'))}</button>
           </td>
         </tr>
@@ -507,8 +450,7 @@ class FpRuntimePanel extends HTMLElement {
           <p class="page-subtitle">${esc(t('runtime.subtitle'))}</p>
         </div>
         <div class="row gap-xs">
-          ${this._canWrite ? `<button type="button" class="btn btn-primary btn-sm" id="new-runtime-btn" ${this._creating ? 'disabled' : ''}>+ ${esc(t('runtime.newRuntime'))}</button>` : ''}
-          <button type="button" class="btn btn-sm" data-go-hash="#/projects">${esc(t('nav.projects'))}</button>
+          ${this._canWrite ? `<button type="button" class="btn btn-primary btn-sm" id="new-runtime-btn">+ ${esc(t('runtime.newRuntime'))}</button>` : ''}
         </div>
       </div>
 
@@ -552,7 +494,7 @@ class FpRuntimePanel extends HTMLElement {
               <table class="data-table">
                 <thead>
                   <tr>
-                    <th>${esc(t('common.project'))}</th>
+                    <th>${esc(t('runtime.runtimeName'))}</th>
                     <th>${esc(t('common.status'))}</th>
                     <th>${esc(t('projects.activeDeployment'))}</th>
                     <th>${esc(t('nav.routes'))}</th>
@@ -601,95 +543,6 @@ class FpRuntimePanel extends HTMLElement {
         </div>
       </div>
 
-      <dialog id="new-runtime-dialog" class="fp-dialog">
-        <div class="dialog-head">
-          <h3 class="dialog-title">${esc(t('runtime.newRuntime'))}</h3>
-          <button type="button" class="btn btn-ghost btn-sm" id="close-rt-dlg">✕</button>
-        </div>
-        <form id="new-runtime-form">
-          <div class="dialog-body stack gap-md">
-            <div class="field">
-              <label for="rt-target-proj">${esc(t('runtime.bindTarget'))}</label>
-              <select id="rt-target-proj">
-                <option value="__new__">+ ${esc(t('runtime.standaloneNew'))}</option>
-                ${this._projects.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('')}
-              </select>
-            </div>
-            <div class="field" id="rt-new-name-wrap">
-              <label for="rt-new-name">${esc(t('runtime.runtimeName'))}</label>
-              <input type="text" id="rt-new-name" placeholder="e.g. api-worker" required>
-            </div>
-            <div class="grid-2">
-              <div class="field">
-                <label for="rt-mode">${esc(t('runtime.mode'))}</label>
-                <select id="rt-mode">
-                  <option value="wasm">Wasm Worker (.cwasm / .wasm)</option>
-                  <option value="static">Static Site / SPA (Bucket)</option>
-                </select>
-              </div>
-              <div class="field">
-                <label for="rt-env">Target Env</label>
-                <select id="rt-env">
-                  <option value="prod">Prod</option>
-                  <option value="preview">Preview</option>
-                </select>
-              </div>
-            </div>
-            <div class="field" id="rt-wasm-wrap">
-              <label for="rt-artifact">${esc(t('runtime.artifactPath'))}</label>
-              <input type="text" id="rt-artifact" class="mono" value="workers/app.cwasm" placeholder="workers/app.cwasm">
-            </div>
-            <div class="stack gap-sm hidden" id="rt-static-wrap">
-              <div class="field">
-                <label for="rt-bucket">${esc(t('nav.blobs'))}</label>
-                <select id="rt-bucket">
-                  <option value="">-- ${esc(t('bindings.selectResource'))} --</option>
-                  ${(this._resources.buckets || []).map((b) => `<option value="${esc(b.name)}">${esc(b.name)}</option>`).join('')}
-                </select>
-              </div>
-              <div class="field">
-                <label for="rt-prefix">Prefix (${esc(t('common.optional'))})</label>
-                <input type="text" id="rt-prefix" class="mono" placeholder="dist">
-              </div>
-              <label class="row gap-xs text-xs" style="cursor:pointer;">
-                <input type="checkbox" id="rt-spa" checked style="width:auto;">
-                <span>SPA Fallback (index.html)</span>
-              </label>
-            </div>
-            <div class="grid-2">
-              <div class="field">
-                <label for="rt-bind-db">${esc(t('runtime.quickBindDb'))}</label>
-                <select id="rt-bind-db">
-                  <option value="">${esc(t('common.none'))}</option>
-                  ${(this._resources.dbs || []).map((d) => `<option value="${esc(d.name)}">${esc(d.name)}</option>`).join('')}
-                </select>
-              </div>
-              <div class="field">
-                <label for="rt-bind-kv">${esc(t('runtime.quickBindKv'))}</label>
-                <select id="rt-bind-kv">
-                  <option value="">${esc(t('common.none'))}</option>
-                  ${(this._resources.kvNamespaces || []).map((n) => `<option value="${esc(n.name)}">${esc(n.name)}</option>`).join('')}
-                </select>
-              </div>
-            </div>
-            <div class="field">
-              <label for="rt-bind-queue">${esc(t('runtime.quickBindQueue'))}</label>
-              <select id="rt-bind-queue">
-                <option value="">${esc(t('common.none'))}</option>
-                ${(this._resources.queues || []).map((q) => `<option value="${esc(q.name)}">${esc(q.name)}</option>`).join('')}
-              </select>
-            </div>
-            <div class="field">
-              <label for="rt-env-text">${esc(t('runtime.quickEnv'))}</label>
-              <textarea id="rt-env-text" class="mono" style="min-height:68px;" placeholder="APP_ENV=prod&#10;LOG_LEVEL=info"></textarea>
-            </div>
-          </div>
-          <div class="dialog-foot">
-            <button type="button" class="btn" id="cancel-rt-dlg">${esc(t('common.cancel'))}</button>
-            <button type="submit" class="btn btn-primary">${esc(t('common.create'))}</button>
-          </div>
-        </form>
-      </dialog>
     `;
 
     this._bindEvents();
@@ -727,59 +580,10 @@ class FpRuntimePanel extends HTMLElement {
       });
     }
 
-    const newRtBtn = sr.getElementById('new-runtime-btn');
-    const rtDlg = sr.getElementById('new-runtime-dialog');
-    if (newRtBtn && rtDlg) {
-      newRtBtn.addEventListener('click', () => rtDlg.showModal());
-    }
-    ['close-rt-dlg', 'cancel-rt-dlg'].forEach((id) => {
-      const b = sr.getElementById(id);
-      if (b && rtDlg) b.addEventListener('click', () => rtDlg.close());
-    });
-
-    const targetProjSel = sr.getElementById('rt-target-proj');
-    const newNameWrap = sr.getElementById('rt-new-name-wrap');
-    const newNameInp = sr.getElementById('rt-new-name');
-    if (targetProjSel && newNameWrap && newNameInp) {
-      targetProjSel.addEventListener('change', () => {
-        const isNew = targetProjSel.value === '__new__';
-        newNameWrap.classList.toggle('hidden', !isNew);
-        newNameInp.required = isNew;
-      });
-    }
-
-    const modeSel = sr.getElementById('rt-mode');
-    const wasmWrap = sr.getElementById('rt-wasm-wrap');
-    const staticWrap = sr.getElementById('rt-static-wrap');
-    if (modeSel && wasmWrap && staticWrap) {
-      modeSel.addEventListener('change', () => {
-        const isWasm = modeSel.value === 'wasm';
-        wasmWrap.classList.toggle('hidden', !isWasm);
-        staticWrap.classList.toggle('hidden', isWasm);
-      });
-    }
-
-    const newRtForm = sr.getElementById('new-runtime-form');
-    if (newRtForm && rtDlg) {
-      newRtForm.addEventListener('submit', (ev) => {
-        ev.preventDefault();
-        const targetVal = targetProjSel.value;
-        const opts = {
-          projectId: targetVal === '__new__' ? '' : targetVal,
-          newName: newNameInp.value.trim(),
-          mode: modeSel.value,
-          targetEnv: sr.getElementById('rt-env').value,
-          artifactPath: sr.getElementById('rt-artifact').value.trim(),
-          assetsBucket: sr.getElementById('rt-bucket').value,
-          assetsPrefix: sr.getElementById('rt-prefix').value.trim(),
-          spaFallback: sr.getElementById('rt-spa').checked,
-          bindDb: sr.getElementById('rt-bind-db').value,
-          bindKv: sr.getElementById('rt-bind-kv').value,
-          bindQueue: sr.getElementById('rt-bind-queue').value,
-          envText: sr.getElementById('rt-env-text').value
-        };
-        rtDlg.close();
-        this.createRuntime(opts);
+    const createButton = sr.getElementById('new-runtime-btn');
+    if (createButton) {
+      createButton.addEventListener('click', () => {
+        this.dispatchEvent(new CustomEvent('fp-create-runtime'));
       });
     }
   }
@@ -890,7 +694,7 @@ class FpProjectBindings extends HTMLElement {
     this._saving = true;
     this.render();
     try {
-      const res = await fetch('/_api/v1/projects/' + encodeURIComponent(this._project.id) + '/deployments', {
+      const res = await fetch('/_api/v1/runtimes/' + encodeURIComponent(this._project.id) + '/deployments', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
