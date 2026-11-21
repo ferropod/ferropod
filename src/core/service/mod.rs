@@ -5,6 +5,7 @@ mod kv;
 mod logs;
 mod projects;
 mod queue;
+mod search;
 mod secrets;
 mod tokens;
 
@@ -26,9 +27,10 @@ use crate::core::crypto::Crypto;
 use crate::core::model::{Caller, FerroError, LogEntry, Project, Result, RouteEntry};
 use crate::core::traits::{
     DbManager, KvStore, LogStore, ObjectStore, ProjectStore, QueueStore, RegistryStore,
-    SecretStore, TokenStore, WorkerRuntime,
+    SearchStore, SecretStore, TokenStore, WorkerRuntime,
 };
 use crate::runtime::WasmtimeRuntime;
+use crate::storage::search_store::TursoSearchStore;
 
 /// Domain store dependencies required to build a [`PlatformService`].
 pub struct PlatformDeps {
@@ -57,6 +59,7 @@ pub struct PlatformService {
     objects: Arc<dyn ObjectStore>,
     db: Arc<dyn DbManager>,
     logs: Arc<dyn LogStore>,
+    search: Arc<dyn SearchStore>,
     runtime: Arc<dyn WorkerRuntime>,
     routes: Arc<RwLock<HashMap<String, RouteEntry>>>,
     http_concurrency: Arc<Semaphore>,
@@ -67,6 +70,8 @@ impl PlatformService {
     pub async fn new(config: Config, deps: PlatformDeps) -> Result<Self> {
         let crypto = Crypto::from_master_key(&config.master_key);
         let http_concurrency = Arc::new(Semaphore::new(config.max_concurrency));
+        let search: Arc<dyn SearchStore> =
+            Arc::new(TursoSearchStore::open(&config.search_db_path()).await?);
         let wasmtime_rt = Arc::new(WasmtimeRuntime::new(config.clone())?);
         let runtime: Arc<dyn WorkerRuntime> = wasmtime_rt.clone();
         let svc = Self {
@@ -81,6 +86,7 @@ impl PlatformService {
             objects: deps.objects,
             db: deps.db,
             logs: deps.logs,
+            search,
             runtime,
             routes: Arc::new(RwLock::new(HashMap::new())),
             http_concurrency,
@@ -133,6 +139,7 @@ impl PlatformService {
         self.projects.checkpoint().await?;
         self.kv.checkpoint().await?;
         self.queue.checkpoint().await?;
+        self.search.checkpoint().await?;
         Ok(())
     }
 
@@ -195,6 +202,7 @@ impl PlatformService {
         self.projects.snapshot_to(&out_dir.join("core.db")).await?;
         self.kv.snapshot_to(&out_dir.join("kv.db")).await?;
         self.queue.snapshot_to(&out_dir.join("queue.db")).await?;
+        self.search.snapshot_to(&out_dir.join("search.db")).await?;
         self.snapshot_user_dbs(caller, &out_dir.join("dbs")).await
     }
 

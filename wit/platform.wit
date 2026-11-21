@@ -181,12 +181,31 @@ interface scheduled {
     handle-cron: func(event: cron-event) -> result<_, string>;
 }
 
+interface search {
+    record hit {
+        id: string,
+        score: f64,
+        doc-json: string,
+    }
+
+    record search-result {
+        hits: list<hit>,
+        total: u32,
+        took-ms: f64,
+    }
+
+    query: func(binding: string, query: string, fuzzy: bool, limit: u32) -> result<search-result, string>;
+    upsert: func(binding: string, doc-json: string) -> result<string, string>;
+    delete: func(binding: string, doc-id: string) -> result<bool, string>;
+}
+
 world host-imports {
     import log;
     import kv;
     import db;
     import queue;
     import bucket;
+    import search;
     import env;
 }
 

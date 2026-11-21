@@ -39,6 +39,8 @@ pub struct Bindings {
     #[serde(default)]
     pub bucket: HashMap<String, String>,
     #[serde(default)]
+    pub search: HashMap<String, String>,
+    #[serde(default)]
     pub env: HashMap<String, String>,
 }
 
@@ -431,10 +433,10 @@ pub struct LogQuery {
     pub level: Option<String>,
     pub since_ts: Option<i64>,
     pub limit: Option<usize>,
-}
-
     #[serde(default)]
     pub q: Option<String>,
+}
+
 /// Byte stream type used by [`crate::core::traits::ObjectStore`].
 pub type ByteStream =
     std::pin::Pin<Box<dyn futures_util::Stream<Item = std::io::Result<Bytes>> + Send>>;
@@ -510,4 +512,83 @@ pub struct CronJob {
     pub last_status: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchFieldSchema {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub field_type: String,
+    pub tokenizer: String,
+    pub stored: bool,
+    pub indexed: bool,
+    pub fast: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchIndexMeta {
+    pub id: String,
+    pub name: String,
+    pub project_id: Option<String>,
+    pub tokenizer: String,
+    pub doc_count: usize,
+    pub segments: usize,
+    pub disk_bytes: u64,
+    pub writer_budget_mb: usize,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub schema: Vec<SearchFieldSchema>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SearchQueryInput {
+    #[serde(default)]
+    pub query: String,
+    #[serde(default)]
+    pub fuzzy: bool,
+    pub sort: Option<String>,
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub facets: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchHit {
+    pub doc: serde_json::Value,
+    pub score: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchQueryResult {
+    pub hits: Vec<SearchHit>,
+    pub total: usize,
+    pub took_ms: f64,
+    pub facets: HashMap<String, HashMap<String, usize>>,
+    pub tokenizer: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DbFtsIndexMeta {
+    pub db_id: String,
+    pub name: String,
+    pub table: String,
+    pub columns: Vec<String>,
+    pub tokenizer: String,
+    pub rows_indexed: usize,
+    pub size_bytes: u64,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DbFtsHit {
+    pub row: serde_json::Value,
+    pub score: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DbFtsQueryResult {
+    pub index: DbFtsIndexMeta,
+    pub rows: Vec<DbFtsHit>,
+    pub sql: String,
+    pub took_ms: f64,
 }

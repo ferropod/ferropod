@@ -25,7 +25,8 @@ use wasmtime_wasi_http::{RequestOptions, WasiBody, WasiHttpCtx, WasiHttpCtxView,
 use crate::config::Config;
 use crate::core::model::{
     BlobAuth, ByteStream, Caller, Deployment, EnqueueOpts, FerroError, Job, JobOutcome,
-    LogEntry, RequestCtx, Result, SqlValue, WorkerHttpRequest, WorkerHttpResponse,
+    LogEntry, RequestCtx, Result, SearchQueryInput, SqlValue, WorkerHttpRequest,
+    WorkerHttpResponse,
 };
 use crate::core::service::PlatformService;
 use crate::core::traits::WorkerRuntime;
@@ -51,6 +52,7 @@ mod queue_wit {
             "ferropod:platform/db": super::host_wit::ferropod::platform::db,
             "ferropod:platform/queue": super::host_wit::ferropod::platform::queue,
             "ferropod:platform/bucket": super::host_wit::ferropod::platform::bucket,
+            "ferropod:platform/search": super::host_wit::ferropod::platform::search,
             "ferropod:platform/env": super::host_wit::ferropod::platform::env,
         },
         require_store_data_send: true,
@@ -69,13 +71,17 @@ mod scheduled_wit {
             "ferropod:platform/db": super::host_wit::ferropod::platform::db,
             "ferropod:platform/queue": super::host_wit::ferropod::platform::queue,
             "ferropod:platform/bucket": super::host_wit::ferropod::platform::bucket,
+            "ferropod:platform/search": super::host_wit::ferropod::platform::search,
             "ferropod:platform/env": super::host_wit::ferropod::platform::env,
         },
         require_store_data_send: true,
     });
 }
 
-use host_wit::ferropod::platform::{bucket as wit_bucket, db as wit_db, env as wit_env, kv as wit_kv, log as wit_log, queue as wit_queue};
+use host_wit::ferropod::platform::{
+    bucket as wit_bucket, db as wit_db, env as wit_env, kv as wit_kv, log as wit_log,
+    queue as wit_queue, search as wit_search,
+};
 use queue_wit::exports::ferropod::platform::queue_consumer as wit_qc;
 use scheduled_wit::exports::ferropod::platform::scheduled as wit_sched;
 
@@ -927,6 +933,16 @@ impl HostState {
             .map(String::as_str)
             .ok_or_else(|| format!("bucket binding '{binding}' is not configured"))
     }
+
+    fn resolve_search<'a>(&'a self, binding: &str) -> std::result::Result<&'a str, String> {
+        self.ctx
+            .deployment
+            .bindings
+            .search
+            .get(binding)
+            .map(String::as_str)
+            .ok_or_else(|| format!("search binding '{binding}' is not configured"))
+    }
 }
 
 impl wit_log::Host for HostState {
@@ -1342,5 +1358,85 @@ impl wit_env::Host for HostState {
             .await
             .ok()
             .flatten()
+    }
+}
+
+impl wit_search::Host for HostState {
+    async fn query(
+        &mut self,
+        binding: String,
+        query: String,
+        fuzzy: bool,
+        limit: u32,
+    ) -> std::result::Result<wit_search::SearchResult, String> {
+        let index_ref = self.resolve_search(&binding)?;
+        let res = self
+            .svc
+            .query_search_index(
+                &self.caller,
+                index_ref,
+                SearchQueryInput {
+                    query,
+                    fuzzy,
+                    sort: None,
+                    limit: Some(limit as usize),
+                    facets: HashMap::new(),
+                },
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(wit_search::SearchResult {
+            hits: res
+                .hits
+                .into_iter()
+                .map(|h| {
+                    let id = h
+                        .doc
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                        .unwrap_or_default();
+                    wit_search::Hit {
+                        id,
+                        score: h.score,
+                        doc_json: h.doc.to_string(),
+                    }
+                })
+                .collect(),
+            total: res.total as u32,
+            took_ms: res.took_ms,
+        })
+    }
+
+    async fn upsert(
+        &mut self,
+        binding: String,
+        doc_json: String,
+    ) -> std::result::Result<String, String> {
+        let index_ref = self.resolve_search(&binding)?;
+        let parsed: serde_json::Value =
+            serde_json::from_str(&doc_json).map_err(|e| format!("invalid doc json: {e}"))?;
+        let saved = self
+            .svc
+            .upsert_search_doc(&self.caller, index_ref, parsed)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(saved
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .unwrap_or_default())
+    }
+
+    async fn delete(
+        &mut self,
+        binding: String,
+        doc_id: String,
+    ) -> std::result::Result<bool, String> {
+        let index_ref = self.resolve_search(&binding)?;
+        self.svc
+            .delete_search_doc(&self.caller, index_ref, &doc_id)
+            .await
+            .map_err(|e| e.to_string())
     }
 }

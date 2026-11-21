@@ -21,8 +21,8 @@ use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 
 use crate::core::model::{
-    Bindings, EnqueueOpts, FerroError, JobStatus, LogQuery, QueueConfig, SqlValue, TargetEnv,
-    TokenScope,
+    Bindings, EnqueueOpts, FerroError, JobStatus, LogQuery, QueueConfig, SearchFieldSchema,
+    SearchQueryInput, SqlValue, TargetEnv, TokenScope,
 };
 use crate::core::service::{CreateDeploymentInput, PlatformService};
 use crate::gateway::guard::{authenticate_caller, ApiError};
@@ -46,6 +46,7 @@ struct StatusResp {
     buckets: usize,
     dbs: usize,
     kv_namespaces: usize,
+    search_indexes: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -281,6 +282,15 @@ pub fn router() -> Router<PlatformService> {
         .route("/dbs/{id}/schema", get(db_schema))
         .route("/dbs/{id}/query", post(db_query))
         .route("/dbs/{id}/execute", post(db_execute))
+        .route("/dbs/{id}/fts", get(db_fts_list).post(db_fts_create))
+        .route("/dbs/{id}/fts/{name}", delete(db_fts_drop))
+        .route("/dbs/{id}/fts/{name}/query", post(db_fts_query))
+        .route("/search", get(search_list_indexes).post(search_create_index))
+        .route("/search/{id}", delete(search_delete_index))
+        .route("/search/{id}/commit", post(search_commit_index))
+        .route("/search/{id}/docs", get(search_list_docs).post(search_upsert_doc))
+        .route("/search/{id}/docs/{doc_id}", delete(search_delete_doc))
+        .route("/search/{id}/query", post(search_query_index))
         .route("/logs", get(logs_query))
         .route("/logs/stream", get(logs_stream))
 }
@@ -290,13 +300,14 @@ async fn status(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
     let caller = authenticate_caller(&svc, &headers, None).await?;
-    let (projects, routes, queues, buckets, dbs, kv_namespaces) = tokio::try_join!(
+    let (projects, routes, queues, buckets, dbs, kv_namespaces, search_indexes) = tokio::try_join!(
         svc.list_projects(&caller),
         svc.list_routes(&caller),
         svc.queue_list(&caller),
         svc.list_buckets(&caller),
         svc.list_user_dbs(&caller),
         svc.list_kv_namespaces(&caller),
+        svc.list_search_indexes(&caller),
     )
     .map_err(ApiError)?;
     Ok(Json(StatusResp {
@@ -311,6 +322,7 @@ async fn status(
         buckets: buckets.len(),
         dbs: dbs.len(),
         kv_namespaces: kv_namespaces.len(),
+        search_indexes: search_indexes.len(),
     }))
 }
 
@@ -1374,6 +1386,193 @@ async fn db_execute(
         .await
         .map_err(ApiError)?;
     Ok(Json(serde_json::json!({ "rows_affected": affected })))
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateDbFtsReq {
+    name: String,
+    table: String,
+    columns: Vec<String>,
+    tokenizer: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DbFtsQueryReq {
+    #[serde(default)]
+    query: String,
+}
+
+async fn db_fts_list(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let items = svc.list_user_db_fts(&caller, &id).await.map_err(ApiError)?;
+    Ok(Json(items))
+}
+
+async fn db_fts_create(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<CreateDbFtsReq>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let created = svc
+        .create_user_db_fts(
+            &caller,
+            &id,
+            &req.name,
+            &req.table,
+            req.columns,
+            req.tokenizer.as_deref(),
+        )
+        .await
+        .map_err(ApiError)?;
+    Ok((StatusCode::CREATED, Json(created)))
+}
+
+async fn db_fts_drop(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Path((id, name)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    svc.drop_user_db_fts(&caller, &id, &name)
+        .await
+        .map_err(ApiError)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn db_fts_query(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Path((id, name)): Path<(String, String)>,
+    Json(req): Json<DbFtsQueryReq>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let res = svc
+        .query_user_db_fts(&caller, &id, &name, &req.query)
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(res))
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateSearchIndexReq {
+    name: String,
+    project_id: Option<String>,
+    tokenizer: Option<String>,
+    schema: Option<Vec<SearchFieldSchema>>,
+}
+
+async fn search_list_indexes(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    Ok(Json(
+        svc.list_search_indexes(&caller).await.map_err(ApiError)?,
+    ))
+}
+
+async fn search_create_index(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Json(req): Json<CreateSearchIndexReq>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let created = svc
+        .create_search_index(
+            &caller,
+            &req.name,
+            req.project_id.as_deref(),
+            req.tokenizer.as_deref(),
+            req.schema,
+        )
+        .await
+        .map_err(ApiError)?;
+    Ok((StatusCode::CREATED, Json(created)))
+}
+
+async fn search_delete_index(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    svc.delete_search_index(&caller, &id)
+        .await
+        .map_err(ApiError)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn search_commit_index(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let updated = svc
+        .commit_search_index(&caller, &id)
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(updated))
+}
+
+async fn search_list_docs(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let docs = svc
+        .list_search_docs(&caller, &id)
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(docs))
+}
+
+async fn search_upsert_doc(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(doc): Json<serde_json::Value>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let saved = svc
+        .upsert_search_doc(&caller, &id, doc)
+        .await
+        .map_err(ApiError)?;
+    Ok((StatusCode::CREATED, Json(saved)))
+}
+
+async fn search_delete_doc(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Path((id, doc_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let deleted = svc
+        .delete_search_doc(&caller, &id, &doc_id)
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(serde_json::json!({ "deleted": deleted })))
+}
+
+async fn search_query_index(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<SearchQueryInput>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let res = svc
+        .query_search_index(&caller, &id, req)
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(res))
 }
 
 async fn logs_query(

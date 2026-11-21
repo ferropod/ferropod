@@ -4,9 +4,10 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use crate::core::model::{
-    ApiToken, BucketMeta, ByteRange, ByteStream, CronJob, Deployment, EnqueueOpts, Job,
-    JobOutcome, JobStatus, KvKeyMeta, KvNamespaceMeta, KvValue, LogEntry, LogQuery, ObjectMeta,
-    Project, QueryResult, QueueConfig, QueueStats, RequestCtx, Result, Route, RouteEntry,
+    ApiToken, BucketMeta, ByteRange, ByteStream, CronJob, DbFtsIndexMeta, Deployment, EnqueueOpts,
+    Job, JobOutcome, JobStatus, KvKeyMeta, KvNamespaceMeta, KvValue, LogEntry, LogQuery,
+    ObjectMeta, Project, QueryResult, QueueConfig, QueueStats, RequestCtx, Result, Route,
+    RouteEntry, SearchFieldSchema, SearchIndexMeta, SearchQueryInput, SearchQueryResult,
     SqlValue, TargetEnv, TokenScope, UserDbMeta, WorkerHttpRequest, WorkerHttpResponse,
 };
 
@@ -93,6 +94,10 @@ pub trait RegistryStore: Send + Sync {
     async fn list_cron_jobs(&self) -> Result<Vec<CronJob>>;
     async fn update_cron_job(&self, job: &CronJob) -> Result<()>;
     async fn delete_cron_job(&self, id: &str) -> Result<()>;
+
+    async fn create_db_fts_index(&self, meta: DbFtsIndexMeta) -> Result<DbFtsIndexMeta>;
+    async fn list_db_fts_indexes(&self, db_id: &str) -> Result<Vec<DbFtsIndexMeta>>;
+    async fn delete_db_fts_index(&self, db_id: &str, name: &str) -> Result<()>;
 }
 
 #[async_trait]
@@ -293,4 +298,40 @@ pub trait WorkerRuntime: Send + Sync {
     ) -> Result<WorkerHttpResponse>;
     async fn handle_queue(&self, ctx: RequestCtx, jobs: Vec<Job>) -> Result<Vec<JobOutcome>>;
     async fn handle_cron(&self, ctx: RequestCtx, expr: &str) -> Result<()>;
+}
+
+#[async_trait]
+pub trait SearchStore: Send + Sync {
+    async fn create_index(
+        &self,
+        name: &str,
+        project_id: Option<&str>,
+        tokenizer: &str,
+        schema: Option<Vec<SearchFieldSchema>>,
+    ) -> Result<SearchIndexMeta>;
+    async fn get_index(&self, id_or_name: &str) -> Result<Option<SearchIndexMeta>>;
+    async fn list_indexes(&self) -> Result<Vec<SearchIndexMeta>>;
+    async fn delete_index(&self, id: &str) -> Result<()>;
+    async fn commit_index(&self, id: &str) -> Result<SearchIndexMeta>;
+    async fn list_docs(&self, index_id: &str) -> Result<Vec<serde_json::Value>>;
+    async fn upsert_doc(
+        &self,
+        index_id: &str,
+        doc: serde_json::Value,
+    ) -> Result<serde_json::Value>;
+    async fn delete_doc(&self, index_id: &str, doc_id: &str) -> Result<bool>;
+    async fn search(
+        &self,
+        index_id: &str,
+        input: SearchQueryInput,
+    ) -> Result<SearchQueryResult>;
+
+    async fn checkpoint(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn snapshot_to(&self, dest_path: &Path) -> Result<()> {
+        let _ = dest_path;
+        Ok(())
+    }
 }

@@ -112,6 +112,16 @@ CREATE TABLE IF NOT EXISTS cron_jobs (
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS user_db_fts_indexes (
+    db_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    table_name TEXT NOT NULL,
+    columns_json TEXT NOT NULL,
+    tokenizer TEXT NOT NULL DEFAULT 'ngram',
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (db_id, name)
+);
 "#;
 
 /// Turso MVCC store for `core.db` (control-plane metadata: projects, routes, secrets, tokens, KV namespace

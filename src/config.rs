@@ -141,6 +141,10 @@ impl Config {
         self.data_dir.join("queue.db")
     }
 
+    pub fn search_db_path(&self) -> PathBuf {
+        self.data_dir.join("search.db")
+    }
+
     pub fn user_dbs_dir(&self) -> PathBuf {
         self.data_dir.join("dbs")
     }

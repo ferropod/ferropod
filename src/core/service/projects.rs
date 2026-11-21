@@ -190,6 +190,18 @@ impl PlatformService {
                 &format!("queue '{q_name}'"),
             )?;
         }
+        for s_ref in input.bindings.search.values() {
+            let meta = self
+                .search
+                .get_index(s_ref)
+                .await?
+                .ok_or_else(|| FerroError::NotFound(format!("search index '{s_ref}'")))?;
+            Self::require_resource_write(
+                caller,
+                meta.project_id.as_deref(),
+                &format!("search index '{s_ref}'"),
+            )?;
+        }
 
         let mut artifact_path = input.artifact_path;
         if let Some(bytes) = input.artifact_bytes {

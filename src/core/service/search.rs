@@ -1,0 +1,169 @@
+use crate::core::model::{
+    Caller, FerroError, Result, SearchFieldSchema, SearchIndexMeta, SearchQueryInput,
+    SearchQueryResult, TokenScope,
+};
+
+use super::PlatformService;
+
+impl PlatformService {
+    async fn resolve_search_index(&self, id_or_name: &str) -> Result<SearchIndexMeta> {
+        self.search
+            .get_index(id_or_name)
+            .await?
+            .ok_or_else(|| FerroError::NotFound(format!("search index '{id_or_name}'")))
+    }
+
+    pub async fn list_search_indexes(&self, caller: &Caller) -> Result<Vec<SearchIndexMeta>> {
+        let all = self.search.list_indexes().await?;
+        match &caller.scope {
+            TokenScope::Admin | TokenScope::Readonly => Ok(all),
+            TokenScope::Project(pid) => Ok(all
+                .into_iter()
+                .filter(|idx| idx.project_id.as_deref() == Some(pid.as_str()))
+                .collect()),
+        }
+    }
+
+    pub async fn create_search_index(
+        &self,
+        caller: &Caller,
+        name: &str,
+        project_id: Option<&str>,
+        tokenizer: Option<&str>,
+        schema: Option<Vec<SearchFieldSchema>>,
+    ) -> Result<SearchIndexMeta> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(FerroError::InvalidArgument(
+                "search index name cannot be empty".into(),
+            ));
+        }
+        let resolved_pid = match (&caller.scope, project_id) {
+            (TokenScope::Admin, pid) => self.resolve_optional_project_id(pid).await?,
+            (TokenScope::Project(_), Some(req_pid)) => {
+                let proj = self.get_project_internal(req_pid).await?;
+                Self::require_project_write(caller, &proj.id)?;
+                Some(proj.id)
+            }
+            (TokenScope::Project(scope_pid), None) => Some(scope_pid.clone()),
+            (TokenScope::Readonly, _) => {
+                return Err(FerroError::Forbidden(
+                    "readonly token cannot create search indexes".into(),
+                ));
+            }
+        };
+
+        let tok = tokenizer
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("jieba+ngram");
+        let meta = self
+            .search
+            .create_index(name, resolved_pid.as_deref(), tok, schema)
+            .await?;
+        self.audit(
+            resolved_pid.as_deref(),
+            &caller.actor,
+            "search.index.create",
+            serde_json::json!({ "id": meta.id, "name": meta.name, "tokenizer": meta.tokenizer }),
+        );
+        Ok(meta)
+    }
+
+    pub async fn delete_search_index(&self, caller: &Caller, id_or_name: &str) -> Result<()> {
+        let meta = self.resolve_search_index(id_or_name).await?;
+        Self::require_resource_write(
+            caller,
+            meta.project_id.as_deref(),
+            &format!("search index '{}'", meta.name),
+        )?;
+        self.search.delete_index(&meta.id).await?;
+        self.audit(
+            meta.project_id.as_deref(),
+            &caller.actor,
+            "search.index.delete",
+            serde_json::json!({ "id": meta.id, "name": meta.name }),
+        );
+        Ok(())
+    }
+
+    pub async fn commit_search_index(
+        &self,
+        caller: &Caller,
+        id_or_name: &str,
+    ) -> Result<SearchIndexMeta> {
+        let meta = self.resolve_search_index(id_or_name).await?;
+        Self::require_resource_write(
+            caller,
+            meta.project_id.as_deref(),
+            &format!("search index '{}'", meta.name),
+        )?;
+        let updated = self.search.commit_index(&meta.id).await?;
+        self.audit(
+            meta.project_id.as_deref(),
+            &caller.actor,
+            "search.index.commit",
+            serde_json::json!({ "id": updated.id }),
+        );
+        Ok(updated)
+    }
+
+    pub async fn list_search_docs(
+        &self,
+        caller: &Caller,
+        id_or_name: &str,
+    ) -> Result<Vec<serde_json::Value>> {
+        let meta = self.resolve_search_index(id_or_name).await?;
+        Self::require_resource_read(
+            caller,
+            meta.project_id.as_deref(),
+            &format!("search index '{}'", meta.name),
+        )?;
+        self.search.list_docs(&meta.id).await
+    }
+
+    pub async fn upsert_search_doc(
+        &self,
+        caller: &Caller,
+        id_or_name: &str,
+        doc: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let meta = self.resolve_search_index(id_or_name).await?;
+        Self::require_resource_write(
+            caller,
+            meta.project_id.as_deref(),
+            &format!("search index '{}'", meta.name),
+        )?;
+        self.search.upsert_doc(&meta.id, doc).await
+    }
+
+    pub async fn delete_search_doc(
+        &self,
+        caller: &Caller,
+        id_or_name: &str,
+        doc_id: &str,
+    ) -> Result<bool> {
+        let meta = self.resolve_search_index(id_or_name).await?;
+        Self::require_resource_write(
+            caller,
+            meta.project_id.as_deref(),
+            &format!("search index '{}'", meta.name),
+        )?;
+        self.search.delete_doc(&meta.id, doc_id).await
+    }
+
+    pub async fn query_search_index(
+        &self,
+        caller: &Caller,
+        id_or_name: &str,
+        input: SearchQueryInput,
+    ) -> Result<SearchQueryResult> {
+        let meta = self.resolve_search_index(id_or_name).await?;
+        Self::require_resource_read(
+            caller,
+            meta.project_id.as_deref(),
+            &format!("search index '{}'", meta.name),
+        )?;
+        self.search.search(&meta.id, input).await
+    }
+}

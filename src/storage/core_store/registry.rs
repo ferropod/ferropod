@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use turso::Value as TursoValue;
 
-use crate::core::model::{CronJob, KvNamespaceMeta, Result, UserDbMeta};
+use crate::core::model::{CronJob, DbFtsIndexMeta, FerroError, KvNamespaceMeta, Result, UserDbMeta};
 use crate::core::traits::RegistryStore;
 use crate::storage::tx::{connect_db, map_turso_err, with_retry};
 
@@ -40,6 +40,9 @@ impl RegistryStore for TursoCoreStore {
             let id_s = id_s.clone();
             async move {
                 let conn = db.connect()?;
+                let _ = conn
+                    .execute("DELETE FROM user_db_fts_indexes WHERE db_id = ?1", [id_s.as_str()])
+                    .await;
                 conn.execute("DELETE FROM user_databases WHERE id = ?1", [id_s])
                     .await
             }
@@ -298,6 +301,83 @@ impl RegistryStore for TursoCoreStore {
                 let conn = db.connect()?;
                 conn.execute("DELETE FROM cron_jobs WHERE id = ?1", [id_s])
                     .await
+            }
+        })
+        .await?;
+        Ok(())
+    }
+
+    async fn create_db_fts_index(&self, meta: DbFtsIndexMeta) -> Result<DbFtsIndexMeta> {
+        let cols_json = serde_json::to_string(&meta.columns)
+            .map_err(|e| FerroError::Internal(anyhow::anyhow!("encode fts columns: {e}")))?;
+        let m = meta.clone();
+        with_retry(|| {
+            let db = self.db.clone();
+            let m = m.clone();
+            let cols_json = cols_json.clone();
+            async move {
+                let conn = db.connect()?;
+                conn.execute(
+                    "INSERT INTO user_db_fts_indexes (db_id, name, table_name, columns_json, tokenizer, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    (
+                        m.db_id,
+                        m.name,
+                        m.table,
+                        cols_json,
+                        m.tokenizer,
+                        m.created_at,
+                    ),
+                )
+                .await
+            }
+        })
+        .await?;
+        Ok(meta)
+    }
+
+    async fn list_db_fts_indexes(&self, db_id: &str) -> Result<Vec<DbFtsIndexMeta>> {
+        let conn = connect_db(&self.db)?;
+        let mut rows = conn
+            .query(
+                "SELECT db_id, name, table_name, columns_json, tokenizer, created_at
+                 FROM user_db_fts_indexes WHERE db_id = ?1 ORDER BY created_at DESC",
+                [db_id],
+            )
+            .await
+            .map_err(map_turso_err)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(map_turso_err)? {
+            let cols_raw: String = row.get(3).map_err(map_turso_err)?;
+            let columns: Vec<String> = serde_json::from_str(&cols_raw).unwrap_or_default();
+            out.push(DbFtsIndexMeta {
+                db_id: row.get(0).map_err(map_turso_err)?,
+                name: row.get(1).map_err(map_turso_err)?,
+                table: row.get(2).map_err(map_turso_err)?,
+                columns,
+                tokenizer: row.get(4).map_err(map_turso_err)?,
+                rows_indexed: 0,
+                size_bytes: 16384,
+                created_at: row.get(5).map_err(map_turso_err)?,
+            });
+        }
+        Ok(out)
+    }
+
+    async fn delete_db_fts_index(&self, db_id: &str, name: &str) -> Result<()> {
+        let db_s = db_id.to_string();
+        let name_s = name.to_string();
+        with_retry(|| {
+            let db = self.db.clone();
+            let db_s = db_s.clone();
+            let name_s = name_s.clone();
+            async move {
+                let conn = db.connect()?;
+                conn.execute(
+                    "DELETE FROM user_db_fts_indexes WHERE db_id = ?1 AND name = ?2",
+                    (db_s, name_s),
+                )
+                .await
             }
         })
         .await?;
