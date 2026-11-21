@@ -17,6 +17,7 @@
     'queues',
     'blobs',
     'dbs',
+    'search',
     'tokens',
     'logs'
   ];
@@ -472,6 +473,7 @@
     if (state.currentRoute === 'queues') return renderQueues(fetchData);
     if (state.currentRoute === 'blobs') return renderBlobs(fetchData);
     if (state.currentRoute === 'dbs') return renderDbs(fetchData);
+    if (state.currentRoute === 'search') return renderSearch();
     if (state.currentRoute === 'tokens') return renderTokens(fetchData);
     if (state.currentRoute === 'logs') return renderLogs(fetchData);
   }
@@ -545,6 +547,7 @@
       statCard(t('overview.queues'), st.queues, '#/queues') +
       statCard(t('overview.buckets'), st.buckets, '#/blobs') +
       statCard(t('overview.dbs'), st.dbs, '#/dbs') +
+      statCard(t('overview.searchIndexes'), window.FerroSearchMock ? window.FerroSearchMock.listIndexes().length : 0, '#/search') +
       '</div>' +
 
       '<div class="grid-2">' +
@@ -1982,10 +1985,13 @@
         '<div class="tabs">' +
         '<button type="button" class="tab-btn' + (state.dbTab === 'console' ? ' active' : '') + '" data-db-tab="console">' + esc(t('dbs.tabConsole')) + '</button>' +
         '<button type="button" class="tab-btn' + (state.dbTab === 'schema' ? ' active' : '') + '" data-db-tab="schema">' + esc(t('dbs.tabSchema')) + '</button>' +
+        '<button type="button" class="tab-btn' + (state.dbTab === 'fts' ? ' active' : '') + '" data-db-tab="fts">' + esc(t('dbs.tabFts')) + '</button>' +
         '</div>';
 
       var bodyHtml = '';
-      if (state.dbTab === 'schema') {
+      if (state.dbTab === 'fts') {
+        bodyHtml = '<fp-db-fts-panel id="db-fts-panel" db-id="' + esc(dbMeta.id) + '" db-name="' + esc(dbMeta.name) + '" can-write="' + (canWriteDb ? 'true' : 'false') + '"></fp-db-fts-panel>';
+      } else if (state.dbTab === 'schema') {
         bodyHtml =
           '<div class="panel"><div class="panel-header"><h3 class="panel-title mono">' + esc(dbMeta.name) + '</h3>' +
           '<button type="button" class="btn btn-sm" id="db-reload-schema">' + esc(t('dbs.reloadSchema')) + '</button></div>' +
@@ -2094,6 +2100,16 @@
     }
     if ($('db-query-btn')) $('db-query-btn').addEventListener('click', function () { runDbQuery(dbMeta.id); });
     if ($('db-exec-btn')) $('db-exec-btn').addEventListener('click', function () { runDbExecute(dbMeta.id); });
+    if ($('db-fts-panel')) {
+      $('db-fts-panel').addEventListener('fp-open-sql', function (ev) {
+        if (ev.detail && ev.detail.sql) {
+          state.dbSql = ev.detail.sql;
+          state.dbParams = '[]';
+          state.dbTab = 'console';
+          renderDbs(false);
+        }
+      });
+    }
   }
 
   async function loadDbSchema() {
@@ -2175,6 +2191,16 @@
         });
       }
     });
+  }
+
+  // --- 7b. Full-Text Search (Native Web Component + Mock Data) ---
+
+  function renderSearch() {
+    var root = $('view-root');
+    root.innerHTML = '';
+    var wb = document.createElement('fp-search-workbench');
+    wb.canWrite = !isReadonly();
+    root.appendChild(wb);
   }
 
   // --- 8. Tokens (Admin Only) ---
@@ -2353,13 +2379,16 @@
     return '<span class="badge badge-info">' + esc(level || 'info') + '</span>';
   }
 
-  function buildLogRowsHtml(entries, emptyText) {
+  function buildLogRowsHtml(entries, emptyText, highlightQuery) {
     if (!entries || !entries.length) {
       return '<div class="empty-state">' + esc(emptyText) + '</div>';
     }
+    var hl = highlightQuery && window.FerroSearchMock
+      ? function (s) { return window.FerroSearchMock.highlightText(s, highlightQuery); }
+      : esc;
     return entries.map(function (e) {
       var metaHtml = e.meta_json
-        ? '<details class="log-meta"><summary>' + esc(t('logs.meta')) + '</summary><pre class="code-block" style="margin-top:6px;">' + esc(e.meta_json) + '</pre></details>'
+        ? '<details class="log-meta"><summary>' + esc(t('logs.meta')) + '</summary><pre class="code-block" style="margin-top:6px;">' + hl(e.meta_json) + '</pre></details>'
         : '';
       return '<div class="log-row">' +
         '<div class="log-row-head">' +
@@ -2367,9 +2396,9 @@
         logLevelBadge(e.level) +
         '<span class="badge badge-neutral">' + esc(e.source) + '</span>' +
         (e.project_id ? '<span class="badge badge-accent">' + esc(projectNameById(e.project_id)) + '</span>' : '') +
-        (e.request_id ? '<span class="mono muted">' + esc(e.request_id) + '</span>' : '') +
+        (e.request_id ? '<span class="mono muted">' + hl(e.request_id) + '</span>' : '') +
         '</div>' +
-        '<div class="log-msg">' + esc(e.message) + '</div>' +
+        '<div class="log-msg">' + hl(e.message) + '</div>' +
         metaHtml + '</div>';
     }).join('');
   }
@@ -2378,7 +2407,7 @@
     var el = $(containerId);
     if (!el) return;
     var atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-    el.innerHTML = buildLogRowsHtml(entries, state.sseStatus === 'disconnected' ? t('logs.liveHint') : t('logs.noLogs'));
+    el.innerHTML = buildLogRowsHtml(entries, state.sseStatus === 'disconnected' ? t('logs.liveHint') : t('logs.noLogs'), state.liveFilterSearch);
     if (atBottom) el.scrollTop = el.scrollHeight;
   }
 
@@ -2439,41 +2468,10 @@
         '<input type="search" id="live-search" style="max-width:220px;" value="' + esc(state.liveFilterSearch) + '" placeholder="' + esc(t('logs.searchPlaceholder')) + '">' +
         '</div></div></div>' +
         '<div id="live-log-list" class="log-list">' +
-        buildLogRowsHtml(filterLiveLogs(), state.sseStatus === 'disconnected' ? t('logs.liveHint') : t('logs.noLogs')) +
+        buildLogRowsHtml(filterLiveLogs(), state.sseStatus === 'disconnected' ? t('logs.liveHint') : t('logs.noLogs'), state.liveFilterSearch) +
         '</div></div>';
     } else {
-      var hf = state.historyFilters;
-      bodyHtml =
-        '<div class="panel"><div class="panel-header">' +
-        '<form id="hist-log-form" class="toolbar-filters" style="width:100%;">' +
-        '<select id="hl-source" style="width:auto;"><option value="">' + esc(t('logs.allSources')) + '</option>' +
-        ['access', 'runtime', 'queue', 'cron', 'audit', 'system'].map(function (s) {
-          return '<option value="' + s + '"' + (hf.source === s ? ' selected' : '') + '>' + s + '</option>';
-        }).join('') + '</select>' +
-        '<select id="hl-level" style="width:auto;"><option value="">' + esc(t('logs.allLevels')) + '</option>' +
-        ['info', 'warn', 'error', 'debug'].map(function (l) {
-          return '<option value="' + l + '"' + (hf.level === l ? ' selected' : '') + '>' + l + '</option>';
-        }).join('') + '</select>' +
-        '<select id="hl-project" style="width:auto;max-width:190px;">' +
-        '<option value="">' + esc(t('common.all')) + ' (' + esc(t('common.project')) + ')</option>' +
-        state.projects.map(function (p) {
-          return '<option value="' + esc(p.id) + '"' + (hf.project_id === p.id ? ' selected' : '') + '>' + esc(p.name) + '</option>';
-        }).join('') + '</select>' +
-        '<input type="text" id="hl-reqid" style="max-width:180px;" value="' + esc(hf.request_id) + '" placeholder="' + esc(t('logs.requestIdPlaceholder')) + '">' +
-        '<select id="hl-window" style="width:auto;">' +
-        '<option value="900"' + (hf.windowSecs === '900' ? ' selected' : '') + '>' + esc(t('logs.window15m')) + '</option>' +
-        '<option value="3600"' + (hf.windowSecs === '3600' ? ' selected' : '') + '>' + esc(t('logs.window1h')) + '</option>' +
-        '<option value="86400"' + (hf.windowSecs === '86400' ? ' selected' : '') + '>' + esc(t('logs.window24h')) + '</option>' +
-        '<option value="604800"' + (hf.windowSecs === '604800' ? ' selected' : '') + '>' + esc(t('logs.window7d')) + '</option>' +
-        '<option value=""' + (hf.windowSecs === '' ? ' selected' : '') + '>' + esc(t('logs.windowAll')) + '</option>' +
-        '</select>' +
-        '<select id="hl-limit" style="width:auto;">' +
-        ['50', '100', '200', '500'].map(function (n) {
-          return '<option value="' + n + '"' + (hf.limit === n ? ' selected' : '') + '>' + n + '</option>';
-        }).join('') + '</select>' +
-        '<button type="submit" class="btn btn-primary btn-sm">' + esc(t('logs.queryBtn')) + '</button>' +
-        '</form></div>' +
-        '<div class="log-list">' + buildLogRowsHtml(state.historyLogs, t('logs.noLogs')) + '</div></div>';
+      bodyHtml = '<fp-log-search-panel id="log-fts-panel"></fp-log-search-panel>';
     }
 
     root.innerHTML =
@@ -2533,20 +2531,23 @@
         renderLogRowsInPlace('live-log-list', filterLiveLogs());
       });
     }
-    if ($('hist-log-form')) {
-      $('hist-log-form').addEventListener('submit', async function (ev) {
-        ev.preventDefault();
+    if ($('log-fts-panel')) {
+      var panel = $('log-fts-panel');
+      panel.projects = state.projects;
+      panel.liveEntries = state.historyLogs;
+      panel.addEventListener('fp-log-query', async function (ev) {
+        var d = ev.detail || {};
         state.historyFilters = {
-          source: $('hl-source').value,
-          level: $('hl-level').value,
-          project_id: $('hl-project').value,
-          request_id: $('hl-reqid').value.trim(),
-          windowSecs: $('hl-window').value,
-          limit: $('hl-limit').value
+          source: d.source || '',
+          level: d.level || '',
+          project_id: d.project_id || '',
+          request_id: d.request_id || '',
+          windowSecs: d.windowSecs || '',
+          limit: d.limit || '100'
         };
         try {
           await queryHistoryLogs();
-          renderLogs(false);
+          panel.liveEntries = state.historyLogs;
         } catch (e) { toast(e.message, 'error'); }
       });
     }
@@ -2592,6 +2593,12 @@
       if (ev.key === 'Escape') {
         closeModal();
         closeDrawer();
+      }
+    });
+
+    document.addEventListener('fp-toast', function (ev) {
+      if (ev.detail && ev.detail.message) {
+        toast(ev.detail.message, ev.detail.kind || 'info');
       }
     });
 

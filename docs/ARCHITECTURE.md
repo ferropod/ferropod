@@ -26,15 +26,15 @@
          └────────────────────────────┼────────────────────────────┼──────────────────────────┘
                                       ▼
                     ┌───────────────────────────────────────────┐
-                    │  TLS Edge (Caddy On-Demand TLS / Tunnel)  │
-                    │  ask -> 127.0.0.1:8080/_internal/tls/allow│
+                    │  Native Rust TLS (rustls / rustls-acme)   │
+                    │  HTTP :80 (+308 redirect) & HTTPS :443    │
                     └─────────────────────┬─────────────────────┘
                                           ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
 │                             ferro/ferropod (Single Pure Rust Binary)                             │
 │                                                                                                 │
 │  Gateway (axum + tower): Host router, static site streaming (SPA fallback), 5-endpoint Blob,    │
-│                          /_internal/tls/allow, request_id & access logs, Bearer scope auth      │
+│                          native TLS/ACME, request_id & access logs, Bearer scope auth           │
 │                                         │                                                       │
 │              ┌──────────────────────────┼──────────────────────────┐                            │
 │              ▼                          ▼                          ▼                            │
@@ -68,15 +68,14 @@ ferropod/
 ├── Cargo.toml
 ├── wit/platform.wit
 ├── docs/ARCHITECTURE.md
-├── Caddyfile.example
 └── src/
     ├── lib.rs / main.rs       # CLI entry & runtime bootstrap
-    ├── config.rs              # Profile presets (low-mem / standard) & settings
+    ├── config.rs              # Profile presets (low-mem / standard) & TLS settings
     ├── core/                  # model, traits, crypto (AES-256-GCM / SHA256 / HMAC), PlatformService
     ├── storage/               # Turso pool & tx retry, core_store, queue_store, user_db, blob_fs
     ├── logs/                  # DailyLogStore (bounded mpsc -> SSE broadcast + micro-batch daily DBs)
     ├── dispatcher/            # Background maintenance & graceful shutdown
-    ├── gateway/               # Axum router, static hosting, native Blob API, TLS allow check, guard
+    ├── gateway/               # Axum router, static hosting, native Blob API, native TLS/ACME, guard
     └── web/                   # /_api/v1 REST/SSE & zero-build /_admin dashboard
 ```
 
@@ -108,7 +107,7 @@ ferropod/
 - **Secrets**: Encrypted at rest with `AES-256-GCM` using a key derived from `MASTER_KEY` and random 12-byte nonces.
 - **API & MCP Tokens**: Only `SHA-256` hashes are stored in `core.db`; verified with scope checks (`admin`, `project:<id>`, `readonly`).
 - **Blob Presigned URLs**: Stateless `HMAC-SHA256` over `op:bucket:key:exp`, verified with constant-time comparison.
-- **Caddy On-Demand TLS Guard**: `/_internal/tls/allow?domain=...` confirms the domain exists in active routes before Caddy requests a certificate.
+- **Native TLS / ACME**: Built-in `rustls` / `rustls-acme` (TLS-ALPN-01) handles HTTPS directly on configurable ports (`80`/`443` or custom), caching certificates under `/data/certs` and merging configured `--acme-domain` entries with bound project route domains.
 
 ---
 

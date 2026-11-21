@@ -34,6 +34,25 @@ ferropod serve --data-dir ./data --bind 127.0.0.1:8080
 # Start on a 512 MiB VPS
 ferropod serve --profile low-mem --data-dir ./data --bind 127.0.0.1:8080
 
+# Start on 80/443 with automatic Let's Encrypt HTTPS (no Caddy/Nginx required)
+ferropod serve --profile low-mem \
+  --bind 0.0.0.0:80 \
+  --https-bind 0.0.0.0:443 \
+  --acme-domain panel.example.com \
+  --acme-domain app.example.com \
+  --acme-email ops@example.com \
+  --http-redirect-https \
+  --data-dir ./data
+
+# Or use custom ports + manual PEM certificate/key
+ferropod serve --profile low-mem \
+  --bind 0.0.0.0:8080 \
+  --https-bind 0.0.0.0:8443 \
+  --tls-cert /etc/ssl/fullchain.pem \
+  --tls-key /etc/ssl/privkey.pem \
+  --http-redirect-https \
+  --data-dir ./data
+
 # Local dev environment (.ferropod-dev)
 ferropod dev
 
@@ -43,28 +62,28 @@ ferropod token create --name admin --scope admin
 # Consistent database snapshot for off-site backup (rclone/restic)
 ferropod snapshot --out ./data/backups/manual
 
-# Print a systemd unit file
-ferropod install-systemd --data-dir /var/lib/ferropod
+# Print a systemd unit file (automatically adds CAP_NET_BIND_SERVICE for ports < 1024)
+ferropod install-systemd --data-dir /var/lib/ferropod --bind 0.0.0.0:80 --https-bind 0.0.0.0:443 --acme-domain panel.example.com --http-redirect-https
 ```
 
 ## Docker Deployment
 
-Single-container deployment (no Caddy required):
+Single-container deployment with native HTTP/HTTPS ports:
 
 ```bash
 export FERROPOD_MASTER_KEY="$(openssl rand -hex 32)"
 docker compose up -d --build
 ```
 
-- Exposes `ferropod` on port `8080` with persistent state in `./data:/data` and defaults to `--profile low-mem`.
-- **HTTPS options without Caddy**: use **Cloudflare Tunnel / Cloudflare Proxy**, put `ferropod` behind an existing **Nginx / Traefik / 1Panel**, or add built-in Rust TLS (`rustls-acme`) directly when self-terminating HTTPS (Caddy remains an optional example in `Caddyfile.example`).
+- Exposes HTTP (`80`, configurable via `FERROPOD_HTTP_PORT` / `FERROPOD_BIND`) and HTTPS (`443`, configurable via `FERROPOD_HTTPS_PORT` / `FERROPOD_HTTPS_BIND`) with persistent state in `./data:/data` and `--profile low-mem`.
+- **Built-in HTTPS**: configure `FERROPOD_ACME_DOMAINS` + `FERROPOD_ACME_EMAIL` for automatic Let's Encrypt (TLS-ALPN-01, cached under `/data/certs`, automatically including active project route domains), or set `FERROPOD_TLS_CERT` + `FERROPOD_TLS_KEY` for manual PEM certificates. You can also place `ferropod` behind Cloudflare Tunnel / Proxy or an existing reverse proxy if preferred.
+- **Domain Binding**: bind any domain to a project/environment via `/_admin` (Routes) or `PUT /_api/v1/routes`.
 - Note: Docker's default seccomp profile blocks `io_uring` syscalls on some hosts; Turso automatically falls back to standard async file I/O when `io_uring` is restricted, or you can relax seccomp in trusted environments.
 
 ## Documentation & Contracts
 
 - Architecture Specification: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - WIT Host Binding Contract: [wit/platform.wit](wit/platform.wit)
-- Optional Caddy On-Demand TLS Example: [Caddyfile.example](Caddyfile.example)
 
 ## Roadmap
 

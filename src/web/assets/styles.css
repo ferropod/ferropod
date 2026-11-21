@@ -1049,3 +1049,12 @@ textarea {
     display: none;
   }
 }
+
+/* Full-Text Search highlight in Light DOM (e.g. Live Tail logs) */
+mark.fts-hl {
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+  color: var(--text);
+  padding: 0 3px;
+  border-radius: 4px;
+  font-weight: 600;
+}

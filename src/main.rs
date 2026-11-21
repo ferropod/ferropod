@@ -8,11 +8,11 @@ use tokio::sync::watch;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use ferropod::config::{Config, Profile};
+use ferropod::config::{Config, Profile, TlsConfig};
 use ferropod::core::model::{Caller, TokenScope};
 use ferropod::core::service::{PlatformDeps, PlatformService};
 use ferropod::dispatcher::{maintenance::run_maintenance_loop, shutdown::shutdown_signal};
-use ferropod::gateway::router::build_router;
+use ferropod::gateway::{router::build_router, tls::serve_http_and_https};
 use ferropod::storage::{
     blob_fs::FsBlobStore, core_store::TursoCoreStore, log_store::DailyLogStore,
     queue_store::TursoQueueStore, user_db::TursoUserDbManager,
@@ -31,8 +31,30 @@ enum Commands {
     Serve {
         #[arg(long, env = "FERROPOD_PROFILE", default_value = "standard")]
         profile: Profile,
+        /// HTTP listen address (e.g. `0.0.0.0:80` or `127.0.0.1:8080`).
         #[arg(long, env = "FERROPOD_BIND", default_value = "127.0.0.1:8080")]
         bind: SocketAddr,
+        /// Optional HTTPS listen address (e.g. `0.0.0.0:443`). Defaults to `0.0.0.0:443` when TLS/ACME flags are set.
+        #[arg(long, env = "FERROPOD_HTTPS_BIND")]
+        https_bind: Option<SocketAddr>,
+        /// PEM certificate chain path for manual HTTPS mode.
+        #[arg(long, env = "FERROPOD_TLS_CERT")]
+        tls_cert: Option<PathBuf>,
+        /// PEM private key path for manual HTTPS mode.
+        #[arg(long, env = "FERROPOD_TLS_KEY")]
+        tls_key: Option<PathBuf>,
+        /// Domain(s) for automatic Let's Encrypt HTTPS (repeatable or comma-separated).
+        #[arg(long, env = "FERROPOD_ACME_DOMAINS", value_delimiter = ',')]
+        acme_domain: Vec<String>,
+        /// Contact email for Let's Encrypt ACME registration.
+        #[arg(long, env = "FERROPOD_ACME_EMAIL")]
+        acme_email: Option<String>,
+        /// Use Let's Encrypt staging directory (for testing without hitting rate limits).
+        #[arg(long, env = "FERROPOD_ACME_STAGING", default_value_t = false)]
+        acme_staging: bool,
+        /// Redirect HTTP requests on `--bind` to HTTPS (`308 Permanent Redirect`), keeping `/_healthz` on HTTP.
+        #[arg(long, env = "FERROPOD_HTTP_REDIRECT_HTTPS", default_value_t = false)]
+        http_redirect_https: bool,
         #[arg(long, env = "FERROPOD_DATA_DIR", default_value = "./data")]
         data_dir: PathBuf,
         #[arg(long, env = "FERROPOD_MASTER_KEY", default_value = "dev-insecure-master-key-change-me")]
@@ -63,8 +85,16 @@ enum Commands {
     InstallSystemd {
         #[arg(long, default_value = "/var/lib/ferropod")]
         data_dir: PathBuf,
-        #[arg(long, default_value = "127.0.0.1:8080")]
+        #[arg(long, default_value = "0.0.0.0:80")]
         bind: SocketAddr,
+        #[arg(long)]
+        https_bind: Option<SocketAddr>,
+        #[arg(long, value_delimiter = ',')]
+        acme_domain: Vec<String>,
+        #[arg(long)]
+        acme_email: Option<String>,
+        #[arg(long, default_value_t = false)]
+        http_redirect_https: bool,
         #[arg(long, default_value = "low-mem")]
         profile: Profile,
         #[arg(long, default_value = "/usr/local/bin/ferropod")]
@@ -163,10 +193,26 @@ async fn async_main(cli: Cli) -> Result<()> {
         Commands::Serve {
             profile,
             bind,
+            https_bind,
+            tls_cert,
+            tls_key,
+            acme_domain,
+            acme_email,
+            acme_staging,
+            http_redirect_https,
             data_dir,
             master_key,
         } => {
-            let cfg = Config::for_profile(profile, bind, data_dir, master_key);
+            let mut cfg = Config::for_profile(profile, bind, data_dir, master_key);
+            cfg.tls = TlsConfig {
+                https_bind,
+                cert_path: tls_cert,
+                key_path: tls_key,
+                acme_domains: acme_domain,
+                acme_email,
+                acme_staging,
+                http_redirect_https,
+            };
             run_server(cfg, false).await?;
         }
         Commands::Dev { bind, data_dir } => {
@@ -224,12 +270,43 @@ async fn async_main(cli: Cli) -> Result<()> {
         Commands::InstallSystemd {
             data_dir,
             bind,
+            https_bind,
+            acme_domain,
+            acme_email,
+            http_redirect_https,
             profile,
             bin_path,
         } => {
             let prof_str = match profile {
                 Profile::LowMem => "low-mem",
                 Profile::Standard => "standard",
+            };
+            let mut exec = format!(
+                "{} serve --profile {} --bind {} --data-dir {}",
+                bin_path.display(),
+                prof_str,
+                bind,
+                data_dir.display()
+            );
+            if let Some(hb) = https_bind {
+                exec.push_str(&format!(" --https-bind {hb}"));
+            }
+            for d in &acme_domain {
+                exec.push_str(&format!(" --acme-domain {d}"));
+            }
+            if let Some(email) = &acme_email {
+                exec.push_str(&format!(" --acme-email {email}"));
+            }
+            if http_redirect_https {
+                exec.push_str(" --http-redirect-https");
+            }
+            let needs_cap_bind = bind.port() < 1024
+                || https_bind.map(|b| b.port() < 1024).unwrap_or(false)
+                || !acme_domain.is_empty();
+            let cap_line = if needs_cap_bind {
+                "\nAmbientCapabilities=CAP_NET_BIND_SERVICE\nCapabilityBoundingSet=CAP_NET_BIND_SERVICE"
+            } else {
+                ""
             };
             println!(
                 "[Unit]
@@ -239,18 +316,14 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart={} serve --profile {} --bind {} --data-dir {}
+ExecStart={exec}
 Environment=FERROPOD_MASTER_KEY=CHANGE_ME_TO_A_STRONG_RANDOM_SECRET
 Restart=always
 RestartSec=3
-LimitNOFILE=65535
+LimitNOFILE=65535{cap_line}
 
 [Install]
-WantedBy=multi-user.target",
-                bin_path.display(),
-                prof_str,
-                bind,
-                data_dir.display()
+WantedBy=multi-user.target"
             );
         }
     }
@@ -273,12 +346,7 @@ async fn run_server(cfg: Config, dev_mode: bool) -> Result<()> {
     let maint_handle = tokio::spawn(run_maintenance_loop(svc.clone(), shutdown_rx));
 
     let app = build_router(svc.clone());
-    let listener = tokio::net::TcpListener::bind(cfg.bind_addr).await?;
-    info!(bind = %cfg.bind_addr, profile = ?cfg.profile, "ferropod listening");
-
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    serve_http_and_https(&cfg, &svc, app, shutdown_signal()).await?;
 
     let _ = shutdown_tx.send(true);
     let _ = maint_handle.await;

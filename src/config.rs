@@ -15,6 +15,27 @@ pub enum Profile {
     Standard,
 }
 
+/// Native TLS / HTTPS configuration for `ferropod serve`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TlsConfig {
+    /// Optional HTTPS bind address (e.g. `0.0.0.0:443`). Defaults to `0.0.0.0:443`
+    /// automatically when `--tls-cert` or `--acme-domain` is configured.
+    pub https_bind: Option<SocketAddr>,
+    /// PEM certificate chain path for manual TLS mode.
+    pub cert_path: Option<PathBuf>,
+    /// PEM private key path for manual TLS mode.
+    pub key_path: Option<PathBuf>,
+    /// Domains for automatic Let's Encrypt ACME (TLS-ALPN-01) certificates.
+    pub acme_domains: Vec<String>,
+    /// Optional contact email for Let's Encrypt ACME registration.
+    pub acme_email: Option<String>,
+    /// Use Let's Encrypt staging directory instead of production.
+    pub acme_staging: bool,
+    /// Redirect plain HTTP requests on `bind_addr` to HTTPS (`308 Permanent Redirect`),
+    /// keeping `/_healthz` accessible over HTTP.
+    pub http_redirect_https: bool,
+}
+
 /// Runtime configuration for the single-binary `ferropod` server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -23,6 +44,7 @@ pub struct Config {
     pub data_dir: PathBuf,
     /// Master key material used to derive AES-256-GCM and HMAC-SHA256 keys.
     pub master_key: String,
+    pub tls: TlsConfig,
     pub tokio_worker_threads: usize,
     pub max_concurrency: usize,
     pub queue_concurrency: usize,
@@ -52,6 +74,7 @@ impl Config {
                 bind_addr,
                 data_dir,
                 master_key,
+                tls: TlsConfig::default(),
                 tokio_worker_threads: 2,
                 max_concurrency: 32,
                 queue_concurrency: 4,
@@ -71,6 +94,7 @@ impl Config {
                 bind_addr,
                 data_dir,
                 master_key,
+                tls: TlsConfig::default(),
                 tokio_worker_threads: std::thread::available_parallelism()
                     .map(|n| n.get())
                     .unwrap_or(4),
@@ -112,5 +136,9 @@ impl Config {
 
     pub fn artifacts_dir(&self) -> PathBuf {
         self.data_dir.join("artifacts")
+    }
+
+    pub fn certs_dir(&self) -> PathBuf {
+        self.data_dir.join("certs")
     }
 }

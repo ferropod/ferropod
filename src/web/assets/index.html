@@ -93,6 +93,10 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v6c0 1.66 3.58 3 8 3s8-1.34 8-3V6"/><path d="M4 12v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6"/></svg>
           <span data-i18n="nav.dbs">Databases</span>
         </a>
+        <a href="#/search" class="nav-item" data-nav="search">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.35-4.35"/></svg>
+          <span data-i18n="nav.search">Search</span>
+        </a>
 
         <div class="nav-group-label" data-i18n="nav.groupSystem">Access &amp; Telemetry</div>
         <a href="#/tokens" class="nav-item" data-nav="tokens" id="nav-tokens">
@@ -163,6 +167,8 @@
   <div id="toast-root" class="toast-root" aria-live="polite"></div>
 
   <script src="/_admin/assets/i18n.js"></script>
+  <script src="/_admin/assets/search_mock.js"></script>
+  <script type="module" src="/_admin/assets/search_components.js"></script>
   <script src="/_admin/assets/app.js"></script>
 </body>
 </html>

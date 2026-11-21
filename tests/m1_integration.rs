@@ -538,30 +538,16 @@ async fn blob_api_static_site_secrets_tls_and_logs() {
         .await
         .unwrap();
 
-    // Caddy TLS allow check
-    let tls_ok = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/_internal/tls/allow?domain=demo.local.dev")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(tls_ok.status(), StatusCode::OK);
-
-    let tls_deny = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/_internal/tls/allow?domain=evil.example.com")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(tls_deny.status(), StatusCode::FORBIDDEN);
+    // Native domain allowlist checks (used by built-in TLS/ACME)
+    assert!(h.svc.is_domain_allowed("demo.local.dev").await);
+    assert!(!h.svc.is_domain_allowed("evil.example.com").await);
+    assert_eq!(
+        h.svc.allowed_domains().await,
+        vec![
+            "demo.local.dev".to_string(),
+            "preview.demo.local.dev".to_string()
+        ]
+    );
 
     // Before promote, prod has no active deployment (503), preview works + SPA fallback works
     let prod_before = app
@@ -1560,4 +1546,222 @@ async fn admin_ui_assets_and_enriched_status() {
     assert_eq!(proj_json["projects"], 1);
     assert_eq!(proj_json["buckets"], 1);
     assert_eq!(proj_json["kv_namespaces"], 1);
+}
+
+#[tokio::test]
+async fn test_native_tls_resolution_and_http_redirect() {
+    use ferropod::config::TlsConfig;
+    use ferropod::gateway::tls::{build_https_redirect_router, resolve_tls, ResolvedTls};
+
+    let tmp = TempDir::new().unwrap();
+    let mut cfg = Config::for_profile(
+        Profile::LowMem,
+        "0.0.0.0:80".parse().unwrap(),
+        tmp.path().to_path_buf(),
+        "test-master-key-32-bytes-minimum!!".into(),
+    );
+
+    // 1. Default: plain HTTP only
+    assert_eq!(resolve_tls(&cfg, vec![]).unwrap(), ResolvedTls::Disabled);
+
+    // 2. ACME merges explicit --acme-domain and project route domains, defaults to 0.0.0.0:443
+    cfg.tls = TlsConfig {
+        acme_domains: vec!["Panel.Example.com.".into()],
+        acme_email: Some("ops@example.com".into()),
+        ..Default::default()
+    };
+    let resolved = resolve_tls(&cfg, vec!["app.example.com".into(), "panel.example.com".into()]).unwrap();
+    assert_eq!(
+        resolved,
+        ResolvedTls::Acme {
+            bind: "0.0.0.0:443".parse().unwrap(),
+            domains: vec!["app.example.com".into(), "panel.example.com".into()],
+            email: Some("ops@example.com".into()),
+            staging: false,
+            cache_dir: cfg.certs_dir(),
+        }
+    );
+
+    // 3. Manual TLS with custom port
+    cfg.tls = TlsConfig {
+        https_bind: Some("0.0.0.0:8443".parse().unwrap()),
+        cert_path: Some(tmp.path().join("cert.pem")),
+        key_path: Some(tmp.path().join("key.pem")),
+        ..Default::default()
+    };
+    assert_eq!(
+        resolve_tls(&cfg, vec![]).unwrap(),
+        ResolvedTls::Manual {
+            bind: "0.0.0.0:8443".parse().unwrap(),
+            cert_path: tmp.path().join("cert.pem"),
+            key_path: tmp.path().join("key.pem"),
+        }
+    );
+
+    // 4. Invalid combinations are rejected
+    cfg.tls.acme_domains = vec!["conflict.example.com".into()];
+    assert!(resolve_tls(&cfg, vec![]).is_err());
+
+    cfg.tls = TlsConfig {
+        cert_path: Some(tmp.path().join("cert.pem")),
+        ..Default::default()
+    };
+    assert!(resolve_tls(&cfg, vec![]).is_err());
+
+    // 5. HTTP -> HTTPS redirect router (port 443 and custom port 8443)
+    let redirect_443 = build_https_redirect_router(443);
+    let health = redirect_443
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/_healthz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(health.status(), StatusCode::OK);
+
+    let r1 = redirect_443
+        .oneshot(
+            Request::builder()
+                .uri("/_admin?tab=routes")
+                .header(header::HOST, "panel.example.com:80")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r1.status(), StatusCode::PERMANENT_REDIRECT);
+    assert_eq!(
+        r1.headers().get(header::LOCATION).unwrap(),
+        "https://panel.example.com/_admin?tab=routes"
+    );
+
+    let redirect_8443 = build_https_redirect_router(8443);
+    let r2 = redirect_8443
+        .oneshot(
+            Request::builder()
+                .uri("/hello")
+                .header(header::HOST, "app.example.com:8080")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r2.status(), StatusCode::PERMANENT_REDIRECT);
+    assert_eq!(
+        r2.headers().get(header::LOCATION).unwrap(),
+        "https://app.example.com:8443/hello"
+    );
+}
+
+#[tokio::test]
+async fn test_manual_https_end_to_end_with_http_redirect() {
+    use ferropod::config::TlsConfig;
+    use ferropod::gateway::tls::{ensure_crypto_provider, serve_http_and_https};
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_rustls::rustls::pki_types::ServerName;
+    use tokio_rustls::rustls::{ClientConfig, RootCertStore};
+    use tokio_rustls::TlsConnector;
+
+    ensure_crypto_provider();
+    let h = setup_harness().await;
+
+    // Generate a self-signed certificate for localhost
+    let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+    let cert_pem = cert.cert.pem();
+    let key_pem = cert.signing_key.serialize_pem();
+
+    let cert_path = h._tmp.path().join("localhost.crt");
+    let key_path = h._tmp.path().join("localhost.key");
+    tokio::fs::write(&cert_path, &cert_pem).await.unwrap();
+    tokio::fs::write(&key_path, &key_pem).await.unwrap();
+
+    // Reserve two free loopback ports
+    let http_port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let https_port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+
+    let mut cfg = h.svc.config().clone();
+    cfg.bind_addr = format!("127.0.0.1:{http_port}").parse().unwrap();
+    cfg.tls = TlsConfig {
+        https_bind: Some(format!("127.0.0.1:{https_port}").parse().unwrap()),
+        cert_path: Some(cert_path),
+        key_path: Some(key_path),
+        http_redirect_https: true,
+        ..Default::default()
+    };
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let svc = h.svc.clone();
+    let app = build_router(svc.clone());
+    let server_task = tokio::spawn(async move {
+        serve_http_and_https(&cfg, &svc, app, async move {
+            let _ = rx.await;
+        })
+        .await
+    });
+
+    // Wait briefly for both listeners to bind
+    let mut http_stream = None;
+    for _ in 0..30 {
+        if let Ok(s) = tokio::net::TcpStream::connect(("127.0.0.1", http_port)).await {
+            http_stream = Some(s);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let mut http_stream = http_stream.expect("HTTP listener failed to start");
+
+    // 1. Verify HTTP redirects to HTTPS with custom port
+    http_stream
+        .write_all(
+            format!("GET /_admin HTTP/1.1\r\nHost: localhost:{http_port}\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut http_resp = String::new();
+    http_stream.read_to_string(&mut http_resp).await.unwrap();
+    assert!(http_resp.starts_with("HTTP/1.1 308"), "unexpected HTTP response: {http_resp}");
+    assert!(
+        http_resp.contains(&format!("location: https://localhost:{https_port}/_admin")),
+        "missing redirect location: {http_resp}"
+    );
+
+    // 2. Verify HTTPS serves /_healthz over TLS
+    let mut roots = RootCertStore::empty();
+    roots.add(cert.cert.der().clone()).unwrap();
+    let client_cfg = ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let connector = TlsConnector::from(Arc::new(client_cfg));
+
+    let tcp = tokio::net::TcpStream::connect(("127.0.0.1", https_port))
+        .await
+        .unwrap();
+    let mut tls_stream = connector
+        .connect(ServerName::try_from("localhost").unwrap(), tcp)
+        .await
+        .unwrap();
+    tls_stream
+        .write_all(b"GET /_healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut https_resp = String::new();
+    tls_stream.read_to_string(&mut https_resp).await.unwrap();
+    assert!(https_resp.starts_with("HTTP/1.1 200"), "unexpected HTTPS response: {https_resp}");
+    assert!(https_resp.contains(r#"{"status":"ok"}"#), "unexpected body: {https_resp}");
+
+    let _ = tx.send(());
+    server_task.await.unwrap().unwrap();
 }

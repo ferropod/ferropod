@@ -11,7 +11,7 @@ use serde::Serialize;
 use tower_http::limit::RequestBodyLimitLayer;
 
 use crate::core::service::PlatformService;
-use crate::gateway::{blob_api, guard::access_log_middleware, tls_ask};
+use crate::gateway::{blob_api, guard::access_log_middleware};
 use crate::web;
 
 #[derive(Debug, Serialize)]
@@ -19,7 +19,7 @@ struct HealthzResp {
     status: &'static str,
 }
 
-/// Build the unified HTTP router covering healthz, internal TLS allow, Blob API, REST API,
+/// Build the unified HTTP router covering healthz, Blob API, REST API,
 /// zero-build Admin UI, and Host-routed static sites / Workers.
 pub fn build_router(svc: PlatformService) -> Router {
     let blob_router = blob_api::router()
@@ -27,7 +27,6 @@ pub fn build_router(svc: PlatformService) -> Router {
 
     Router::new()
         .route("/_healthz", get(|| async { Json(HealthzResp { status: "ok" }) }))
-        .route("/_internal/tls/allow", get(tls_ask::allow_domain))
         .nest("/_blob", blob_router)
         .nest("/_api/v1", web::api::router())
         .route("/_admin", get(web::admin_index))

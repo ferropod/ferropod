@@ -21,7 +21,7 @@ RUN apt-get update \
 COPY --from=builder /app/target/release/ferropod /usr/local/bin/ferropod
 
 WORKDIR /data
-EXPOSE 8080
+EXPOSE 80 443 8080
 VOLUME ["/data"]
 
 ENTRYPOINT ["ferropod"]

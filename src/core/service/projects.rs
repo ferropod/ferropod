@@ -56,13 +56,20 @@ impl PlatformService {
         self.routes.read().await.get(&key).cloned()
     }
 
-    /// Check whether a domain is present in the active routing table (used by `/_internal/tls/allow`).
+    /// Check whether a domain is present in the active routing table.
     pub async fn is_domain_allowed(&self, domain: &str) -> bool {
         let key = normalize_host(domain);
         if key.is_empty() {
             return false;
         }
         self.routes.read().await.contains_key(&key)
+    }
+
+    /// Return all normalized domains currently bound in the active routing table.
+    pub async fn allowed_domains(&self) -> Vec<String> {
+        let mut domains: Vec<String> = self.routes.read().await.keys().cloned().collect();
+        domains.sort();
+        domains
     }
 
     pub async fn create_project(
