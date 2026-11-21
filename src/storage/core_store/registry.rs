@@ -10,6 +10,50 @@ use crate::storage::tx::{connect_db, map_turso_err, with_retry};
 
 use super::{opt_i64, opt_text, TursoCoreStore};
 
+const SELECT_USER_DB: &str =
+    "SELECT id, name, project_id, created_at, resource_group FROM user_databases";
+
+const SELECT_KV_NAMESPACE: &str =
+    "SELECT name, project_id, created_at, resource_group FROM kv_namespaces";
+
+const SELECT_CRON_JOB: &str = "SELECT id, name, project_id, schedule, target, enabled, \
+     last_run_at, last_status, created_at, updated_at \
+     FROM cron_jobs";
+
+fn row_to_user_db(row: &turso::Row) -> Result<UserDbMeta> {
+    Ok(UserDbMeta {
+        id: row.get(0).map_err(map_turso_err)?,
+        name: row.get(1).map_err(map_turso_err)?,
+        project_id: opt_text(row, 2)?,
+        created_at: row.get(3).map_err(map_turso_err)?,
+        group: opt_text(row, 4)?,
+    })
+}
+
+fn row_to_kv_namespace(row: &turso::Row) -> Result<KvNamespaceMeta> {
+    Ok(KvNamespaceMeta {
+        name: row.get(0).map_err(map_turso_err)?,
+        project_id: opt_text(row, 1)?,
+        created_at: row.get(2).map_err(map_turso_err)?,
+        group: opt_text(row, 3)?,
+    })
+}
+
+fn row_to_cron_job(row: &turso::Row) -> Result<CronJob> {
+    Ok(CronJob {
+        id: row.get(0).map_err(map_turso_err)?,
+        name: row.get(1).map_err(map_turso_err)?,
+        project_id: opt_text(row, 2)?,
+        schedule: row.get(3).map_err(map_turso_err)?,
+        target: row.get(4).map_err(map_turso_err)?,
+        enabled: row.get::<i64>(5).map_err(map_turso_err)? != 0,
+        last_run_at: opt_i64(row, 6)?,
+        last_status: opt_text(row, 7)?,
+        created_at: row.get(8).map_err(map_turso_err)?,
+        updated_at: row.get(9).map_err(map_turso_err)?,
+    })
+}
+
 #[async_trait]
 impl RegistryStore for TursoCoreStore {
     async fn register_user_db(
@@ -67,19 +111,13 @@ impl RegistryStore for TursoCoreStore {
         let conn = connect_db(&self.db)?;
         let mut rows = conn
             .query(
-                "SELECT id, name, project_id, created_at, resource_group FROM user_databases WHERE id = ?1 OR name = ?1 LIMIT 1",
+                &format!("{SELECT_USER_DB} WHERE id = ?1 OR name = ?1 LIMIT 1"),
                 [id_or_name],
             )
             .await
             .map_err(map_turso_err)?;
         if let Some(row) = rows.next().await.map_err(map_turso_err)? {
-            Ok(Some(UserDbMeta {
-                id: row.get(0).map_err(map_turso_err)?,
-                name: row.get(1).map_err(map_turso_err)?,
-                project_id: opt_text(&row, 2)?,
-                created_at: row.get(3).map_err(map_turso_err)?,
-                group: opt_text(&row, 4)?,
-            }))
+            row_to_user_db(&row).map(Some)
         } else {
             Ok(None)
         }
@@ -88,21 +126,12 @@ impl RegistryStore for TursoCoreStore {
     async fn list_user_dbs(&self) -> Result<Vec<UserDbMeta>> {
         let conn = connect_db(&self.db)?;
         let mut rows = conn
-            .query(
-                "SELECT id, name, project_id, created_at, resource_group FROM user_databases ORDER BY created_at DESC",
-                (),
-            )
+            .query(&format!("{SELECT_USER_DB} ORDER BY created_at DESC"), ())
             .await
             .map_err(map_turso_err)?;
         let mut out = Vec::new();
         while let Some(row) = rows.next().await.map_err(map_turso_err)? {
-            out.push(UserDbMeta {
-                id: row.get(0).map_err(map_turso_err)?,
-                name: row.get(1).map_err(map_turso_err)?,
-                project_id: opt_text(&row, 2)?,
-                created_at: row.get(3).map_err(map_turso_err)?,
-                group: opt_text(&row, 4)?,
-            });
+            out.push(row_to_user_db(&row)?);
         }
         Ok(out)
     }
@@ -144,18 +173,13 @@ impl RegistryStore for TursoCoreStore {
         let conn = connect_db(&self.db)?;
         let mut rows = conn
             .query(
-                "SELECT name, project_id, created_at, resource_group FROM kv_namespaces WHERE name = ?1 LIMIT 1",
+                &format!("{SELECT_KV_NAMESPACE} WHERE name = ?1 LIMIT 1"),
                 [name],
             )
             .await
             .map_err(map_turso_err)?;
         if let Some(row) = rows.next().await.map_err(map_turso_err)? {
-            Ok(Some(KvNamespaceMeta {
-                name: row.get(0).map_err(map_turso_err)?,
-                project_id: opt_text(&row, 1)?,
-                created_at: row.get(2).map_err(map_turso_err)?,
-                group: opt_text(&row, 3)?,
-            }))
+            row_to_kv_namespace(&row).map(Some)
         } else {
             Ok(None)
         }
@@ -164,20 +188,12 @@ impl RegistryStore for TursoCoreStore {
     async fn list_kv_namespaces(&self) -> Result<Vec<KvNamespaceMeta>> {
         let conn = connect_db(&self.db)?;
         let mut rows = conn
-            .query(
-                "SELECT name, project_id, created_at, resource_group FROM kv_namespaces ORDER BY name ASC",
-                (),
-            )
+            .query(&format!("{SELECT_KV_NAMESPACE} ORDER BY name ASC"), ())
             .await
             .map_err(map_turso_err)?;
         let mut out = Vec::new();
         while let Some(row) = rows.next().await.map_err(map_turso_err)? {
-            out.push(KvNamespaceMeta {
-                name: row.get(0).map_err(map_turso_err)?,
-                project_id: opt_text(&row, 1)?,
-                created_at: row.get(2).map_err(map_turso_err)?,
-                group: opt_text(&row, 3)?,
-            });
+            out.push(row_to_kv_namespace(&row)?);
         }
         Ok(out)
     }
@@ -230,26 +246,11 @@ impl RegistryStore for TursoCoreStore {
     async fn get_cron_job(&self, id: &str) -> Result<Option<CronJob>> {
         let conn = connect_db(&self.db)?;
         let mut rows = conn
-            .query(
-                "SELECT id, name, project_id, schedule, target, enabled, last_run_at, last_status, created_at, updated_at
-                 FROM cron_jobs WHERE id = ?1 LIMIT 1",
-                [id],
-            )
+            .query(&format!("{SELECT_CRON_JOB} WHERE id = ?1 LIMIT 1"), [id])
             .await
             .map_err(map_turso_err)?;
         if let Some(row) = rows.next().await.map_err(map_turso_err)? {
-            Ok(Some(CronJob {
-                id: row.get(0).map_err(map_turso_err)?,
-                name: row.get(1).map_err(map_turso_err)?,
-                project_id: opt_text(&row, 2)?,
-                schedule: row.get(3).map_err(map_turso_err)?,
-                target: row.get(4).map_err(map_turso_err)?,
-                enabled: row.get::<i64>(5).map_err(map_turso_err)? != 0,
-                last_run_at: opt_i64(&row, 6)?,
-                last_status: opt_text(&row, 7)?,
-                created_at: row.get(8).map_err(map_turso_err)?,
-                updated_at: row.get(9).map_err(map_turso_err)?,
-            }))
+            row_to_cron_job(&row).map(Some)
         } else {
             Ok(None)
         }
@@ -258,27 +259,12 @@ impl RegistryStore for TursoCoreStore {
     async fn list_cron_jobs(&self) -> Result<Vec<CronJob>> {
         let conn = connect_db(&self.db)?;
         let mut rows = conn
-            .query(
-                "SELECT id, name, project_id, schedule, target, enabled, last_run_at, last_status, created_at, updated_at
-                 FROM cron_jobs ORDER BY created_at DESC",
-                (),
-            )
+            .query(&format!("{SELECT_CRON_JOB} ORDER BY created_at DESC"), ())
             .await
             .map_err(map_turso_err)?;
         let mut out = Vec::new();
         while let Some(row) = rows.next().await.map_err(map_turso_err)? {
-            out.push(CronJob {
-                id: row.get(0).map_err(map_turso_err)?,
-                name: row.get(1).map_err(map_turso_err)?,
-                project_id: opt_text(&row, 2)?,
-                schedule: row.get(3).map_err(map_turso_err)?,
-                target: row.get(4).map_err(map_turso_err)?,
-                enabled: row.get::<i64>(5).map_err(map_turso_err)? != 0,
-                last_run_at: opt_i64(&row, 6)?,
-                last_status: opt_text(&row, 7)?,
-                created_at: row.get(8).map_err(map_turso_err)?,
-                updated_at: row.get(9).map_err(map_turso_err)?,
-            });
+            out.push(row_to_cron_job(&row)?);
         }
         Ok(out)
     }
