@@ -55,7 +55,14 @@ CREATE INDEX IF NOT EXISTS idx_deployments_project ON deployments (project_id, c
 CREATE TABLE IF NOT EXISTS routes (
     host TEXT PRIMARY KEY,
     project_id TEXT NOT NULL,
-    target_env TEXT NOT NULL DEFAULT 'prod'
+    target_env TEXT NOT NULL DEFAULT 'prod',
+    proxy_prefix TEXT,
+    proxy_upstream TEXT,
+    rate_limit_rpm INTEGER,
+    basic_auth_user TEXT,
+    basic_auth_pass_hash TEXT,
+    canary_deployment_id TEXT,
+    canary_weight INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS secrets (
@@ -257,6 +264,13 @@ impl TursoCoreStore {
             ("cron_jobs", "timezone", "TEXT NOT NULL DEFAULT 'UTC'"),
             ("cron_jobs", "timeout_ms", "INTEGER"),
             ("cron_jobs", "max_retries", "INTEGER NOT NULL DEFAULT 0"),
+            ("routes", "proxy_prefix", "TEXT"),
+            ("routes", "proxy_upstream", "TEXT"),
+            ("routes", "rate_limit_rpm", "INTEGER"),
+            ("routes", "basic_auth_user", "TEXT"),
+            ("routes", "basic_auth_pass_hash", "TEXT"),
+            ("routes", "canary_deployment_id", "TEXT"),
+            ("routes", "canary_weight", "INTEGER NOT NULL DEFAULT 0"),
         ] {
             ensure_column(&conn, table, col, def).await?;
         }

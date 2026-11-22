@@ -15,7 +15,30 @@ use crate::storage::tx::{
     checkpoint_db, connect_db, copy_db_with_sidecars, map_turso_err, with_retry,
 };
 
-use super::{opt_text, opt_text_param, row_to_deployment, row_to_project, TursoCoreStore};
+use super::{opt_i64, opt_text, opt_text_param, row_to_deployment, row_to_project, TursoCoreStore};
+
+const SELECT_ROUTE_COLS: &str =
+    "host, project_id, target_env, proxy_prefix, proxy_upstream, rate_limit_rpm, basic_auth_user, basic_auth_pass_hash, canary_deployment_id, canary_weight";
+
+fn row_to_route(row: &turso::Row) -> Result<Route> {
+    let env_str: String = row.get(2).map_err(map_turso_err)?;
+    let basic_auth_user = opt_text(row, 6)?;
+    let basic_auth_pass_hash = opt_text(row, 7)?;
+    let basic_auth_enabled = basic_auth_user.is_some() && basic_auth_pass_hash.is_some();
+    Ok(Route {
+        host: row.get(0).map_err(map_turso_err)?,
+        project_id: row.get(1).map_err(map_turso_err)?,
+        target_env: TargetEnv::parse(&env_str)?,
+        proxy_prefix: opt_text(row, 3)?,
+        proxy_upstream: opt_text(row, 4)?,
+        rate_limit_rpm: opt_i64(row, 5)?.and_then(|v| u32::try_from(v).ok()),
+        basic_auth_user,
+        basic_auth_pass_hash,
+        basic_auth_enabled,
+        canary_deployment_id: opt_text(row, 8)?,
+        canary_weight: opt_i64(row, 9)?.unwrap_or(0).clamp(0, 100) as u8,
+    })
+}
 
 const SELECT_PROJECT: &str =
     "SELECT id, name, active_deployment_id, preview_deployment_id, max_concurrency, access_policy_json, \
@@ -467,9 +490,33 @@ impl ProjectStore for TursoCoreStore {
                 }
 
                 tx.execute(
-                    "INSERT INTO routes (host, project_id, target_env) VALUES (?1, ?2, ?3)
-                     ON CONFLICT(host) DO UPDATE SET project_id = excluded.project_id, target_env = excluded.target_env",
-                    (route.host, route.project_id, route.target_env.as_str()),
+                    "INSERT INTO routes (host, project_id, target_env, proxy_prefix, proxy_upstream, rate_limit_rpm, basic_auth_user, basic_auth_pass_hash, canary_deployment_id, canary_weight)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                     ON CONFLICT(host) DO UPDATE SET
+                        project_id = excluded.project_id,
+                        target_env = excluded.target_env,
+                        proxy_prefix = excluded.proxy_prefix,
+                        proxy_upstream = excluded.proxy_upstream,
+                        rate_limit_rpm = excluded.rate_limit_rpm,
+                        basic_auth_user = excluded.basic_auth_user,
+                        basic_auth_pass_hash = excluded.basic_auth_pass_hash,
+                        canary_deployment_id = excluded.canary_deployment_id,
+                        canary_weight = excluded.canary_weight",
+                    vec![
+                        TursoValue::Text(route.host),
+                        TursoValue::Text(route.project_id),
+                        TursoValue::Text(route.target_env.as_str().to_string()),
+                        opt_text_param(route.proxy_prefix),
+                        opt_text_param(route.proxy_upstream),
+                        route
+                            .rate_limit_rpm
+                            .map(|v| TursoValue::Integer(v as i64))
+                            .unwrap_or(TursoValue::Null),
+                        opt_text_param(route.basic_auth_user),
+                        opt_text_param(route.basic_auth_pass_hash),
+                        opt_text_param(route.canary_deployment_id),
+                        TursoValue::Integer(route.canary_weight as i64),
+                    ],
                 )
                 .await?;
                 tx.commit().await?;
@@ -483,18 +530,13 @@ impl ProjectStore for TursoCoreStore {
         let conn = connect_db(&self.db)?;
         let mut rows = conn
             .query(
-                "SELECT host, project_id, target_env FROM routes WHERE host = ?1 LIMIT 1",
+                &format!("SELECT {SELECT_ROUTE_COLS} FROM routes WHERE host = ?1 LIMIT 1"),
                 [host],
             )
             .await
             .map_err(map_turso_err)?;
         if let Some(row) = rows.next().await.map_err(map_turso_err)? {
-            let env_str: String = row.get(2).map_err(map_turso_err)?;
-            Ok(Some(Route {
-                host: row.get(0).map_err(map_turso_err)?,
-                project_id: row.get(1).map_err(map_turso_err)?,
-                target_env: TargetEnv::parse(&env_str)?,
-            }))
+            Ok(Some(row_to_route(&row)?))
         } else {
             Ok(None)
         }
@@ -552,19 +594,14 @@ impl ProjectStore for TursoCoreStore {
         let conn = connect_db(&self.db)?;
         let mut rows = conn
             .query(
-                "SELECT host, project_id, target_env FROM routes ORDER BY host ASC",
+                &format!("SELECT {SELECT_ROUTE_COLS} FROM routes ORDER BY host ASC"),
                 (),
             )
             .await
             .map_err(map_turso_err)?;
         let mut out = Vec::new();
         while let Some(row) = rows.next().await.map_err(map_turso_err)? {
-            let env_str: String = row.get(2).map_err(map_turso_err)?;
-            out.push(Route {
-                host: row.get(0).map_err(map_turso_err)?,
-                project_id: row.get(1).map_err(map_turso_err)?,
-                target_env: TargetEnv::parse(&env_str)?,
-            });
+            out.push(row_to_route(&row)?);
         }
         Ok(out)
     }
@@ -597,18 +634,13 @@ impl ProjectStore for TursoCoreStore {
         {
             let mut rows = tx
                 .query(
-                    "SELECT host, project_id, target_env FROM routes ORDER BY host ASC",
+                    &format!("SELECT {SELECT_ROUTE_COLS} FROM routes ORDER BY host ASC"),
                     (),
                 )
                 .await
                 .map_err(map_turso_err)?;
             while let Some(row) = rows.next().await.map_err(map_turso_err)? {
-                let env_str: String = row.get(2).map_err(map_turso_err)?;
-                routes.push(Route {
-                    host: row.get(0).map_err(map_turso_err)?,
-                    project_id: row.get(1).map_err(map_turso_err)?,
-                    target_env: TargetEnv::parse(&env_str)?,
-                });
+                routes.push(row_to_route(&row)?);
             }
         }
 
@@ -622,6 +654,9 @@ impl ProjectStore for TursoCoreStore {
                 if let Some(id) = dep_id {
                     needed_ids.insert(id.to_string());
                 }
+            }
+            if let Some(ref cid) = r.canary_deployment_id {
+                needed_ids.insert(cid.clone());
             }
         }
 
@@ -653,11 +688,22 @@ impl ProjectStore for TursoCoreStore {
                 };
                 dep_id.and_then(|id| dep_map.get(id).cloned())
             });
+            let canary_deployment = r
+                .canary_deployment_id
+                .as_deref()
+                .and_then(|id| dep_map.get(id).cloned());
             entries.push(RouteEntry {
                 host: r.host.to_ascii_lowercase(),
                 project_id: r.project_id,
                 target_env: r.target_env,
                 active_deployment,
+                proxy_prefix: r.proxy_prefix,
+                proxy_upstream: r.proxy_upstream,
+                rate_limit_rpm: r.rate_limit_rpm,
+                basic_auth_user: r.basic_auth_user,
+                basic_auth_pass_hash: r.basic_auth_pass_hash,
+                canary_deployment,
+                canary_weight: r.canary_weight,
             });
         }
         Ok(entries)

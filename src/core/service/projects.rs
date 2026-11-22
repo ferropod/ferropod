@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::core::model::{
     Bindings, Caller, Deployment, FerroError, LogEntry, Project, ProjectOpts, RequestCtx, Result,
-    Route, RouteEntry, TargetEnv, TokenScope, WorkerHttpRequest, WorkerHttpResponse,
+    Route, RouteEntry, RouteOpts, TargetEnv, TokenScope, WorkerHttpRequest, WorkerHttpResponse,
 };
 
 use super::PlatformService;
@@ -445,6 +445,17 @@ impl PlatformService {
         project_id_or_name: &str,
         deployment_id: Option<&str>,
     ) -> Result<Deployment> {
+        self.promote_deployment_with_health(caller, project_id_or_name, deployment_id, false)
+            .await
+    }
+
+    pub async fn promote_deployment_with_health(
+        &self,
+        caller: &Caller,
+        project_id_or_name: &str,
+        deployment_id: Option<&str>,
+        verify_health: bool,
+    ) -> Result<Deployment> {
         let proj = self.get_project_internal(project_id_or_name).await?;
         Self::require_project_write(caller, &proj.id)?;
 
@@ -469,18 +480,99 @@ impl PlatformService {
 
         if dep.artifact_path.is_some() {
             self.runtime.preload_deployment(&dep).await?;
+            if verify_health {
+                let hc_path = if proj.health_check_path.starts_with('/') {
+                    proj.health_check_path.clone()
+                } else {
+                    format!("/{}", proj.health_check_path)
+                };
+                let probe_ctx = RequestCtx::new(
+                    proj.id.clone(),
+                    format!("hc_{}", Uuid::new_v4().simple()),
+                    dep.clone(),
+                )
+                .with_project_limits(&proj);
+                let probe_req = WorkerHttpRequest {
+                    method: "GET".to_string(),
+                    uri: hc_path.clone(),
+                    headers: Vec::new(),
+                    body: Box::pin(futures_util::stream::empty()),
+                };
+                let probe_resp = self
+                    .invoke_worker_http(probe_ctx, probe_req)
+                    .await
+                    .map_err(|e| {
+                        FerroError::InvalidArgument(format!("health check '{hc_path}' failed: {e}"))
+                    })?;
+                if probe_resp.status >= 500 {
+                    return Err(FerroError::InvalidArgument(format!(
+                        "health check '{hc_path}' returned HTTP {}",
+                        probe_resp.status
+                    )));
+                }
+            }
         }
         self.projects
             .set_active_deployment(&proj.id, &dep.id)
             .await?;
+        self.health_tracker.mark_promoted(&dep.id);
         self.refresh_routes().await?;
         self.audit(
             Some(&proj.id),
             &caller.actor,
             "deployment.promote",
-            serde_json::json!({ "deployment_id": dep.id }),
+            serde_json::json!({ "deployment_id": dep.id, "verify_health": verify_health }),
         );
         Ok(dep)
+    }
+
+    /// Automatically revert a newly promoted production deployment if a 5xx error spike occurs.
+    pub async fn auto_rollback_deployment(
+        &self,
+        project_id: &str,
+        failed_dep_id: &str,
+    ) -> Result<Option<Deployment>> {
+        let Some(proj) = self.projects.get_project(project_id).await? else {
+            return Ok(None);
+        };
+        if proj.active_deployment_id.as_deref() != Some(failed_dep_id) {
+            return Ok(None);
+        }
+        let Some(prev) = self
+            .projects
+            .previous_production_deployment(&proj.id)
+            .await?
+        else {
+            return Ok(None);
+        };
+        if prev.artifact_path.is_some() {
+            let _ = self.runtime.preload_deployment(&prev).await;
+        }
+        self.projects
+            .set_active_deployment(&proj.id, &prev.id)
+            .await?;
+        self.health_tracker.mark_promoted(&prev.id);
+        self.refresh_routes().await?;
+        self.logs.emit(LogEntry {
+            id: None,
+            ts: Utc::now().timestamp_millis(),
+            project_id: Some(proj.id.clone()),
+            request_id: None,
+            source: "system".into(),
+            level: "warn".into(),
+            message: format!(
+                "Auto-rolled back app '{}' from {} to {} due to 5xx spike",
+                proj.name, failed_dep_id, prev.id
+            ),
+            meta_json: None,
+        });
+        self.audit(
+            Some(&proj.id),
+            "auto-rollback",
+            "deployment.auto_rollback",
+            serde_json::json!({ "failed_deployment_id": failed_dep_id, "restored_deployment_id": prev.id }),
+        );
+        Ok(Some(prev))
     }
 
     pub async fn rollback_deployment(
@@ -532,12 +624,138 @@ impl PlatformService {
         Ok(dep)
     }
 
+    async fn apply_route_opts(
+        &self,
+        proj: &Project,
+        mut route: Route,
+        opts: RouteOpts,
+    ) -> Result<Route> {
+        if let Some(upstream_raw) = opts.proxy_upstream {
+            let trimmed = upstream_raw.trim().trim_end_matches('/').to_string();
+            if trimmed.is_empty() {
+                route.proxy_upstream = None;
+                route.proxy_prefix = None;
+            } else {
+                if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
+                    return Err(FerroError::InvalidArgument(
+                        "proxy_upstream must start with http:// or https://".into(),
+                    ));
+                }
+                let parsed: http::Uri = trimmed.parse().map_err(|e| {
+                    FerroError::InvalidArgument(format!("invalid proxy_upstream: {e}"))
+                })?;
+                if parsed.authority().is_none() {
+                    return Err(FerroError::InvalidArgument(
+                        "proxy_upstream must include a host authority".into(),
+                    ));
+                }
+                route.proxy_upstream = Some(trimmed);
+                if route.proxy_prefix.is_none() {
+                    route.proxy_prefix = Some("/api".to_string());
+                }
+            }
+        }
+        if let Some(prefix_raw) = opts.proxy_prefix {
+            let trimmed = prefix_raw.trim().trim_end_matches('/').to_string();
+            if trimmed.is_empty() {
+                route.proxy_prefix = None;
+            } else {
+                if !trimmed.starts_with('/') || trimmed.len() <= 1 {
+                    return Err(FerroError::InvalidArgument(
+                        "proxy_prefix must be a non-root path starting with '/'".into(),
+                    ));
+                }
+                let lower = trimmed.to_ascii_lowercase();
+                if crate::config::RESERVED_LOCAL_API_PREFIXES
+                    .iter()
+                    .any(|r| lower == *r || lower.starts_with(&format!("{r}/")))
+                    || lower == "/_mcp"
+                    || lower == "/_ai"
+                    || lower.starts_with("/_ai/")
+                    || lower == "/_realtime"
+                    || lower.starts_with("/_realtime/")
+                {
+                    return Err(FerroError::InvalidArgument(
+                        "proxy_prefix cannot shadow reserved FerroPod routes".into(),
+                    ));
+                }
+                route.proxy_prefix = Some(trimmed);
+            }
+        }
+        if let Some(rpm) = opts.rate_limit_rpm {
+            route.rate_limit_rpm = if rpm == 0 { None } else { Some(rpm) };
+        }
+        if opts.clear_basic_auth == Some(true) {
+            route.basic_auth_user = None;
+            route.basic_auth_pass_hash = None;
+            route.basic_auth_enabled = false;
+        } else if let (Some(user), Some(pass)) = (
+            opts.basic_auth_user
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty()),
+            opts.basic_auth_password
+                .as_deref()
+                .filter(|s| !s.is_empty()),
+        ) {
+            route.basic_auth_user = Some(user.to_string());
+            route.basic_auth_pass_hash = Some(crate::gateway::guard::hash_basic_auth(user, pass));
+            route.basic_auth_enabled = true;
+        }
+        if let Some(w) = opts.canary_weight {
+            if w > 100 {
+                return Err(FerroError::InvalidArgument(
+                    "canary_weight must be between 0 and 100".into(),
+                ));
+            }
+            route.canary_weight = w;
+        }
+        if let Some(cid_raw) = opts.canary_deployment_id {
+            let trimmed = cid_raw.trim().to_string();
+            if trimmed.is_empty() {
+                route.canary_deployment_id = None;
+                route.canary_weight = 0;
+            } else {
+                let dep = self
+                    .projects
+                    .get_deployment(&trimmed)
+                    .await?
+                    .ok_or_else(|| FerroError::NotFound(format!("deployment '{trimmed}'")))?;
+                if dep.project_id != proj.id {
+                    return Err(FerroError::Forbidden(format!(
+                        "canary deployment '{trimmed}' belongs to a different app"
+                    )));
+                }
+                route.canary_deployment_id = Some(dep.id);
+            }
+        }
+        Ok(route)
+    }
+
     pub async fn upsert_route(
         &self,
         caller: &Caller,
         host: &str,
         project_id_or_name: &str,
         target_env: TargetEnv,
+    ) -> Result<Route> {
+        self.upsert_route_with_opts(
+            caller,
+            host,
+            project_id_or_name,
+            target_env,
+            RouteOpts::default(),
+        )
+        .await
+    }
+
+    pub async fn upsert_route_with_opts(
+        &self,
+        caller: &Caller,
+        host: &str,
+        project_id_or_name: &str,
+        target_env: TargetEnv,
+        opts: RouteOpts,
     ) -> Result<Route> {
         let norm_host = normalize_host(host);
         if norm_host.is_empty()
@@ -552,11 +770,13 @@ impl PlatformService {
         let proj = self.get_project_internal(project_id_or_name).await?;
         Self::require_project_write(caller, &proj.id)?;
 
-        let route = Route {
+        let base = Route {
             host: norm_host,
             project_id: proj.id.clone(),
             target_env,
+            ..Default::default()
         };
+        let route = self.apply_route_opts(&proj, base, opts).await?;
         self.projects
             .upsert_route(route.clone(), caller.project_id())
             .await?;
@@ -566,6 +786,55 @@ impl PlatformService {
             &caller.actor,
             "route.upsert",
             serde_json::json!({ "host": route.host, "target_env": target_env.as_str() }),
+        );
+        Ok(route)
+    }
+
+    pub async fn update_route_opts(
+        &self,
+        caller: &Caller,
+        host: &str,
+        project_id_or_name: Option<&str>,
+        target_env: Option<TargetEnv>,
+        opts: RouteOpts,
+    ) -> Result<Route> {
+        let norm_host = normalize_host(host);
+        if norm_host.is_empty() {
+            return Err(FerroError::InvalidArgument("host cannot be empty".into()));
+        }
+        let mut existing = self
+            .projects
+            .get_route(&norm_host)
+            .await?
+            .ok_or_else(|| FerroError::NotFound(format!("route '{norm_host}'")))?;
+        Self::require_project_write(caller, &existing.project_id)?;
+
+        let proj = if let Some(pid_or_name) = project_id_or_name {
+            let p = self.get_project_internal(pid_or_name).await?;
+            Self::require_project_write(caller, &p.id)?;
+            existing.project_id = p.id.clone();
+            p
+        } else {
+            self.get_project_internal(&existing.project_id).await?
+        };
+        if let Some(env) = target_env {
+            existing.target_env = env;
+        }
+        let route = self.apply_route_opts(&proj, existing, opts).await?;
+        self.projects
+            .upsert_route(route.clone(), caller.project_id())
+            .await?;
+        self.refresh_routes().await?;
+        self.audit(
+            Some(&proj.id),
+            &caller.actor,
+            "route.update",
+            serde_json::json!({
+                "host": route.host,
+                "target_env": route.target_env.as_str(),
+                "rate_limit_rpm": route.rate_limit_rpm,
+                "canary_weight": route.canary_weight,
+            }),
         );
         Ok(route)
     }

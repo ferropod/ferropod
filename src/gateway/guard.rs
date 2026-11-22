@@ -97,6 +97,59 @@ impl IntoResponse for ApiError {
     }
 }
 
+/// Hash a route Basic Auth credential pair using domain-separated SHA-256.
+pub fn hash_basic_auth(user: &str, password: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"ferropod:basic-auth:v1:");
+    hasher.update(user.as_bytes());
+    hasher.update(b":");
+    hasher.update(password.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// Verify HTTP `Authorization: Basic ...` header in constant time against stored credential hash.
+pub fn verify_basic_auth(
+    headers: &axum::http::HeaderMap,
+    expected_user: &str,
+    expected_hash: &str,
+) -> bool {
+    use base64::Engine as _;
+    let Some(raw_auth) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return false;
+    };
+    let Some(b64) = raw_auth
+        .strip_prefix("Basic ")
+        .or_else(|| raw_auth.strip_prefix("basic "))
+    else {
+        return false;
+    };
+    let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(b64.trim()) else {
+        return false;
+    };
+    let Ok(cred) = std::str::from_utf8(&decoded) else {
+        return false;
+    };
+    let Some((user, pass)) = cred.split_once(':') else {
+        return false;
+    };
+    if user != expected_user {
+        return false;
+    }
+    let actual_hash = hash_basic_auth(user, pass);
+    if actual_hash.len() != expected_hash.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in actual_hash.bytes().zip(expected_hash.bytes()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
 /// Extract bearer token from `Authorization` header (or optional `?token=` query param).
 pub fn extract_bearer_token(
     req_headers: &axum::http::HeaderMap,

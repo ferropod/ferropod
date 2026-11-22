@@ -13,12 +13,14 @@ use tower_http::compression::CompressionLayer;
 use tower_http::limit::RequestBodyLimitLayer;
 use uuid::Uuid;
 
-use crate::core::model::{RequestCtx, WorkerHttpRequest};
+use crate::core::model::{RequestCtx, TargetEnv, WorkerHttpRequest};
 use crate::core::service::PlatformService;
 use crate::gateway::{
     blob_api::{self, etag_matches},
-    guard::access_log_middleware,
-    local_api::{has_unsafe_path_segments, strip_hop_headers, LocalApiProxy},
+    guard::{access_log_middleware, verify_basic_auth},
+    local_api::{
+        forward_dynamic_upstream, has_unsafe_path_segments, strip_hop_headers, LocalApiProxy,
+    },
 };
 use crate::web;
 
@@ -66,6 +68,37 @@ pub fn build_router(svc: PlatformService) -> Router {
         .with_state(svc)
 }
 
+fn client_ip_from_headers(headers: &HeaderMap) -> String {
+    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        if let Some(first) = xff
+            .split(',')
+            .next()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return first.to_string();
+        }
+    }
+    if let Some(real_ip) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
+        let t = real_ip.trim();
+        if !t.is_empty() {
+            return t.to_string();
+        }
+    }
+    "anon".to_string()
+}
+
+fn attach_rate_limit_headers(resp: &mut Response, info: Option<(u32, u32)>) {
+    if let Some((limit, remaining)) = info {
+        if let Ok(v) = HeaderValue::from_str(&limit.to_string()) {
+            resp.headers_mut().insert("x-ratelimit-limit", v);
+        }
+        if let Ok(v) = HeaderValue::from_str(&remaining.to_string()) {
+            resp.headers_mut().insert("x-ratelimit-remaining", v);
+        }
+    }
+}
+
 async fn host_route_handler(
     State(svc): State<PlatformService>,
     Extension(local_api): Extension<Option<LocalApiProxy>>,
@@ -85,7 +118,47 @@ async fn host_route_handler(
         return (StatusCode::NOT_FOUND, "route not found").into_response();
     };
 
-    let Some(dep) = route.active_deployment else {
+    // 1. Optional Preview / Site HTTP Basic Authentication gate
+    if let (Some(expected_user), Some(expected_hash)) = (
+        route.basic_auth_user.as_deref(),
+        route.basic_auth_pass_hash.as_deref(),
+    ) {
+        if !verify_basic_auth(req.headers(), expected_user, expected_hash) {
+            return (
+                StatusCode::UNAUTHORIZED,
+                [(header::WWW_AUTHENTICATE, "Basic realm=\"ferropod\"")],
+                "authentication required",
+            )
+                .into_response();
+        }
+    }
+
+    // 2. Per-route sliding-window rate limiting
+    let rate_info = if let Some(rpm) = route.rate_limit_rpm.filter(|r| *r > 0) {
+        let ip = client_ip_from_headers(req.headers());
+        let rl_key = format!("route:{}:{ip}", route.host);
+        let (allowed, remaining, reset_secs) = svc.rate_limiter().check_and_record(&rl_key, rpm);
+        if !allowed {
+            svc.metrics()
+                .rate_limited_total
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                [
+                    ("retry-after", reset_secs.to_string()),
+                    ("x-ratelimit-limit", rpm.to_string()),
+                    ("x-ratelimit-remaining", "0".to_string()),
+                ],
+                "route rate limit exceeded",
+            )
+                .into_response();
+        }
+        Some((rpm, remaining))
+    } else {
+        None
+    };
+
+    let Some(active_dep) = route.active_deployment else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             "project has no active deployment",
@@ -93,14 +166,53 @@ async fn host_route_handler(
             .into_response();
     };
 
-    if let Some(proxy) = local_api.filter(|proxy| proxy.matches(&route.host, req_path)) {
-        return proxy.forward(req).await;
+    // 3. Dynamic per-route reverse proxy (prefix + upstream) or boot-time --local-api proxy
+    if let (Some(prefix), Some(upstream)) = (
+        route.proxy_prefix.as_deref(),
+        route.proxy_upstream.as_deref(),
+    ) {
+        if req_path
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+        {
+            let mut resp =
+                forward_dynamic_upstream(upstream, svc.config().max_blob_upload_bytes, req).await;
+            attach_rate_limit_headers(&mut resp, rate_info);
+            return resp;
+        }
     }
+
+    if let Some(proxy) = local_api.filter(|proxy| proxy.matches(&route.host, req_path)) {
+        let mut resp = proxy.forward(req).await;
+        attach_rate_limit_headers(&mut resp, rate_info);
+        return resp;
+    }
+
+    // 4. Optional deterministic canary weight split
+    let (dep, is_canary) = match route.canary_deployment.filter(|_| route.canary_weight > 0) {
+        Some(canary_dep) if (svc.next_canary_ticket() % 100) < (route.canary_weight as u64) => {
+            (canary_dep, true)
+        }
+        _ => (active_dep, false),
+    };
+    let served_dep_id = dep.id.clone();
 
     let method = req.method().clone();
     let headers = req.headers().clone();
     let req_path_owned = req.uri().path().to_string();
     let has_worker = dep.artifact_path.is_some();
+
+    let finalize_resp = |mut resp: Response| -> Response {
+        if let Ok(v) = HeaderValue::from_str(&served_dep_id) {
+            resp.headers_mut().insert("x-ferropod-deployment", v);
+        }
+        resp.headers_mut().insert(
+            "x-ferropod-canary",
+            HeaderValue::from_static(if is_canary { "true" } else { "false" }),
+        );
+        attach_rate_limit_headers(&mut resp, rate_info);
+        resp
+    };
 
     if let Some(bucket) = dep.assets_bucket.as_deref() {
         if method == Method::GET || method == Method::HEAD {
@@ -115,7 +227,7 @@ async fn host_route_handler(
             )
             .await
             {
-                return resp;
+                return finalize_resp(resp);
             }
         }
     }
@@ -128,7 +240,9 @@ async fn host_route_handler(
             .and_then(|s| s.trim().parse::<u64>().ok())
         {
             if content_length > max_worker_req_bytes as u64 {
-                return (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response();
+                return finalize_resp(
+                    (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response(),
+                );
             }
         }
 
@@ -148,10 +262,13 @@ async fn host_route_handler(
             Ok(collected) => collected.to_bytes(),
             Err(err) => {
                 if err.is::<LengthLimitError>() {
-                    return (StatusCode::PAYLOAD_TOO_LARGE, "request body too large")
-                        .into_response();
+                    return finalize_resp(
+                        (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response(),
+                    );
                 }
-                return (StatusCode::BAD_REQUEST, "failed to read request body").into_response();
+                return finalize_resp(
+                    (StatusCode::BAD_REQUEST, "failed to read request body").into_response(),
+                );
             }
         };
         let body_stream =
@@ -169,8 +286,8 @@ async fn host_route_handler(
             .filter(|s| !s.is_empty())
             .map(str::to_string)
             .unwrap_or_else(|| format!("req_{}", Uuid::new_v4().simple()));
-        let ctx = RequestCtx::new(route.project_id, request_id, dep.clone());
-        return match svc.invoke_worker_http(ctx, worker_req).await {
+        let ctx = RequestCtx::new(route.project_id.clone(), request_id, dep.clone());
+        let resp = match svc.invoke_worker_http(ctx, worker_req).await {
             Ok(resp) => {
                 let status = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK);
                 let mut resp_headers = HeaderMap::new();
@@ -209,7 +326,7 @@ async fn host_route_handler(
                         )
                         .await
                         {
-                            return spa_resp;
+                            return finalize_resp(spa_resp);
                         }
                     }
                 }
@@ -236,9 +353,20 @@ async fn host_route_handler(
                 (code, msg).into_response()
             }
         };
+
+        let out = finalize_resp(resp);
+        if !is_canary && route.target_env == TargetEnv::Prod {
+            let is_5xx = out.status().as_u16() >= 500;
+            if svc.health_tracker().record_outcome(&served_dep_id, is_5xx) {
+                let _ = svc
+                    .auto_rollback_deployment(&route.project_id, &served_dep_id)
+                    .await;
+            }
+        }
+        return out;
     }
 
-    (StatusCode::NOT_FOUND, "not found").into_response()
+    finalize_resp((StatusCode::NOT_FOUND, "not found").into_response())
 }
 
 fn build_asset_key(prefix: Option<&str>, req_path: &str) -> String {

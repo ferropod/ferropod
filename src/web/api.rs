@@ -22,8 +22,9 @@ use tokio_stream::StreamExt;
 
 use crate::core::model::{
     AiProviderOpts, Bindings, BucketOpts, CronJobOpts, EnqueueOpts, FerroError, JobStatus,
-    KvNamespaceOpts, LogQuery, ProjectOpts, QueueConfig, SearchFieldSchema, SearchIndexOpts,
-    SearchQueryInput, SqlValue, TargetEnv, TokenScope, UserDbOpts, DEFAULT_KV_TTL_SECS,
+    KvNamespaceOpts, LogQuery, ProjectOpts, QueueConfig, RouteOpts, SearchFieldSchema,
+    SearchIndexOpts, SearchQueryInput, SqlValue, TargetEnv, TokenScope, UserDbOpts,
+    DEFAULT_KV_TTL_SECS,
 };
 use crate::core::service::{CreateDeploymentInput, PlatformService};
 use crate::gateway::guard::{authenticate_caller, ApiError};
@@ -107,6 +108,8 @@ fn default_invoke_path() -> String {
 #[derive(Debug, Deserialize)]
 struct PromoteReq {
     deployment_id: Option<String>,
+    #[serde(default)]
+    verify_health: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -115,6 +118,28 @@ struct UpsertRouteReq {
     project: String,
     #[serde(default = "default_prod")]
     target_env: TargetEnv,
+    proxy_prefix: Option<String>,
+    proxy_upstream: Option<String>,
+    rate_limit_rpm: Option<u32>,
+    basic_auth_user: Option<String>,
+    basic_auth_password: Option<String>,
+    clear_basic_auth: Option<bool>,
+    canary_deployment_id: Option<String>,
+    canary_weight: Option<u8>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateRouteReq {
+    project: Option<String>,
+    target_env: Option<TargetEnv>,
+    proxy_prefix: Option<String>,
+    proxy_upstream: Option<String>,
+    rate_limit_rpm: Option<u32>,
+    basic_auth_user: Option<String>,
+    basic_auth_password: Option<String>,
+    clear_basic_auth: Option<bool>,
+    canary_deployment_id: Option<String>,
+    canary_weight: Option<u8>,
 }
 
 fn default_prod() -> TargetEnv {
@@ -318,7 +343,7 @@ pub fn router() -> Router<PlatformService> {
         .merge(runtime_routes("/runtimes"))
         .merge(runtime_routes("/projects"))
         .route("/routes", get(list_routes).post(upsert_route))
-        .route("/routes/{host}", delete(delete_route))
+        .route("/routes/{host}", patch(update_route).delete(delete_route))
         .route("/tokens", get(list_tokens).post(create_token))
         .route("/tokens/{id}", delete(revoke_token))
         .route("/kv", get(kv_list_namespaces).post(kv_create_namespace))
@@ -1145,7 +1170,12 @@ async fn promote_deployment(
 ) -> Result<impl IntoResponse, ApiError> {
     let caller = authenticate_caller(&svc, &headers, None).await?;
     let dep = svc
-        .promote_deployment(&caller, &id, req.deployment_id.as_deref())
+        .promote_deployment_with_health(
+            &caller,
+            &id,
+            req.deployment_id.as_deref(),
+            req.verify_health,
+        )
         .await
         .map_err(ApiError)?;
     Ok(Json(dep))
@@ -1216,7 +1246,51 @@ async fn upsert_route(
 ) -> Result<impl IntoResponse, ApiError> {
     let caller = authenticate_caller(&svc, &headers, None).await?;
     let r = svc
-        .upsert_route(&caller, &req.host, &req.project, req.target_env)
+        .upsert_route_with_opts(
+            &caller,
+            &req.host,
+            &req.project,
+            req.target_env,
+            RouteOpts {
+                proxy_prefix: req.proxy_prefix,
+                proxy_upstream: req.proxy_upstream,
+                rate_limit_rpm: req.rate_limit_rpm,
+                basic_auth_user: req.basic_auth_user,
+                basic_auth_password: req.basic_auth_password,
+                clear_basic_auth: req.clear_basic_auth,
+                canary_deployment_id: req.canary_deployment_id,
+                canary_weight: req.canary_weight,
+            },
+        )
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(r))
+}
+
+async fn update_route(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Path(host): Path<String>,
+    Json(req): Json<UpdateRouteReq>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let r = svc
+        .update_route_opts(
+            &caller,
+            &host,
+            req.project.as_deref(),
+            req.target_env,
+            RouteOpts {
+                proxy_prefix: req.proxy_prefix,
+                proxy_upstream: req.proxy_upstream,
+                rate_limit_rpm: req.rate_limit_rpm,
+                basic_auth_user: req.basic_auth_user,
+                basic_auth_password: req.basic_auth_password,
+                clear_basic_auth: req.clear_basic_auth,
+                canary_deployment_id: req.canary_deployment_id,
+                canary_weight: req.canary_weight,
+            },
+        )
         .await
         .map_err(ApiError)?;
     Ok(Json(r))

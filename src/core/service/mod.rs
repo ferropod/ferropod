@@ -78,6 +78,60 @@ impl GatewayMetrics {
     }
 }
 
+/// Rolling 5-minute error-rate window used to automatically roll back unhealthy production deployments.
+#[derive(Debug, Default)]
+struct DepHealthWindow {
+    promoted_at_secs: i64,
+    total: u64,
+    errors_5xx: u64,
+    rolled_back: bool,
+}
+
+#[derive(Debug, Default)]
+pub struct DeploymentHealthTracker {
+    windows: std::sync::Mutex<HashMap<String, DepHealthWindow>>,
+}
+
+impl DeploymentHealthTracker {
+    pub fn mark_promoted(&self, dep_id: &str) {
+        let mut map = self.windows.lock().unwrap_or_else(|e| e.into_inner());
+        if map.len() > 256 {
+            let cutoff = Utc::now().timestamp() - 600;
+            map.retain(|_, w| w.promoted_at_secs >= cutoff);
+        }
+        map.insert(
+            dep_id.to_string(),
+            DepHealthWindow {
+                promoted_at_secs: Utc::now().timestamp(),
+                total: 0,
+                errors_5xx: 0,
+                rolled_back: false,
+            },
+        );
+    }
+
+    pub fn record_outcome(&self, dep_id: &str, is_5xx: bool) -> bool {
+        let now = Utc::now().timestamp();
+        let mut map = self.windows.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(win) = map.get_mut(dep_id) else {
+            return false;
+        };
+        if win.rolled_back || (now - win.promoted_at_secs) > 300 {
+            return false;
+        }
+        win.total += 1;
+        if is_5xx {
+            win.errors_5xx += 1;
+        }
+        if win.total >= 10 && win.errors_5xx * 2 >= win.total {
+            win.rolled_back = true;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 /// Unified business orchestration layer shared by REST/Admin, MCP (M3), and Runtime (M2).
 #[derive(Clone)]
 pub struct PlatformService {
@@ -96,6 +150,8 @@ pub struct PlatformService {
     runtime: Arc<dyn WorkerRuntime>,
     metrics: Arc<GatewayMetrics>,
     pub(crate) rate_limiter: Arc<crate::gateway::guard::SlidingWindowRateLimiter>,
+    health_tracker: Arc<DeploymentHealthTracker>,
+    canary_counter: Arc<AtomicU64>,
     ai_cache: Arc<RwLock<HashMap<String, (i64, serde_json::Value)>>>,
     routes: Arc<RwLock<HashMap<String, RouteEntry>>>,
     http_concurrency: Arc<Semaphore>,
@@ -126,6 +182,8 @@ impl PlatformService {
             runtime,
             metrics: Arc::new(GatewayMetrics::default()),
             rate_limiter: Arc::new(crate::gateway::guard::SlidingWindowRateLimiter::default()),
+            health_tracker: Arc::new(DeploymentHealthTracker::default()),
+            canary_counter: Arc::new(AtomicU64::new(0)),
             ai_cache: Arc::new(RwLock::new(HashMap::new())),
             routes: Arc::new(RwLock::new(HashMap::new())),
             http_concurrency,
@@ -142,6 +200,14 @@ impl PlatformService {
 
     pub fn rate_limiter(&self) -> &Arc<crate::gateway::guard::SlidingWindowRateLimiter> {
         &self.rate_limiter
+    }
+
+    pub fn health_tracker(&self) -> &Arc<DeploymentHealthTracker> {
+        &self.health_tracker
+    }
+
+    pub fn next_canary_ticket(&self) -> u64 {
+        self.canary_counter.fetch_add(1, Ordering::Relaxed)
     }
 
     pub fn runtime(&self) -> &Arc<dyn WorkerRuntime> {

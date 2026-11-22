@@ -4208,3 +4208,290 @@ async fn hybrid_vector_search_and_ai_gateway_failover_cache_usage() {
     h1.abort();
     h2.abort();
 }
+
+#[tokio::test]
+async fn dynamic_route_proxy_basic_auth_rate_limit_canary_health_and_rollback() {
+    use axum::routing::get as axum_get;
+
+    let h = setup_harness().await;
+    let app = build_router(h.svc.clone());
+    let tok = Some(h.admin_token.as_str());
+    let pj = |b: Bytes| -> serde_json::Value { serde_json::from_slice(&b).unwrap() };
+
+    // 1. Two independent mock upstreams for dynamic multi-route reverse proxy
+    let up_a = axum::Router::new().route("/api/v1/ping", axum_get(|| async { "upstream-a" }));
+    let la = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addra = la.local_addr().unwrap();
+    let ha = tokio::spawn(async move {
+        let _ = axum::serve(la, up_a).await;
+    });
+
+    let up_b = axum::Router::new().route("/proxy/hello", axum_get(|| async { "upstream-b" }));
+    let lb = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addrb = lb.local_addr().unwrap();
+    let hb = tokio::spawn(async move {
+        let _ = axum::serve(lb, up_b).await;
+    });
+
+    // 2. Create project + two static deployments (v1 prod + v2 canary) for testing Basic Auth, Rate Limit, Canary Split, and Proxy
+    let proj = h
+        .svc
+        .create_project(&h.admin, "edge-gw", None)
+        .await
+        .unwrap();
+    h.svc
+        .create_bucket(&h.admin, "edge-v1", Some(&proj.id), true)
+        .await
+        .unwrap();
+    h.svc
+        .create_bucket(&h.admin, "edge-v2", Some(&proj.id), true)
+        .await
+        .unwrap();
+    let auth = BlobAuth::Caller(&h.admin);
+    h.svc
+        .put_object_stream(
+            &auth,
+            "edge-v1",
+            "index.html",
+            Box::pin(futures_util::stream::once(async {
+                Ok::<_, std::io::Error>(Bytes::from("v1-prod"))
+            })),
+            "text/plain",
+            None,
+        )
+        .await
+        .unwrap();
+    h.svc
+        .put_object_stream(
+            &auth,
+            "edge-v2",
+            "index.html",
+            Box::pin(futures_util::stream::once(async {
+                Ok::<_, std::io::Error>(Bytes::from("v2-canary"))
+            })),
+            "text/plain",
+            None,
+        )
+        .await
+        .unwrap();
+
+    let dep1 = h
+        .svc
+        .create_deployment(
+            &h.admin,
+            &proj.id,
+            CreateDeploymentInput {
+                assets_bucket: Some("edge-v1".into()),
+                target_env: Some(TargetEnv::Prod),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let dep2 = h
+        .svc
+        .create_deployment(
+            &h.admin,
+            &proj.id,
+            CreateDeploymentInput {
+                assets_bucket: Some("edge-v2".into()),
+                target_env: Some(TargetEnv::Preview),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    // Route A: Basic Auth + Rate Limit (5 rpm) + 50% Canary + Dynamic proxy /api
+    let (st_ra, _) = json_req(
+        &app,
+        Method::POST,
+        "/_api/v1/routes",
+        tok,
+        Some(serde_json::json!({
+            "host": "a.edge.test",
+            "project": proj.id,
+            "target_env": "prod",
+            "proxy_prefix": "/api",
+            "proxy_upstream": format!("http://{addra}"),
+            "rate_limit_rpm": 12,
+            "basic_auth_user": "alice",
+            "basic_auth_password": "secret",
+            "canary_deployment_id": dep2.id,
+            "canary_weight": 50
+        })),
+    )
+    .await;
+    assert_eq!(st_ra, StatusCode::OK);
+
+    // Route B: second host proxying /proxy to upstream B
+    let (st_rb, _) = json_req(
+        &app,
+        Method::POST,
+        "/_api/v1/routes",
+        tok,
+        Some(serde_json::json!({
+            "host": "b.edge.test",
+            "project": proj.id,
+            "target_env": "prod",
+            "proxy_prefix": "/proxy",
+            "proxy_upstream": format!("http://{addrb}"),
+            "rate_limit_rpm": 2
+        })),
+    )
+    .await;
+    assert_eq!(st_rb, StatusCode::OK);
+
+    // Verify Basic Auth challenge without credentials
+    let no_auth = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .header(header::HOST, "a.edge.test")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(no_auth.status(), StatusCode::UNAUTHORIZED);
+
+    // With valid Basic Auth, 10 requests produce deterministic 5 prod + 5 canary split
+    use base64::Engine as _;
+    let basic_hdr = format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode("alice:secret")
+    );
+    let mut canary_count = 0usize;
+    let mut prod_count = 0usize;
+    for _ in 0..10 {
+        let r = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header(header::HOST, "a.edge.test")
+                    .header(header::AUTHORIZATION, &basic_hdr)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        if r.headers().get("x-ferropod-canary").unwrap() == "true" {
+            canary_count += 1;
+        } else {
+            prod_count += 1;
+        }
+    }
+    assert_eq!(canary_count, 5);
+    assert_eq!(prod_count, 5);
+
+    // Verify dynamic proxy on Route A (/api/v1/ping)
+    let pa = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/ping")
+                .header(header::HOST, "a.edge.test")
+                .header(header::AUTHORIZATION, &basic_hdr)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(pa.status(), StatusCode::OK);
+    let pa_body = pa.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&pa_body[..], b"upstream-a");
+
+    // Verify dynamic proxy on Route B + rate_limit_rpm = 2 enforcement (3rd request -> 429)
+    for idx in 0..3 {
+        let pb = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/proxy/hello")
+                    .header(header::HOST, "b.edge.test")
+                    .header("x-forwarded-for", "203.0.113.10")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        if idx < 2 {
+            assert_eq!(pb.status(), StatusCode::OK);
+            let pb_body = pb.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(&pb_body[..], b"upstream-b");
+        } else {
+            assert_eq!(pb.status(), StatusCode::TOO_MANY_REQUESTS);
+            assert!(pb.headers().contains_key("retry-after"));
+        }
+    }
+
+    // 3. Health-check gated promote & 5xx spike auto-rollback using DeploymentHealthTracker
+    let _ = dep1;
+    let (st_prom, prom_b) = json_req(
+        &app,
+        Method::POST,
+        &format!("/_api/v1/projects/{}/promote", proj.id),
+        tok,
+        Some(serde_json::json!({ "deployment_id": dep2.id, "verify_health": true })),
+    )
+    .await;
+    assert_eq!(st_prom, StatusCode::OK);
+    assert_eq!(pj(prom_b)["id"], dep2.id);
+
+    // Simulate 10 outcomes with >= 50% 5xx -> tracker triggers automatic rollback to dep1
+    let mut should_rb = false;
+    for i in 0..10 {
+        if h.svc.health_tracker().record_outcome(&dep2.id, i < 6) {
+            should_rb = true;
+        }
+    }
+    assert!(should_rb);
+    let rolled = h
+        .svc
+        .auto_rollback_deployment(&proj.id, &dep2.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(rolled.id, dep1.id);
+
+    // Also test Wasm Worker health check gate rejecting unhealthy WAT worker (if it traps)
+    let broken_wat = r#"(module (memory (export "memory") 1))"#;
+    let wp = h
+        .svc
+        .create_project(&h.admin, "hc-worker", None)
+        .await
+        .unwrap();
+    let (ap_bad, _, _) = h
+        .svc
+        .upload_project_artifact(&h.admin, &wp.id, "bad.wat", Bytes::from(broken_wat))
+        .await
+        .unwrap();
+    let bad_dep = h
+        .svc
+        .create_deployment(
+            &h.admin,
+            &wp.id,
+            CreateDeploymentInput {
+                artifact_path: Some(ap_bad),
+                target_env: Some(TargetEnv::Preview),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let (st_hc_fail, _) = json_req(
+        &app,
+        Method::POST,
+        &format!("/_api/v1/projects/{}/promote", wp.id),
+        tok,
+        Some(serde_json::json!({ "deployment_id": bad_dep.id, "verify_health": true })),
+    )
+    .await;
+    assert_eq!(st_hc_fail, StatusCode::BAD_REQUEST);
+
+    ha.abort();
+    hb.abort();
+}

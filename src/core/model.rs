@@ -111,9 +111,10 @@ pub struct Deployment {
 }
 
 /// Target environment for a routed hostname.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TargetEnv {
+    #[default]
     Prod,
     Preview,
 }
@@ -137,12 +138,41 @@ impl TargetEnv {
     }
 }
 
-/// Hostname-to-project route mapping.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Hostname-to-project route mapping with optional reverse proxy, rate limit, Basic Auth, and canary split.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Route {
     pub host: String,
     pub project_id: String,
     pub target_env: TargetEnv,
+    #[serde(default)]
+    pub proxy_prefix: Option<String>,
+    #[serde(default)]
+    pub proxy_upstream: Option<String>,
+    #[serde(default)]
+    pub rate_limit_rpm: Option<u32>,
+    #[serde(default)]
+    pub basic_auth_user: Option<String>,
+    #[serde(default, skip_serializing)]
+    pub basic_auth_pass_hash: Option<String>,
+    #[serde(default)]
+    pub basic_auth_enabled: bool,
+    #[serde(default)]
+    pub canary_deployment_id: Option<String>,
+    #[serde(default)]
+    pub canary_weight: u8,
+}
+
+/// Optional route policy overrides for creating/updating a hostname route.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RouteOpts {
+    pub proxy_prefix: Option<String>,
+    pub proxy_upstream: Option<String>,
+    pub rate_limit_rpm: Option<u32>,
+    pub basic_auth_user: Option<String>,
+    pub basic_auth_password: Option<String>,
+    pub clear_basic_auth: Option<bool>,
+    pub canary_deployment_id: Option<String>,
+    pub canary_weight: Option<u8>,
 }
 
 /// Cached entry in the hot in-memory routing table.
@@ -152,6 +182,13 @@ pub struct RouteEntry {
     pub project_id: String,
     pub target_env: TargetEnv,
     pub active_deployment: Option<Deployment>,
+    pub proxy_prefix: Option<String>,
+    pub proxy_upstream: Option<String>,
+    pub rate_limit_rpm: Option<u32>,
+    pub basic_auth_user: Option<String>,
+    pub basic_auth_pass_hash: Option<String>,
+    pub canary_deployment: Option<Deployment>,
+    pub canary_weight: u8,
 }
 
 /// API / MCP access token metadata (raw secret is never persisted).
