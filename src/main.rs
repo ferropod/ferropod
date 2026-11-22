@@ -163,6 +163,28 @@ enum Commands {
         #[arg(long, default_value = "admin")]
         scope: String,
     },
+    /// Scaffold a starter FerroPod project with ferropod.toml and migrations.
+    Init {
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+        #[arg(long)]
+        name: String,
+        #[arg(long, default_value = "static")]
+        template: String,
+    },
+    /// Deploy declaratively from ferropod.toml (provisioning, migrations, assets, worker, routes).
+    Deploy {
+        #[arg(long, default_value = "ferropod.toml")]
+        config: PathBuf,
+        #[arg(long, env = "FERROPOD_URL", default_value = "http://127.0.0.1:8080")]
+        url: String,
+        #[arg(long, env = "FERROPOD_TOKEN")]
+        token: String,
+        #[arg(long, default_value = "prod")]
+        env: String,
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -561,6 +583,39 @@ WantedBy=multi-user.target"
                 }
             }
             let _ = svc.flush_and_checkpoint().await;
+        }
+        Commands::Init {
+            dir,
+            name,
+            template,
+        } => {
+            let files = ferropod::deploy_cli::init_project(&dir, &name, &template)?;
+            println!(
+                "Initialized FerroPod project '{}' (template={}):",
+                name, template
+            );
+            for f in files {
+                println!("  + {}", f.display());
+            }
+        }
+        Commands::Deploy {
+            config,
+            url,
+            token,
+            env,
+            dry_run,
+        } => {
+            let target_env = ferropod::core::model::TargetEnv::parse(&env)?;
+            let summary =
+                ferropod::deploy_cli::deploy_manifest(ferropod::deploy_cli::DeployOptions {
+                    config_path: config,
+                    server_url: url,
+                    token,
+                    target_env,
+                    dry_run,
+                })
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&summary)?);
         }
     }
     Ok(())

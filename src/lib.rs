@@ -1,5 +1,6 @@
 pub mod config;
 pub mod core;
+pub mod deploy_cli;
 pub mod dispatcher;
 pub mod gateway;
 pub mod runtime;

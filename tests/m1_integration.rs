@@ -3917,3 +3917,61 @@ async fn openapi_llms_txt_and_lean_mcp_server_end_to_end() {
     assert_eq!(st_ro, StatusCode::OK);
     assert_eq!(pj(ro_b)["result"]["isError"], true);
 }
+
+#[tokio::test]
+async fn declarative_cli_init_and_idempotent_deploy_with_migrations() {
+    let h = setup_harness().await;
+    let app = build_router(h.svc.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let proj_dir = tempfile::tempdir().unwrap();
+    let files = ferropod::deploy_cli::init_project(proj_dir.path(), "cli-demo", "static").unwrap();
+    assert!(files
+        .iter()
+        .any(|p| p.file_name().and_then(|n| n.to_str()) == Some("ferropod.toml")));
+
+    let opts = ferropod::deploy_cli::DeployOptions {
+        config_path: proj_dir.path().join("ferropod.toml"),
+        server_url: format!("http://{addr}"),
+        token: h.admin_token.clone(),
+        target_env: TargetEnv::Prod,
+        dry_run: false,
+    };
+
+    // First deploy uploads index.html, applies 0001_init.sql, creates deployment & route
+    let first = ferropod::deploy_cli::deploy_manifest(opts.clone())
+        .await
+        .unwrap();
+    assert!(first.deployment_id.is_some());
+    assert_eq!(first.assets_uploaded, 1);
+    assert_eq!(first.assets_skipped, 0);
+    assert_eq!(first.migrations_applied, 1);
+    assert_eq!(first.routes_bound, 1);
+
+    // Verify deployed static site responds via its route host
+    let http = reqwest::Client::new();
+    let site_resp = http
+        .get(format!("http://{addr}/"))
+        .header("Host", "cli-demo.local")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(site_resp.status(), reqwest::StatusCode::OK);
+    assert!(site_resp
+        .text()
+        .await
+        .unwrap()
+        .contains("Hello from cli-demo"));
+
+    // Second deploy skips unchanged static assets (SHA-256) and already-applied migration
+    let second = ferropod::deploy_cli::deploy_manifest(opts).await.unwrap();
+    assert_eq!(second.assets_uploaded, 0);
+    assert_eq!(second.assets_skipped, 1);
+    assert_eq!(second.migrations_applied, 0);
+
+    server_handle.abort();
+}
