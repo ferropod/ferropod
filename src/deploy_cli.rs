@@ -123,67 +123,67 @@ pub struct DeploySummary {
     pub planned_actions: Vec<String>,
 }
 
-/// Scaffold a starter FerroPod project (`static`, `rust`, or `ts`).
+/// Scaffold a starter FerroPod project (`static`, `rust`, or `ts`), refusing to overwrite existing files.
 pub fn init_project(dir: &Path, name: &str, template: &str) -> Result<Vec<PathBuf>> {
+    init_project_with_force(dir, name, template, false)
+}
+
+/// Scaffold a starter FerroPod project (`static`, `rust`, or `ts`).
+/// When `force` is `false`, aborts before writing anything if any target file already exists.
+pub fn init_project_with_force(
+    dir: &Path,
+    name: &str,
+    template: &str,
+    force: bool,
+) -> Result<Vec<PathBuf>> {
     let clean_name = name.trim();
     if clean_name.is_empty() {
         anyhow::bail!("project name cannot be empty");
     }
-    std::fs::create_dir_all(dir)?;
-    let mut created = Vec::new();
 
     let bucket_name = format!("{clean_name}-assets");
     let db_name = format!("{clean_name}-db");
     let kv_name = format!("{clean_name}-kv");
 
-    std::fs::create_dir_all(dir.join("public"))?;
-    let index_path = dir.join("public/index.html");
-    std::fs::write(
-        &index_path,
-        format!(
-            "<!doctype html>\n<html lang=\"en\">\n<head><meta charset=\"utf-8\"><title>{clean_name}</title></head>\n<body><h1>Hello from {clean_name}</h1><p>Deployed declaratively with ferropod.toml.</p></body>\n</html>\n"
+    let mut planned: Vec<(PathBuf, String)> = vec![
+        (
+            dir.join("public/index.html"),
+            format!(
+                "<!doctype html>\n<html lang=\"en\">\n<head><meta charset=\"utf-8\"><title>{clean_name}</title></head>\n<body><h1>Hello from {clean_name}</h1><p>Deployed declaratively with ferropod.toml.</p></body>\n</html>\n"
+            ),
         ),
-    )?;
-    created.push(index_path);
-
-    std::fs::create_dir_all(dir.join("migrations"))?;
-    let mig_path = dir.join("migrations/0001_init.sql");
-    std::fs::write(
-        &mig_path,
-        "CREATE TABLE IF NOT EXISTS notes (\n  id INTEGER PRIMARY KEY AUTOINCREMENT,\n  title TEXT NOT NULL,\n  created_at INTEGER NOT NULL\n);\n",
-    )?;
-    created.push(mig_path);
+        (
+            dir.join("migrations/0001_init.sql"),
+            "CREATE TABLE IF NOT EXISTS notes (\n  id INTEGER PRIMARY KEY AUTOINCREMENT,\n  title TEXT NOT NULL,\n  created_at INTEGER NOT NULL\n);\n"
+                .to_string(),
+        ),
+    ];
 
     let worker_block = match template {
         "static" => String::new(),
         "rust" => {
-            std::fs::create_dir_all(dir.join("src"))?;
-            let cargo_path = dir.join("Cargo.toml");
-            std::fs::write(
-                &cargo_path,
+            planned.push((
+                dir.join("Cargo.toml"),
                 format!(
                     "[package]\nname = \"{clean_name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n"
                 ),
-            )?;
-            created.push(cargo_path);
-            let lib_path = dir.join("src/lib.rs");
-            std::fs::write(
-                &lib_path,
-                "// Build with: cargo build --target wasm32-wasip2 --release\n// Export wasi:http/incoming-handler using ferropod:platform@0.2.0 bindings.\n",
-            )?;
-            created.push(lib_path);
+            ));
+            planned.push((
+                dir.join("src/lib.rs"),
+                "// Build with: cargo build --target wasm32-wasip2 --release\n// Export wasi:http/incoming-handler using ferropod:platform@0.2.0 bindings.\n"
+                    .to_string(),
+            ));
             format!(
                 "\n[worker]\nartifact = \"target/wasm32-wasip2/release/{}.wasm\"\n",
                 clean_name.replace('-', "_")
             )
         }
         "ts" => {
-            let ts_path = dir.join("worker.ts");
-            std::fs::write(
-                &ts_path,
-                "// Bundle to wasm32-wasip2 component using jco / ComponentizeJS.\nexport const handler = {\n  fetch(req: Request): Response {\n    return new Response(JSON.stringify({ ok: true, url: req.url }), {\n      headers: { \"content-type\": \"application/json\" },\n    });\n  },\n};\n",
-            )?;
-            created.push(ts_path);
+            planned.push((
+                dir.join("worker.ts"),
+                "// Bundle to wasm32-wasip2 component using jco / ComponentizeJS.\nexport const handler = {\n  fetch(req: Request): Response {\n    return new Response(JSON.stringify({ ok: true, url: req.url }), {\n      headers: { \"content-type\": \"application/json\" },\n    });\n  },\n};\n"
+                    .to_string(),
+            ));
             "\n[worker]\nartifact = \"dist/worker.wasm\"\n".to_string()
         }
         other => anyhow::bail!("unknown template '{other}', expected 'static', 'rust', or 'ts'"),
@@ -193,8 +193,31 @@ pub fn init_project(dir: &Path, name: &str, template: &str) -> Result<Vec<PathBu
     let toml_body = format!(
         "[app]\nname = \"{clean_name}\"\ndescription = \"FerroPod {template} application\"\nhealth_check_path = \"/_healthz\"\n{worker_block}\n[assets]\nbucket = \"{bucket_name}\"\ndir = \"public\"\nspa_fallback = true\npublic_read = true\n\n[bindings.kv]\nCACHE = \"{kv_name}\"\n\n[bindings.db]\nDB = \"{db_name}\"\n\n[[migrations]]\ndb = \"{db_name}\"\ndir = \"migrations\"\n\n[[routes]]\nhost = \"{clean_name}.local\"\nenv = \"prod\"\n"
     );
-    std::fs::write(&manifest_path, toml_body)?;
-    created.push(manifest_path);
+    planned.push((manifest_path, toml_body));
+
+    if !force {
+        let existing: Vec<String> = planned
+            .iter()
+            .filter(|(p, _)| p.exists())
+            .map(|(p, _)| p.display().to_string())
+            .collect();
+        if !existing.is_empty() {
+            anyhow::bail!(
+                "refusing to overwrite existing file(s): {} (pass --force to overwrite)",
+                existing.join(", ")
+            );
+        }
+    }
+
+    std::fs::create_dir_all(dir)?;
+    let mut created = Vec::with_capacity(planned.len());
+    for (path, content) in planned {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, content)?;
+        created.push(path);
+    }
 
     Ok(created)
 }
@@ -228,6 +251,162 @@ fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     hex::encode(hasher.finalize())
+}
+
+/// Build an immutable content-addressed remote filename for a worker artifact
+/// (e.g. `app.wasm` -> `app-a1b2c3d4e5f6.wasm`) so new deployments never overwrite old releases.
+fn versioned_artifact_name(local_path: &Path, bytes: &[u8]) -> String {
+    let digest = sha256_hex(bytes);
+    let short = &digest[..12];
+    let stem = local_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("worker");
+    match local_path.extension().and_then(|e| e.to_str()) {
+        Some(ext) if !ext.is_empty() => format!("{stem}-{short}.{ext}"),
+        _ => format!("{stem}-{short}"),
+    }
+}
+
+/// Compute a deterministic release prefix from the sorted `(rel_key, sha256)` file set
+/// so static deployments are isolated per content version while identical deploys stay deduplicated.
+fn compute_release_prefix(base_prefix: Option<&str>, file_digests: &[(String, String)]) -> String {
+    let mut hasher = Sha256::new();
+    for (key, digest) in file_digests {
+        hasher.update(key.as_bytes());
+        hasher.update(b":");
+        hasher.update(digest.as_bytes());
+        hasher.update(b"\n");
+    }
+    let rel_id = &hex::encode(hasher.finalize())[..12];
+    match base_prefix
+        .map(|p| p.trim_matches('/'))
+        .filter(|p| !p.is_empty())
+    {
+        Some(pfx) => format!("{pfx}/_releases/rel_{rel_id}"),
+        None => format!("_releases/rel_{rel_id}"),
+    }
+}
+
+/// Split a SQL migration script into individual executable statements.
+/// Handles single/double/backtick/bracket quotes, `--` and `/* */` comments,
+/// and `BEGIN ... END` blocks (such as SQLite/Turso triggers) without splitting inside them.
+pub fn split_sql_statements(sql: &str) -> Vec<String> {
+    let bytes = sql.as_bytes();
+    let len = bytes.len();
+    let mut i = 0usize;
+    let mut start = 0usize;
+    let mut out = Vec::new();
+    let mut begin_depth: usize = 0;
+
+    while i < len {
+        let b = bytes[i];
+        // Line comment: -- ... \n
+        if b == b'-' && i + 1 < len && bytes[i + 1] == b'-' {
+            i += 2;
+            while i < len && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        // Block comment: /* ... */
+        if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i = (i + 2).min(len);
+            continue;
+        }
+        // Quoted strings / identifiers
+        if b == b'\'' || b == b'"' || b == b'`' {
+            let quote = b;
+            i += 1;
+            while i < len {
+                if bytes[i] == quote {
+                    if i + 1 < len && bytes[i + 1] == quote {
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if b == b'[' {
+            i += 1;
+            while i < len && bytes[i] != b']' {
+                i += 1;
+            }
+            if i < len {
+                i += 1;
+            }
+            continue;
+        }
+        // Track BEGIN / END keywords for trigger blocks
+        if b.is_ascii_alphabetic() || b == b'_' {
+            let word_start = i;
+            while i < len && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                i += 1;
+            }
+            let word = &sql[word_start..i];
+            if word.eq_ignore_ascii_case("BEGIN") {
+                begin_depth += 1;
+            } else if word.eq_ignore_ascii_case("END") && begin_depth > 0 {
+                begin_depth -= 1;
+            }
+            continue;
+        }
+        if b == b';' && begin_depth == 0 {
+            let chunk = sql[start..i].trim();
+            if has_executable_sql(chunk) {
+                out.push(chunk.to_string());
+            }
+            i += 1;
+            start = i;
+            continue;
+        }
+        i += 1;
+    }
+
+    let tail = sql[start..].trim();
+    if has_executable_sql(tail) {
+        out.push(tail.to_string());
+    }
+    out
+}
+
+fn has_executable_sql(chunk: &str) -> bool {
+    let bytes = chunk.as_bytes();
+    let len = bytes.len();
+    let mut i = 0usize;
+    while i < len {
+        let b = bytes[i];
+        if b.is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        if b == b'-' && i + 1 < len && bytes[i + 1] == b'-' {
+            i += 2;
+            while i < len && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i = (i + 2).min(len);
+            continue;
+        }
+        return true;
+    }
+    false
 }
 
 fn encode_blob_key(key: &str) -> String {
@@ -412,31 +591,66 @@ pub async fn deploy_manifest(opts: DeployOptions) -> Result<DeploySummary> {
         }
     }
 
-    for (b_name, public_read) in manifest
-        .bindings
-        .bucket
-        .values()
-        .map(|n| (n.as_str(), false))
-        .chain(
-            manifest
-                .assets
-                .as_ref()
-                .map(|a| (a.bucket.as_str(), a.public_read)),
+    // Provision & reconcile buckets (deduplicated; update public_read if existing bucket differs)
+    let mut desired_buckets: HashMap<&str, bool> = HashMap::new();
+    for b_name in manifest.bindings.bucket.values() {
+        desired_buckets.entry(b_name.as_str()).or_insert(false);
+    }
+    if let Some(a) = &manifest.assets {
+        desired_buckets.insert(a.bucket.as_str(), a.public_read);
+    }
+    if !desired_buckets.is_empty() {
+        let existing_buckets_val = check_status(
+            client
+                .get(format!("{server}/_api/v1/buckets"))
+                .header("Authorization", &auth_header)
+                .send()
+                .await?,
+            "list buckets",
         )
-    {
-        let resp = client
-            .post(format!("{server}/_api/v1/buckets"))
-            .header("Authorization", &auth_header)
-            .json(&serde_json::json!({
-                "name": b_name,
-                "project_id": project_id,
-                "public_read": public_read,
-                "group": manifest.app.group,
-            }))
-            .send()
-            .await?;
-        if resp.status() != StatusCode::CONFLICT {
-            check_status(resp, &format!("create bucket '{b_name}'")).await?;
+        .await?;
+        let mut existing_buckets: HashMap<String, (Option<String>, bool)> = HashMap::new();
+        if let Some(arr) = existing_buckets_val.as_array() {
+            for item in arr {
+                if let Some(name) = item["name"].as_str() {
+                    let owner = item["project_id"].as_str().map(str::to_string);
+                    let pub_read = item["public_read"].as_bool().unwrap_or(false);
+                    existing_buckets.insert(name.to_string(), (owner, pub_read));
+                }
+            }
+        }
+        for (b_name, public_read) in desired_buckets {
+            if let Some((owner_pid, cur_pub)) = existing_buckets.get(b_name) {
+                if let Some(other) = owner_pid.as_deref() {
+                    if other != project_id {
+                        anyhow::bail!(
+                            "bucket '{b_name}' belongs to another project ('{other}'), refusing to use it"
+                        );
+                    }
+                }
+                if *cur_pub != public_read {
+                    let resp = client
+                        .patch(format!("{server}/_api/v1/buckets/{b_name}"))
+                        .header("Authorization", &auth_header)
+                        .json(&serde_json::json!({ "public_read": public_read }))
+                        .send()
+                        .await?;
+                    check_status(resp, &format!("update bucket '{b_name}' public_read")).await?;
+                }
+            } else {
+                let resp = client
+                    .post(format!("{server}/_api/v1/buckets"))
+                    .header("Authorization", &auth_header)
+                    .json(&serde_json::json!({
+                        "name": b_name,
+                        "project_id": project_id,
+                        "public_read": public_read,
+                        "group": manifest.app.group,
+                    }))
+                    .send()
+                    .await?;
+                check_status(resp, &format!("create bucket '{b_name}'")).await?;
+            }
         }
     }
 
@@ -449,14 +663,16 @@ pub async fn deploy_manifest(opts: DeployOptions) -> Result<DeploySummary> {
         "list dbs",
     )
     .await?;
-    let mut db_ids: HashMap<String, String> = HashMap::new();
+    let mut existing_dbs: HashMap<String, (String, Option<String>)> = HashMap::new();
     if let Some(arr) = existing_dbs_val.as_array() {
         for item in arr {
             if let (Some(name), Some(id)) = (item["name"].as_str(), item["id"].as_str()) {
-                db_ids.insert(name.to_string(), id.to_string());
+                let owner = item["project_id"].as_str().map(str::to_string);
+                existing_dbs.insert(name.to_string(), (id.to_string(), owner));
             }
         }
     }
+    let mut db_ids: HashMap<String, String> = HashMap::new();
     for db_name in manifest
         .bindings
         .db
@@ -464,7 +680,19 @@ pub async fn deploy_manifest(opts: DeployOptions) -> Result<DeploySummary> {
         .map(String::as_str)
         .chain(manifest.migrations.iter().map(|m| m.db.as_str()))
     {
-        if !db_ids.contains_key(db_name) {
+        if db_ids.contains_key(db_name) {
+            continue;
+        }
+        if let Some((id, owner_pid)) = existing_dbs.get(db_name) {
+            if let Some(other) = owner_pid.as_deref() {
+                if other != project_id {
+                    anyhow::bail!(
+                        "database '{db_name}' belongs to another project ('{other}'), refusing to bind or run migrations"
+                    );
+                }
+            }
+            db_ids.insert(db_name.to_string(), id.clone());
+        } else {
             let resp = client
                 .post(format!("{server}/_api/v1/dbs"))
                 .header("Authorization", &auth_header)
@@ -478,6 +706,10 @@ pub async fn deploy_manifest(opts: DeployOptions) -> Result<DeploySummary> {
             let created = check_status(resp, &format!("create db '{db_name}'")).await?;
             if let Some(id) = created["id"].as_str() {
                 db_ids.insert(db_name.to_string(), id.to_string());
+                existing_dbs.insert(
+                    db_name.to_string(),
+                    (id.to_string(), Some(project_id.clone())),
+                );
             }
         }
     }
@@ -573,16 +805,26 @@ pub async fn deploy_manifest(opts: DeployOptions) -> Result<DeploySummary> {
                 continue;
             }
             let sql_body = std::fs::read_to_string(&path)?;
+            let stmts = split_sql_statements(&sql_body);
+            if stmts.is_empty() {
+                anyhow::bail!(
+                    "migration file '{}' contains no executable SQL statements",
+                    version
+                );
+            }
             let now = Utc::now().timestamp();
+            let mut batch: Vec<serde_json::Value> = stmts
+                .into_iter()
+                .map(|s| serde_json::json!({ "sql": s, "params": [] }))
+                .collect();
+            batch.push(serde_json::json!({
+                "sql": "INSERT INTO _ferropod_migrations (version, applied_at) VALUES (?1, ?2)",
+                "params": [version, now]
+            }));
             let resp = client
                 .post(format!("{server}/_api/v1/dbs/{db_id}/execute"))
                 .header("Authorization", &auth_header)
-                .json(&serde_json::json!({
-                    "statements": [
-                        { "sql": sql_body, "params": [] },
-                        { "sql": "INSERT INTO _ferropod_migrations (version, applied_at) VALUES (?1, ?2)", "params": [version, now] }
-                    ]
-                }))
+                .json(&serde_json::json!({ "statements": batch }))
                 .send()
                 .await?;
             check_status(resp, &format!("apply migration '{version}'")).await?;
@@ -590,7 +832,7 @@ pub async fn deploy_manifest(opts: DeployOptions) -> Result<DeploySummary> {
         }
     }
 
-    // 4. Incremental static assets upload (SHA-256 diffing)
+    // 4. Incremental static assets upload isolated per content-addressed release prefix
     let mut assets_bucket_out = None;
     let mut assets_prefix_out = None;
     let mut spa_fallback_out = false;
@@ -602,9 +844,27 @@ pub async fn deploy_manifest(opts: DeployOptions) -> Result<DeploySummary> {
             let local_dir = base_dir.join(dir_rel);
             let mut local_files = Vec::new();
             collect_files_recursive(&local_dir, &local_dir, &mut local_files)?;
+            local_files.sort_by(|a, b| a.0.cmp(&b.0));
+
+            let mut prepared: Vec<(String, PathBuf, Vec<u8>, String)> =
+                Vec::with_capacity(local_files.len());
+            let mut file_digests: Vec<(String, String)> = Vec::with_capacity(local_files.len());
+            for (rel_key, full_path) in local_files {
+                let data = std::fs::read(&full_path)?;
+                let digest = sha256_hex(&data);
+                file_digests.push((rel_key.clone(), digest.clone()));
+                prepared.push((rel_key, full_path, data, digest));
+            }
+
+            let release_prefix = compute_release_prefix(assets.prefix.as_deref(), &file_digests);
+            assets_prefix_out = Some(release_prefix.clone());
 
             let existing_resp = client
-                .get(format!("{server}/_blob/{}?limit=1000", assets.bucket))
+                .get(format!(
+                    "{server}/_blob/{}?prefix={}/&limit=1000",
+                    assets.bucket,
+                    encode_blob_key(&release_prefix)
+                ))
                 .header("Authorization", &auth_header)
                 .send()
                 .await?;
@@ -618,19 +878,8 @@ pub async fn deploy_manifest(opts: DeployOptions) -> Result<DeploySummary> {
                 }
             }
 
-            let prefix_clean = assets
-                .prefix
-                .as_deref()
-                .map(|p| p.trim_matches('/'))
-                .filter(|p| !p.is_empty());
-
-            for (rel_key, full_path) in local_files {
-                let remote_key = match prefix_clean {
-                    Some(pfx) => format!("{pfx}/{rel_key}"),
-                    None => rel_key,
-                };
-                let data = std::fs::read(&full_path)?;
-                let digest = sha256_hex(&data);
+            for (rel_key, full_path, data, digest) in prepared {
+                let remote_key = format!("{release_prefix}/{rel_key}");
                 if remote_hashes.get(&remote_key).is_some_and(|s| s == &digest) {
                     summary.assets_skipped += 1;
                     continue;
@@ -653,7 +902,7 @@ pub async fn deploy_manifest(opts: DeployOptions) -> Result<DeploySummary> {
         }
     }
 
-    // 5. Upload worker artifact if declared
+    // 5. Upload worker artifact with immutable content-addressed filename
     let mut artifact_path_out = None;
     if let Some(worker) = &manifest.worker {
         let local_artifact = base_dir.join(&worker.artifact);
@@ -663,13 +912,10 @@ pub async fn deploy_manifest(opts: DeployOptions) -> Result<DeploySummary> {
                 local_artifact.display()
             )
         })?;
-        let fname = local_artifact
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("worker.wasm");
+        let versioned_name = versioned_artifact_name(&local_artifact, &bytes);
         let resp = client
             .put(format!(
-                "{server}/_api/v1/projects/{project_id}/artifacts/{fname}"
+                "{server}/_api/v1/projects/{project_id}/artifacts/{versioned_name}"
             ))
             .header("Authorization", &auth_header)
             .header("Content-Type", "application/octet-stream")
@@ -771,4 +1017,69 @@ pub async fn deploy_manifest(opts: DeployOptions) -> Result<DeploySummary> {
     }
 
     Ok(summary)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn init_refuses_to_overwrite_existing_files_without_force() {
+        let dir = tempfile::tempdir().unwrap();
+        let cargo = dir.path().join("Cargo.toml");
+        std::fs::write(&cargo, "# keep me\n").unwrap();
+
+        let err = init_project(dir.path(), "my-app", "rust").unwrap_err();
+        assert!(err.to_string().contains("refusing to overwrite"));
+        // Verify original file untouched and no partial files created
+        assert_eq!(std::fs::read_to_string(&cargo).unwrap(), "# keep me\n");
+        assert!(!dir.path().join("ferropod.toml").exists());
+
+        // With force = true, scaffolding succeeds
+        let files = init_project_with_force(dir.path(), "my-app", "rust", true).unwrap();
+        assert!(files.iter().any(|p| p.ends_with("ferropod.toml")));
+        assert!(std::fs::read_to_string(&cargo)
+            .unwrap()
+            .contains("name = \"my-app\""));
+    }
+
+    #[test]
+    fn split_sql_statements_handles_multi_comments_quotes_and_triggers() {
+        let script = r#"
+            -- leading comment; not a statement
+            CREATE TABLE users (id INTEGER PRIMARY KEY, bio TEXT DEFAULT 'a;b''c');
+            /* block ; comment */
+            CREATE INDEX idx_users_id ON users(id);
+            CREATE TRIGGER trg_users AFTER INSERT ON users
+            BEGIN
+                INSERT INTO audit(msg) VALUES ('inserted;ok');
+            END;
+            -- trailing comment only
+        "#;
+        let stmts = split_sql_statements(script);
+        assert_eq!(stmts.len(), 3);
+        assert!(stmts[0].contains("CREATE TABLE users"));
+        assert!(stmts[0].contains("'a;b''c'"));
+        assert!(stmts[1].contains("CREATE INDEX idx_users_id"));
+        assert!(stmts[2].contains("CREATE TRIGGER trg_users"));
+        assert!(stmts[2].contains("END"));
+    }
+
+    #[test]
+    fn versioned_artifact_and_release_prefix_are_content_addressed() {
+        let a1 = versioned_artifact_name(Path::new("target/app.wasm"), b"v1-bytes");
+        let a2 = versioned_artifact_name(Path::new("target/app.wasm"), b"v2-bytes");
+        assert_ne!(a1, a2);
+        assert!(a1.starts_with("app-") && a1.ends_with(".wasm"));
+        assert!(a2.starts_with("app-") && a2.ends_with(".wasm"));
+
+        let d1 = vec![("index.html".to_string(), sha256_hex(b"prod"))];
+        let d2 = vec![("index.html".to_string(), sha256_hex(b"preview"))];
+        let p1 = compute_release_prefix(Some("web"), &d1);
+        let p1_again = compute_release_prefix(Some("web"), &d1);
+        let p2 = compute_release_prefix(Some("web"), &d2);
+        assert_eq!(p1, p1_again);
+        assert_ne!(p1, p2);
+        assert!(p1.starts_with("web/_releases/rel_"));
+    }
 }

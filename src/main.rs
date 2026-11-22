@@ -171,6 +171,9 @@ enum Commands {
         name: String,
         #[arg(long, default_value = "static")]
         template: String,
+        /// Overwrite existing files in the target directory.
+        #[arg(long, default_value_t = false)]
+        force: bool,
     },
     /// Deploy declaratively from ferropod.toml (provisioning, migrations, assets, worker, routes).
     Deploy {
@@ -588,8 +591,10 @@ WantedBy=multi-user.target"
             dir,
             name,
             template,
+            force,
         } => {
-            let files = ferropod::deploy_cli::init_project(&dir, &name, &template)?;
+            let files =
+                ferropod::deploy_cli::init_project_with_force(&dir, &name, &template, force)?;
             println!(
                 "Initialized FerroPod project '{}' (template={}):",
                 name, template
