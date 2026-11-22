@@ -4,12 +4,12 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use crate::core::model::{
-    ApiToken, BucketMeta, BucketOpts, ByteRange, ByteStream, CronJob, DbFtsIndexMeta, Deployment,
-    EnqueueOpts, Job, JobOutcome, JobStatus, KvKeyMeta, KvNamespaceMeta, KvNamespaceOpts, KvValue,
-    LogEntry, LogQuery, ObjectMeta, Project, ProjectOpts, QueryResult, QueueConfig, QueueStats,
-    RequestCtx, Result, Route, RouteEntry, SearchFieldSchema, SearchIndexMeta, SearchIndexOpts,
-    SearchQueryInput, SearchQueryResult, SqlValue, TargetEnv, TokenScope, UserDbMeta, UserDbOpts,
-    WorkerHttpRequest, WorkerHttpResponse,
+    AiProviderRecord, AiUsageRecord, ApiToken, BucketMeta, BucketOpts, ByteRange, ByteStream,
+    CronJob, DbFtsIndexMeta, Deployment, EnqueueOpts, FerroError, Job, JobOutcome, JobStatus,
+    KvKeyMeta, KvNamespaceMeta, KvNamespaceOpts, KvValue, LogEntry, LogQuery, ObjectMeta, Project,
+    ProjectOpts, QueryResult, QueueConfig, QueueStats, RequestCtx, Result, Route, RouteEntry,
+    SearchFieldSchema, SearchIndexMeta, SearchIndexOpts, SearchQueryInput, SearchQueryResult,
+    SqlValue, TargetEnv, TokenScope, UserDbMeta, UserDbOpts, WorkerHttpRequest, WorkerHttpResponse,
 };
 
 #[async_trait]
@@ -159,6 +159,38 @@ pub trait RegistryStore: Send + Sync {
     async fn create_db_fts_index(&self, meta: DbFtsIndexMeta) -> Result<DbFtsIndexMeta>;
     async fn list_db_fts_indexes(&self, db_id: &str) -> Result<Vec<DbFtsIndexMeta>>;
     async fn delete_db_fts_index(&self, db_id: &str, name: &str) -> Result<()>;
+
+    async fn upsert_ai_provider(&self, rec: AiProviderRecord) -> Result<AiProviderRecord> {
+        let _ = rec;
+        Err(FerroError::NotImplemented("ai provider store".into()))
+    }
+    async fn get_ai_provider(&self, name: &str) -> Result<Option<AiProviderRecord>> {
+        let _ = name;
+        Ok(None)
+    }
+    async fn list_ai_providers(&self) -> Result<Vec<AiProviderRecord>> {
+        Ok(Vec::new())
+    }
+    async fn delete_ai_provider(&self, name: &str) -> Result<bool> {
+        let _ = name;
+        Ok(false)
+    }
+    async fn record_ai_usage(&self, rec: &AiUsageRecord) -> Result<()> {
+        let _ = rec;
+        Ok(())
+    }
+    async fn list_ai_usage(
+        &self,
+        provider_name: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<AiUsageRecord>> {
+        let _ = (provider_name, limit);
+        Ok(Vec::new())
+    }
+    async fn sum_ai_tokens_since(&self, provider_name: &str, since_ms: i64) -> Result<u64> {
+        let _ = (provider_name, since_ms);
+        Ok(0)
+    }
 }
 
 #[async_trait]

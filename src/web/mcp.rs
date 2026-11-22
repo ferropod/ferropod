@@ -755,6 +755,8 @@ async fn run_tool(
                                 sort: None,
                                 limit: Some(limit),
                                 facets: HashMap::new(),
+                                vector: None,
+                                alpha: None,
                             },
                         )
                         .await?;

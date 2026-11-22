@@ -41,6 +41,8 @@ CREATE TABLE IF NOT EXISTS search_docs (
     doc_id TEXT NOT NULL,
     doc_json TEXT NOT NULL,
     updated_at INTEGER NOT NULL,
+    embedding BLOB,
+    embedding_dim INTEGER,
     PRIMARY KEY (index_id, doc_id)
 );
 CREATE INDEX IF NOT EXISTS idx_search_docs_updated
@@ -48,7 +50,7 @@ CREATE INDEX IF NOT EXISTS idx_search_docs_updated
 "#;
 
 /// Turso-backed persistent search index and document store (`search.db`) using bounded-memory
-/// BM25-like + CJK bigram + optional Levenshtein fuzzy scoring.
+/// BM25-like + CJK bigram + optional Levenshtein fuzzy + vector cosine hybrid scoring.
 #[derive(Clone)]
 pub struct TursoSearchStore {
     db: Database,
@@ -64,6 +66,8 @@ impl TursoSearchStore {
             .map_err(map_turso_err)?;
         ensure_column(&conn, "search_indexes", "resource_group", "TEXT").await?;
         ensure_column(&conn, "search_indexes", "description", "TEXT").await?;
+        ensure_column(&conn, "search_docs", "embedding", "BLOB").await?;
+        ensure_column(&conn, "search_docs", "embedding_dim", "INTEGER").await?;
         Ok(Self {
             db,
             db_path: path.to_path_buf(),
@@ -375,6 +379,60 @@ pub fn score_json_document(doc: &serde_json::Value, query: &str, fuzzy: bool) ->
     ((score * norm) * 100.0).round() / 100.0
 }
 
+fn extract_doc_embedding(doc: &serde_json::Value) -> Result<Option<(Vec<u8>, usize)>> {
+    let Some(val) = doc.get("embedding") else {
+        return Ok(None);
+    };
+    if val.is_null() {
+        return Ok(None);
+    }
+    let arr = val.as_array().ok_or_else(|| {
+        FerroError::InvalidArgument("'embedding' must be an array of floats".into())
+    })?;
+    if arr.is_empty() || arr.len() > 4096 {
+        return Err(FerroError::InvalidArgument(
+            "embedding length must be between 1 and 4096".into(),
+        ));
+    }
+    let mut encoded = Vec::with_capacity(arr.len() * 4);
+    for (idx, item) in arr.iter().enumerate() {
+        let f = item.as_f64().ok_or_else(|| {
+            FerroError::InvalidArgument(format!("embedding[{idx}] must be a number"))
+        })?;
+        if !f.is_finite() {
+            return Err(FerroError::InvalidArgument(format!(
+                "embedding[{idx}] must be finite"
+            )));
+        }
+        encoded.extend_from_slice(&(f as f32).to_le_bytes());
+    }
+    Ok(Some((encoded, arr.len())))
+}
+
+fn cosine_similarity_bytes(query_vec: &[f32], stored_le: &[u8]) -> f64 {
+    if query_vec.is_empty() || stored_le.len() != query_vec.len() * 4 {
+        return 0.0;
+    }
+    let mut dot = 0.0f64;
+    let mut q_norm = 0.0f64;
+    let mut d_norm = 0.0f64;
+    let (chunks, _) = stored_le.as_chunks::<4>();
+    for (q, &chunk) in query_vec.iter().zip(chunks) {
+        let qf = *q as f64;
+        let df = f32::from_le_bytes(chunk) as f64;
+        if !qf.is_finite() || !df.is_finite() {
+            return 0.0;
+        }
+        dot += qf * df;
+        q_norm += qf * qf;
+        d_norm += df * df;
+    }
+    if q_norm <= 0.0 || d_norm <= 0.0 {
+        return 0.0;
+    }
+    (dot / (q_norm.sqrt() * d_norm.sqrt())).clamp(-1.0, 1.0)
+}
+
 #[async_trait]
 impl SearchStore for TursoSearchStore {
     async fn create_index_with_opts(
@@ -657,6 +715,7 @@ impl SearchStore for TursoSearchStore {
         };
         let now = Utc::now().timestamp_millis();
         obj.insert("updated_at".into(), serde_json::json!(now));
+        let embedding_pair = extract_doc_embedding(&doc)?;
         let doc_json = serde_json::to_string(&doc)
             .map_err(|e| FerroError::Internal(anyhow::anyhow!("encode search doc: {e}")))?;
         let added_bytes = (doc_json.len() * 4).max(512) as i64;
@@ -669,18 +728,36 @@ impl SearchStore for TursoSearchStore {
             let idx_s = idx_s.clone();
             let doc_id_s = doc_id_s.clone();
             let json_s = json_s.clone();
+            let embedding_pair = embedding_pair.clone();
             async move {
                 let mut conn = db.connect()?;
                 let tx = conn
                     .transaction_with_behavior(TransactionBehavior::Concurrent)
                     .await?;
+                let emb_blob = embedding_pair
+                    .as_ref()
+                    .map(|(b, _)| TursoValue::Blob(b.clone()))
+                    .unwrap_or(TursoValue::Null);
+                let emb_dim = embedding_pair
+                    .as_ref()
+                    .map(|(_, d)| TursoValue::Integer(*d as i64))
+                    .unwrap_or(TursoValue::Null);
                 tx.execute(
-                    "INSERT INTO search_docs (index_id, doc_id, doc_json, updated_at)
-                     VALUES (?1, ?2, ?3, ?4)
+                    "INSERT INTO search_docs (index_id, doc_id, doc_json, updated_at, embedding, embedding_dim)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                      ON CONFLICT(index_id, doc_id) DO UPDATE SET
                         doc_json = excluded.doc_json,
-                        updated_at = excluded.updated_at",
-                    (idx_s.as_str(), doc_id_s.as_str(), json_s.as_str(), now),
+                        updated_at = excluded.updated_at,
+                        embedding = COALESCE(excluded.embedding, search_docs.embedding),
+                        embedding_dim = COALESCE(excluded.embedding_dim, search_docs.embedding_dim)",
+                    vec![
+                        TursoValue::Text(idx_s.clone()),
+                        TursoValue::Text(doc_id_s.clone()),
+                        TursoValue::Text(json_s.clone()),
+                        TursoValue::Integer(now),
+                        emb_blob,
+                        emb_dim,
+                    ],
                 )
                 .await?;
                 tx.execute(
@@ -742,12 +819,15 @@ impl SearchStore for TursoSearchStore {
         let conn = connect_db(&self.db)?;
         let mut rows = conn
             .query(
-                "SELECT doc_json FROM search_docs WHERE index_id = ?1 ORDER BY updated_at DESC, doc_id ASC",
+                "SELECT doc_json, embedding FROM search_docs WHERE index_id = ?1 ORDER BY updated_at DESC, doc_id ASC",
                 [meta.id.as_str()],
             )
             .await
             .map_err(map_turso_err)?;
         let sort_updated_desc = input.sort.as_deref() == Some("updated_desc");
+        let query_vec = input.vector.as_deref().filter(|v| !v.is_empty());
+        let alpha = input.alpha.unwrap_or(0.5).clamp(0.0, 1.0);
+        let has_text_query = !input.query.trim().is_empty();
         let mut facets: HashMap<String, HashMap<String, usize>> = HashMap::new();
         let mut hits: Vec<SearchHit> = Vec::with_capacity(limit);
         let mut total = 0usize;
@@ -756,7 +836,31 @@ impl SearchStore for TursoSearchStore {
             let raw: String = row.get(0).map_err(map_turso_err)?;
             let doc: serde_json::Value = serde_json::from_str(&raw)
                 .map_err(|e| FerroError::Internal(anyhow::anyhow!("decode search doc: {e}")))?;
-            let score = score_json_document(&doc, &input.query, input.fuzzy);
+            let score = match query_vec {
+                Some(qv) => {
+                    let emb_opt = match row.get_value(1).map_err(map_turso_err)? {
+                        TursoValue::Blob(b) => Some(b),
+                        _ => None,
+                    };
+                    let vec_score = emb_opt
+                        .as_deref()
+                        .map(|b| cosine_similarity_bytes(qv, b).max(0.0))
+                        .unwrap_or(0.0);
+                    if !has_text_query {
+                        (vec_score * 1000.0).round() / 1000.0
+                    } else {
+                        let bm25_raw = score_json_document(&doc, &input.query, input.fuzzy);
+                        if bm25_raw <= 0.0 && vec_score <= 0.0 {
+                            0.0
+                        } else {
+                            let bm25_norm = bm25_raw / (bm25_raw + 3.0);
+                            let blended = (1.0 - alpha) * bm25_norm + alpha * vec_score;
+                            (blended * 1000.0).round() / 1000.0
+                        }
+                    }
+                }
+                None => score_json_document(&doc, &input.query, input.fuzzy),
+            };
             if score <= 0.0 {
                 continue;
             }

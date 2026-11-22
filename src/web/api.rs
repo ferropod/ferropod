@@ -21,9 +21,9 @@ use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 
 use crate::core::model::{
-    Bindings, BucketOpts, CronJobOpts, EnqueueOpts, FerroError, JobStatus, KvNamespaceOpts,
-    LogQuery, ProjectOpts, QueueConfig, SearchFieldSchema, SearchIndexOpts, SearchQueryInput,
-    SqlValue, TargetEnv, TokenScope, UserDbOpts, DEFAULT_KV_TTL_SECS,
+    AiProviderOpts, Bindings, BucketOpts, CronJobOpts, EnqueueOpts, FerroError, JobStatus,
+    KvNamespaceOpts, LogQuery, ProjectOpts, QueueConfig, SearchFieldSchema, SearchIndexOpts,
+    SearchQueryInput, SqlValue, TargetEnv, TokenScope, UserDbOpts, DEFAULT_KV_TTL_SECS,
 };
 use crate::core::service::{CreateDeploymentInput, PlatformService};
 use crate::gateway::guard::{authenticate_caller, ApiError};
@@ -368,6 +368,15 @@ pub fn router() -> Router<PlatformService> {
         .route("/search/{id}/query", post(search_query_index))
         .route("/logs", get(logs_query))
         .route("/logs/stream", get(logs_stream))
+        .route(
+            "/ai/providers",
+            get(ai_list_providers).post(ai_create_provider),
+        )
+        .route(
+            "/ai/providers/{name}",
+            patch(ai_update_provider).delete(ai_delete_provider),
+        )
+        .route("/ai/usage", get(ai_usage_summary))
 }
 
 async fn list_resource_groups(
@@ -2298,4 +2307,174 @@ async fn system_update_apply(
     }
 
     Ok(Json(res))
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateAiProviderReq {
+    name: String,
+    base_url: String,
+    api_key: Option<String>,
+    default_model: Option<String>,
+    fallback_provider: Option<String>,
+    rate_limit_rpm: Option<u32>,
+    cache_ttl_secs: Option<u64>,
+    monthly_token_budget: Option<u64>,
+    enabled: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateAiProviderReq {
+    base_url: Option<String>,
+    api_key: Option<String>,
+    default_model: Option<String>,
+    fallback_provider: Option<String>,
+    rate_limit_rpm: Option<u32>,
+    cache_ttl_secs: Option<u64>,
+    monthly_token_budget: Option<u64>,
+    enabled: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AiUsageQuery {
+    provider: Option<String>,
+    limit: Option<usize>,
+}
+
+async fn ai_list_providers(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    Ok(Json(
+        svc.list_ai_providers(&caller).await.map_err(ApiError)?,
+    ))
+}
+
+async fn ai_create_provider(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Json(req): Json<CreateAiProviderReq>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let saved = svc
+        .create_ai_provider(
+            &caller,
+            &req.name,
+            AiProviderOpts {
+                name: None,
+                base_url: Some(req.base_url),
+                api_key: req.api_key,
+                default_model: req.default_model,
+                fallback_provider: req.fallback_provider,
+                rate_limit_rpm: req.rate_limit_rpm,
+                cache_ttl_secs: req.cache_ttl_secs,
+                monthly_token_budget: req.monthly_token_budget,
+                enabled: req.enabled,
+            },
+        )
+        .await
+        .map_err(ApiError)?;
+    Ok((StatusCode::CREATED, Json(saved)))
+}
+
+async fn ai_update_provider(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Json(req): Json<UpdateAiProviderReq>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let updated = svc
+        .update_ai_provider(
+            &caller,
+            &name,
+            AiProviderOpts {
+                name: None,
+                base_url: req.base_url,
+                api_key: req.api_key,
+                default_model: req.default_model,
+                fallback_provider: req.fallback_provider,
+                rate_limit_rpm: req.rate_limit_rpm,
+                cache_ttl_secs: req.cache_ttl_secs,
+                monthly_token_budget: req.monthly_token_budget,
+                enabled: req.enabled,
+            },
+        )
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(updated))
+}
+
+async fn ai_delete_provider(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    svc.delete_ai_provider(&caller, &name)
+        .await
+        .map_err(ApiError)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn ai_usage_summary(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Query(q): Query<AiUsageQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let summary = svc
+        .list_ai_usage(&caller, q.provider.as_deref(), q.limit.unwrap_or(50))
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(summary))
+}
+
+async fn ai_proxy_inner(
+    svc: PlatformService,
+    headers: HeaderMap,
+    subpath: &str,
+    body: serde_json::Value,
+) -> Result<axum::response::Response, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let requested = headers
+        .get("x-ferropod-provider")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .or_else(|| {
+            body.get("provider")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        });
+    let res = svc
+        .ai_proxy(&caller, requested.as_deref(), subpath, body)
+        .await
+        .map_err(ApiError)?;
+    let status = StatusCode::from_u16(res.status).unwrap_or(StatusCode::OK);
+    let cache_hdr = if res.cached { "HIT" } else { "MISS" };
+    Ok((
+        status,
+        [
+            ("x-ferropod-cache", cache_hdr.to_string()),
+            ("x-ferropod-provider", res.provider_name),
+        ],
+        Json(res.body),
+    )
+        .into_response())
+}
+
+pub async fn ai_chat_completions(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> Result<axum::response::Response, ApiError> {
+    ai_proxy_inner(svc, headers, "chat/completions", body).await
+}
+
+pub async fn ai_embeddings(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> Result<axum::response::Response, ApiError> {
+    ai_proxy_inner(svc, headers, "embeddings", body).await
 }

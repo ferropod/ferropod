@@ -731,6 +731,10 @@ pub struct SearchQueryInput {
     pub limit: Option<usize>,
     #[serde(default)]
     pub facets: HashMap<String, String>,
+    #[serde(default)]
+    pub vector: Option<Vec<f32>>,
+    #[serde(default)]
+    pub alpha: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -772,4 +776,75 @@ pub struct DbFtsQueryResult {
     pub rows: Vec<DbFtsHit>,
     pub sql: String,
     pub took_ms: f64,
+}
+
+/// Public metadata for a configured AI Gateway upstream provider (never exposes API keys).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiProvider {
+    pub id: String,
+    pub name: String,
+    pub base_url: String,
+    pub has_api_key: bool,
+    #[serde(default)]
+    pub default_model: Option<String>,
+    #[serde(default)]
+    pub fallback_provider: Option<String>,
+    #[serde(default)]
+    pub rate_limit_rpm: Option<u32>,
+    #[serde(default)]
+    pub cache_ttl_secs: u64,
+    #[serde(default)]
+    pub monthly_token_budget: Option<u64>,
+    pub enabled: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// Internal persisted AI provider record containing optional AES-GCM encrypted API key.
+#[derive(Debug, Clone)]
+pub struct AiProviderRecord {
+    pub provider: AiProvider,
+    pub api_key_nonce: Option<Vec<u8>>,
+    pub api_key_ciphertext: Option<Vec<u8>>,
+}
+
+/// Options for creating or updating an AI Gateway provider.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AiProviderOpts {
+    pub name: Option<String>,
+    pub base_url: Option<String>,
+    pub api_key: Option<String>,
+    pub default_model: Option<String>,
+    pub fallback_provider: Option<String>,
+    pub rate_limit_rpm: Option<u32>,
+    pub cache_ttl_secs: Option<u64>,
+    pub monthly_token_budget: Option<u64>,
+    pub enabled: Option<bool>,
+}
+
+/// Usage audit record emitted by the AI Gateway proxy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiUsageRecord {
+    pub id: i64,
+    pub provider_name: String,
+    pub project_id: Option<String>,
+    pub model: Option<String>,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+    pub cached: bool,
+    pub status: u16,
+    pub latency_ms: u64,
+    pub created_at: i64,
+}
+
+/// Aggregated AI Gateway token usage summary.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AiUsageSummary {
+    pub total_requests: usize,
+    pub cached_requests: usize,
+    pub total_prompt_tokens: u64,
+    pub total_completion_tokens: u64,
+    pub total_tokens: u64,
+    pub recent: Vec<AiUsageRecord>,
 }

@@ -1,3 +1,4 @@
+mod ai;
 mod blob;
 mod cron;
 mod db;
@@ -94,6 +95,8 @@ pub struct PlatformService {
     search: Arc<dyn SearchStore>,
     runtime: Arc<dyn WorkerRuntime>,
     metrics: Arc<GatewayMetrics>,
+    pub(crate) rate_limiter: Arc<crate::gateway::guard::SlidingWindowRateLimiter>,
+    ai_cache: Arc<RwLock<HashMap<String, (i64, serde_json::Value)>>>,
     routes: Arc<RwLock<HashMap<String, RouteEntry>>>,
     http_concurrency: Arc<Semaphore>,
     route_refresh_lock: Arc<Mutex<()>>,
@@ -122,6 +125,8 @@ impl PlatformService {
             search,
             runtime,
             metrics: Arc::new(GatewayMetrics::default()),
+            rate_limiter: Arc::new(crate::gateway::guard::SlidingWindowRateLimiter::default()),
+            ai_cache: Arc::new(RwLock::new(HashMap::new())),
             routes: Arc::new(RwLock::new(HashMap::new())),
             http_concurrency,
             route_refresh_lock: Arc::new(Mutex::new(())),
@@ -133,6 +138,10 @@ impl PlatformService {
 
     pub fn metrics(&self) -> &Arc<GatewayMetrics> {
         &self.metrics
+    }
+
+    pub fn rate_limiter(&self) -> &Arc<crate::gateway::guard::SlidingWindowRateLimiter> {
+        &self.rate_limiter
     }
 
     pub fn runtime(&self) -> &Arc<dyn WorkerRuntime> {

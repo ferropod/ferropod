@@ -1797,6 +1797,57 @@ impl wit_search::Host for HostState {
                     sort: None,
                     limit: Some(limit as usize),
                     facets: HashMap::new(),
+                    vector: None,
+                    alpha: None,
+                },
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(wit_search::SearchResult {
+            hits: res
+                .hits
+                .into_iter()
+                .map(|h| {
+                    let id = h
+                        .doc
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                        .unwrap_or_default();
+                    wit_search::Hit {
+                        id,
+                        score: h.score,
+                        doc_json: h.doc.to_string(),
+                    }
+                })
+                .collect(),
+            total: res.total as u32,
+            took_ms: res.took_ms,
+        })
+    }
+
+    async fn vector_query(
+        &mut self,
+        binding: String,
+        query: String,
+        vector: Vec<f32>,
+        alpha: f64,
+        limit: u32,
+    ) -> std::result::Result<wit_search::SearchResult, String> {
+        let index_ref = self.resolve_search(&binding)?;
+        let res = self
+            .svc
+            .query_search_index(
+                &self.caller,
+                index_ref,
+                SearchQueryInput {
+                    query,
+                    fuzzy: true,
+                    sort: None,
+                    limit: Some(limit as usize),
+                    facets: HashMap::new(),
+                    vector: Some(vector),
+                    alpha: Some(alpha),
                 },
             )
             .await

@@ -3975,3 +3975,236 @@ async fn declarative_cli_init_and_idempotent_deploy_with_migrations() {
 
     server_handle.abort();
 }
+
+#[tokio::test]
+async fn hybrid_vector_search_and_ai_gateway_failover_cache_usage() {
+    use axum::routing::post as axum_post;
+
+    let h = setup_harness().await;
+    let app = build_router(h.svc.clone());
+    let tok = Some(h.admin_token.as_str());
+    let pj = |b: Bytes| -> serde_json::Value { serde_json::from_slice(&b).unwrap() };
+
+    // 1. Vector & Hybrid BM25+Cosine search
+    let (st_idx, idx_b) = json_req(
+        &app,
+        Method::POST,
+        "/_api/v1/search",
+        tok,
+        Some(serde_json::json!({ "name": "rag-docs" })),
+    )
+    .await;
+    assert_eq!(st_idx, StatusCode::CREATED);
+    let idx_id = pj(idx_b)["id"].as_str().unwrap().to_string();
+
+    for doc in [
+        serde_json::json!({
+            "id": "d1",
+            "title": "Rust Memory Model",
+            "body": "Ownership and borrowing in Rust",
+            "embedding": [0.95, 0.05, 0.0]
+        }),
+        serde_json::json!({
+            "id": "d2",
+            "title": "Cooking Pasta",
+            "body": "Boil salted water",
+            "embedding": [0.0, 0.1, 0.99]
+        }),
+    ] {
+        let (st_u, _) = json_req(
+            &app,
+            Method::POST,
+            &format!("/_api/v1/search/{idx_id}/docs"),
+            tok,
+            Some(doc),
+        )
+        .await;
+        assert_eq!(st_u, StatusCode::CREATED);
+    }
+
+    // Vector-only query near [1, 0, 0] returns d1 on top
+    let (st_vq, vq_b) = json_req(
+        &app,
+        Method::POST,
+        &format!("/_api/v1/search/{idx_id}/query"),
+        tok,
+        Some(serde_json::json!({
+            "query": "",
+            "vector": [1.0, 0.0, 0.0],
+            "limit": 2
+        })),
+    )
+    .await;
+    assert_eq!(st_vq, StatusCode::OK);
+    let vq = pj(vq_b);
+    assert_eq!(vq["hits"][0]["doc"]["id"], "d1");
+
+    // Hybrid query combining BM25 + vector
+    let (st_hq, hq_b) = json_req(
+        &app,
+        Method::POST,
+        &format!("/_api/v1/search/{idx_id}/query"),
+        tok,
+        Some(serde_json::json!({
+            "query": "Rust",
+            "vector": [1.0, 0.0, 0.0],
+            "alpha": 0.5,
+            "limit": 2
+        })),
+    )
+    .await;
+    assert_eq!(st_hq, StatusCode::OK);
+    assert_eq!(pj(hq_b)["hits"][0]["doc"]["id"], "d1");
+
+    // 2. Built-in AI Gateway: primary returns 500 -> automatic failover to backup + response caching + RPM limit
+    let fail_app = axum::Router::new().route(
+        "/v1/chat/completions",
+        axum_post(|| async {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({ "error": "upstream overloaded" })),
+            )
+        }),
+    );
+    let l1 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr1 = l1.local_addr().unwrap();
+    let h1 = tokio::spawn(async move {
+        let _ = axum::serve(l1, fail_app).await;
+    });
+
+    let ok_hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let ok_hits_srv = ok_hits.clone();
+    let ok_app = axum::Router::new().route(
+        "/v1/chat/completions",
+        axum_post(move || {
+            let hits = ok_hits_srv.clone();
+            async move {
+                hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                axum::Json(serde_json::json!({
+                    "id": "chatcmpl-1",
+                    "model": "gpt-fallback",
+                    "choices": [{ "message": { "role": "assistant", "content": "hi from fallback" } }],
+                    "usage": { "prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20 }
+                }))
+            }
+        }),
+    );
+    let l2 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr2 = l2.local_addr().unwrap();
+    let h2 = tokio::spawn(async move {
+        let _ = axum::serve(l2, ok_app).await;
+    });
+
+    // Register backup provider first, then primary pointing to fallback
+    let (st_fb, _) = json_req(
+        &app,
+        Method::POST,
+        "/_api/v1/ai/providers",
+        tok,
+        Some(serde_json::json!({
+            "name": "backup",
+            "base_url": format!("http://{addr2}/v1"),
+            "api_key": "sk-backup",
+            "default_model": "gpt-fallback"
+        })),
+    )
+    .await;
+    assert_eq!(st_fb, StatusCode::CREATED);
+
+    let (st_pri, _) = json_req(
+        &app,
+        Method::POST,
+        "/_api/v1/ai/providers",
+        tok,
+        Some(serde_json::json!({
+            "name": "primary",
+            "base_url": format!("http://{addr1}/v1"),
+            "api_key": "sk-primary",
+            "fallback_provider": "backup",
+            "rate_limit_rpm": 2,
+            "cache_ttl_secs": 60
+        })),
+    )
+    .await;
+    assert_eq!(st_pri, StatusCode::CREATED);
+
+    // Confirm API key is never leaked in list response
+    let (st_plist, plist_b) = json_req(&app, Method::GET, "/_api/v1/ai/providers", tok, None).await;
+    assert_eq!(st_plist, StatusCode::OK);
+    let plist_str = String::from_utf8(plist_b.to_vec()).unwrap();
+    assert!(!plist_str.contains("sk-primary"));
+
+    // Request 1 hits primary (500) -> fails over to backup (200), X-Ferropod-Cache: MISS
+    let r1 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/_ai/v1/chat/completions")
+                .header(header::AUTHORIZATION, format!("Bearer {}", h.admin_token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-ferropod-provider", "primary")
+                .body(Body::from(
+                    serde_json::json!({ "messages": [{ "role": "user", "content": "hello" }] })
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r1.status(), StatusCode::OK);
+    assert_eq!(r1.headers().get("x-ferropod-cache").unwrap(), "MISS");
+    assert_eq!(r1.headers().get("x-ferropod-provider").unwrap(), "backup");
+
+    // Request 2 with identical body hits response cache without contacting upstream
+    let r2 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/_ai/v1/chat/completions")
+                .header(header::AUTHORIZATION, format!("Bearer {}", h.admin_token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-ferropod-provider", "primary")
+                .body(Body::from(
+                    serde_json::json!({ "messages": [{ "role": "user", "content": "hello" }] })
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r2.status(), StatusCode::OK);
+    assert_eq!(r2.headers().get("x-ferropod-cache").unwrap(), "HIT");
+    assert_eq!(ok_hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    // Request 3 hits primary RPM limit (2) -> 429
+    let r3 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/_ai/v1/chat/completions")
+                .header(header::AUTHORIZATION, format!("Bearer {}", h.admin_token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-ferropod-provider", "primary")
+                .body(Body::from(
+                    serde_json::json!({ "messages": [{ "role": "user", "content": "hello3" }] })
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r3.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    // Verify token usage accounting
+    let (st_usage, usage_b) = json_req(&app, Method::GET, "/_api/v1/ai/usage", tok, None).await;
+    assert_eq!(st_usage, StatusCode::OK);
+    let usage = pj(usage_b);
+    assert_eq!(usage["total_tokens"], 20);
+    assert_eq!(usage["cached_requests"], 1);
+
+    h1.abort();
+    h2.abort();
+}

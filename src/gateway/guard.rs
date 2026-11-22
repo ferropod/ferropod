@@ -1,6 +1,7 @@
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use axum::{
     extract::{Request, State},
@@ -15,6 +16,50 @@ use uuid::Uuid;
 
 use crate::core::model::{Caller, FerroError, LogEntry};
 use crate::core::service::{GatewayMetrics, PlatformService};
+
+/// Bounded sliding-window per-key rate limiter (60-second window).
+#[derive(Debug, Default)]
+pub struct SlidingWindowRateLimiter {
+    windows: Mutex<HashMap<String, VecDeque<Instant>>>,
+}
+
+impl SlidingWindowRateLimiter {
+    pub fn check_and_record(&self, key: &str, max_per_min: u32) -> (bool, u32, u64) {
+        if max_per_min == 0 {
+            return (true, 0, 0);
+        }
+        let now = Instant::now();
+        let cutoff = now - Duration::from_secs(60);
+        let mut map = self.windows.lock().unwrap_or_else(|e| e.into_inner());
+        if map.len() > 10_000 && !map.contains_key(key) {
+            map.retain(|_, q| q.back().is_some_and(|ts| *ts > cutoff));
+            if map.len() > 10_000 {
+                if let Some(first_key) = map.keys().next().cloned() {
+                    map.remove(&first_key);
+                }
+            }
+        }
+        let q = map.entry(key.to_string()).or_default();
+        while q.front().is_some_and(|ts| *ts <= cutoff) {
+            q.pop_front();
+        }
+        let limit = max_per_min as usize;
+        if q.len() >= limit {
+            let reset_secs = q
+                .front()
+                .map(|oldest| {
+                    (Duration::from_secs(60) - now.saturating_duration_since(*oldest))
+                        .as_secs()
+                        .max(1)
+                })
+                .unwrap_or(60);
+            return (false, 0, reset_secs);
+        }
+        q.push_back(now);
+        let remaining = limit.saturating_sub(q.len()) as u32;
+        (true, remaining, 60)
+    }
+}
 
 #[derive(Debug, Serialize)]
 struct ErrorBody {

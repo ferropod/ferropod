@@ -160,6 +160,37 @@ CREATE TABLE IF NOT EXISTS user_db_fts_indexes (
     created_at INTEGER NOT NULL,
     PRIMARY KEY (db_id, name)
 );
+
+CREATE TABLE IF NOT EXISTS ai_providers (
+    id TEXT PRIMARY KEY,
+    name TEXT UNIQUE NOT NULL,
+    base_url TEXT NOT NULL,
+    api_key_nonce BLOB,
+    api_key_ciphertext BLOB,
+    default_model TEXT,
+    fallback_provider TEXT,
+    rate_limit_rpm INTEGER,
+    cache_ttl_secs INTEGER NOT NULL DEFAULT 0,
+    monthly_token_budget INTEGER,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ai_usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider_name TEXT NOT NULL,
+    project_id TEXT,
+    model TEXT,
+    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    total_tokens INTEGER NOT NULL DEFAULT 0,
+    cached INTEGER NOT NULL DEFAULT 0,
+    status INTEGER NOT NULL,
+    latency_ms INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ai_usage_provider_ts ON ai_usage (provider_name, created_at DESC);
 "#;
 
 /// Turso MVCC store for `core.db` (control-plane metadata: projects, routes, secrets, tokens, KV namespace
@@ -268,6 +299,23 @@ pub(crate) fn opt_i64(row: &turso::Row, idx: usize) -> Result<Option<i64>> {
 pub(crate) fn opt_text_param(s: Option<String>) -> TursoValue {
     match s {
         Some(v) => TursoValue::Text(v),
+        None => TursoValue::Null,
+    }
+}
+
+pub(crate) fn opt_blob(row: &turso::Row, idx: usize) -> Result<Option<Vec<u8>>> {
+    match row.get_value(idx).map_err(map_turso_err)? {
+        TursoValue::Null => Ok(None),
+        TursoValue::Blob(b) => Ok(Some(b)),
+        other => Err(FerroError::Internal(anyhow::anyhow!(
+            "unexpected column {idx} type for blob: {other:?}"
+        ))),
+    }
+}
+
+pub(crate) fn opt_blob_param(b: Option<Vec<u8>>) -> TursoValue {
+    match b {
+        Some(v) => TursoValue::Blob(v),
         None => TursoValue::Null,
     }
 }

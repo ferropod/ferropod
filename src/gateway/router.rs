@@ -46,6 +46,11 @@ pub fn build_router(svc: PlatformService) -> Router {
         )
         .nest("/_blob", blob_router)
         .nest("/_api/v1", web::api::router())
+        .route(
+            "/_ai/v1/chat/completions",
+            post(web::api::ai_chat_completions),
+        )
+        .route("/_ai/v1/embeddings", post(web::api::ai_embeddings))
         .route("/_mcp", post(web::mcp::mcp_http_handler))
         .route("/mcp", post(web::mcp::mcp_http_handler))
         .route("/_panel", get(web::admin_index))

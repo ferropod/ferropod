@@ -3,13 +3,13 @@ use chrono::Utc;
 use turso::Value as TursoValue;
 
 use crate::core::model::{
-    CronJob, DbFtsIndexMeta, FerroError, KvNamespaceMeta, KvNamespaceOpts, Result, UserDbMeta,
-    UserDbOpts, DEFAULT_KV_TTL_SECS,
+    AiProvider, AiProviderRecord, AiUsageRecord, CronJob, DbFtsIndexMeta, FerroError,
+    KvNamespaceMeta, KvNamespaceOpts, Result, UserDbMeta, UserDbOpts, DEFAULT_KV_TTL_SECS,
 };
 use crate::core::traits::RegistryStore;
 use crate::storage::tx::{connect_db, map_turso_err, with_retry};
 
-use super::{opt_i64, opt_text, opt_text_param, TursoCoreStore};
+use super::{opt_blob, opt_blob_param, opt_i64, opt_text, opt_text_param, TursoCoreStore};
 
 const SELECT_USER_DB: &str =
     "SELECT id, name, project_id, created_at, resource_group, description, max_rows, max_size_mb, foreign_keys, read_only FROM user_databases";
@@ -549,4 +549,220 @@ impl RegistryStore for TursoCoreStore {
         .await?;
         Ok(())
     }
+
+    async fn upsert_ai_provider(&self, rec: AiProviderRecord) -> Result<AiProviderRecord> {
+        let r = rec.clone();
+        with_retry(|| {
+            let db = self.db.clone();
+            let r = r.clone();
+            async move {
+                let conn = db.connect()?;
+                let p = &r.provider;
+                conn.execute(
+                    "INSERT INTO ai_providers (id, name, base_url, api_key_nonce, api_key_ciphertext, default_model, fallback_provider, rate_limit_rpm, cache_ttl_secs, monthly_token_budget, enabled, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                     ON CONFLICT(name) DO UPDATE SET
+                        base_url = excluded.base_url,
+                        api_key_nonce = COALESCE(excluded.api_key_nonce, ai_providers.api_key_nonce),
+                        api_key_ciphertext = COALESCE(excluded.api_key_ciphertext, ai_providers.api_key_ciphertext),
+                        default_model = excluded.default_model,
+                        fallback_provider = excluded.fallback_provider,
+                        rate_limit_rpm = excluded.rate_limit_rpm,
+                        cache_ttl_secs = excluded.cache_ttl_secs,
+                        monthly_token_budget = excluded.monthly_token_budget,
+                        enabled = excluded.enabled,
+                        updated_at = excluded.updated_at",
+                    vec![
+                        TursoValue::Text(p.id.clone()),
+                        TursoValue::Text(p.name.clone()),
+                        TursoValue::Text(p.base_url.clone()),
+                        opt_blob_param(r.api_key_nonce),
+                        opt_blob_param(r.api_key_ciphertext),
+                        opt_text_param(p.default_model.clone()),
+                        opt_text_param(p.fallback_provider.clone()),
+                        p.rate_limit_rpm
+                            .map(|v| TursoValue::Integer(v as i64))
+                            .unwrap_or(TursoValue::Null),
+                        TursoValue::Integer(p.cache_ttl_secs as i64),
+                        p.monthly_token_budget
+                            .map(|v| TursoValue::Integer(v as i64))
+                            .unwrap_or(TursoValue::Null),
+                        TursoValue::Integer(if p.enabled { 1 } else { 0 }),
+                        TursoValue::Integer(p.created_at),
+                        TursoValue::Integer(p.updated_at),
+                    ],
+                )
+                .await
+            }
+        })
+        .await?;
+        self.get_ai_provider(&rec.provider.name)
+            .await?
+            .ok_or_else(|| FerroError::Internal(anyhow::anyhow!("failed to reload ai provider")))
+    }
+
+    async fn get_ai_provider(&self, name: &str) -> Result<Option<AiProviderRecord>> {
+        let conn = connect_db(&self.db)?;
+        let mut rows = conn
+            .query(
+                "SELECT id, name, base_url, api_key_nonce, api_key_ciphertext, default_model, fallback_provider, rate_limit_rpm, cache_ttl_secs, monthly_token_budget, enabled, created_at, updated_at
+                 FROM ai_providers WHERE name = ?1 OR id = ?1 LIMIT 1",
+                [name],
+            )
+            .await
+            .map_err(map_turso_err)?;
+        if let Some(row) = rows.next().await.map_err(map_turso_err)? {
+            Ok(Some(row_to_ai_provider(&row)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn list_ai_providers(&self) -> Result<Vec<AiProviderRecord>> {
+        let conn = connect_db(&self.db)?;
+        let mut rows = conn
+            .query(
+                "SELECT id, name, base_url, api_key_nonce, api_key_ciphertext, default_model, fallback_provider, rate_limit_rpm, cache_ttl_secs, monthly_token_budget, enabled, created_at, updated_at
+                 FROM ai_providers ORDER BY created_at ASC",
+                (),
+            )
+            .await
+            .map_err(map_turso_err)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(map_turso_err)? {
+            out.push(row_to_ai_provider(&row)?);
+        }
+        Ok(out)
+    }
+
+    async fn delete_ai_provider(&self, name: &str) -> Result<bool> {
+        let n = name.to_string();
+        let affected = with_retry(|| {
+            let db = self.db.clone();
+            let n = n.clone();
+            async move {
+                let conn = db.connect()?;
+                conn.execute("DELETE FROM ai_providers WHERE name = ?1 OR id = ?1", [n])
+                    .await
+            }
+        })
+        .await?;
+        Ok(affected > 0)
+    }
+
+    async fn record_ai_usage(&self, rec: &AiUsageRecord) -> Result<()> {
+        let r = rec.clone();
+        with_retry(|| {
+            let db = self.db.clone();
+            let r = r.clone();
+            async move {
+                let conn = db.connect()?;
+                conn.execute(
+                    "INSERT INTO ai_usage (provider_name, project_id, model, prompt_tokens, completion_tokens, total_tokens, cached, status, latency_ms, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    vec![
+                        TursoValue::Text(r.provider_name),
+                        opt_text_param(r.project_id),
+                        opt_text_param(r.model),
+                        TursoValue::Integer(r.prompt_tokens as i64),
+                        TursoValue::Integer(r.completion_tokens as i64),
+                        TursoValue::Integer(r.total_tokens as i64),
+                        TursoValue::Integer(if r.cached { 1 } else { 0 }),
+                        TursoValue::Integer(r.status as i64),
+                        TursoValue::Integer(r.latency_ms as i64),
+                        TursoValue::Integer(r.created_at),
+                    ],
+                )
+                .await
+            }
+        })
+        .await?;
+        Ok(())
+    }
+
+    async fn list_ai_usage(
+        &self,
+        provider_name: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<AiUsageRecord>> {
+        let conn = connect_db(&self.db)?;
+        let limit_i = limit.clamp(1, 500) as i64;
+        let mut rows = match provider_name {
+            Some(p) => {
+                conn.query(
+                    "SELECT id, provider_name, project_id, model, prompt_tokens, completion_tokens, total_tokens, cached, status, latency_ms, created_at
+                     FROM ai_usage WHERE provider_name = ?1 ORDER BY id DESC LIMIT ?2",
+                    (p, limit_i),
+                )
+                .await
+                .map_err(map_turso_err)?
+            }
+            None => {
+                conn.query(
+                    "SELECT id, provider_name, project_id, model, prompt_tokens, completion_tokens, total_tokens, cached, status, latency_ms, created_at
+                     FROM ai_usage ORDER BY id DESC LIMIT ?1",
+                    [limit_i],
+                )
+                .await
+                .map_err(map_turso_err)?
+            }
+        };
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(map_turso_err)? {
+            out.push(AiUsageRecord {
+                id: row.get(0).map_err(map_turso_err)?,
+                provider_name: row.get(1).map_err(map_turso_err)?,
+                project_id: opt_text(&row, 2)?,
+                model: opt_text(&row, 3)?,
+                prompt_tokens: row.get::<i64>(4).map_err(map_turso_err)?.max(0) as u64,
+                completion_tokens: row.get::<i64>(5).map_err(map_turso_err)?.max(0) as u64,
+                total_tokens: row.get::<i64>(6).map_err(map_turso_err)?.max(0) as u64,
+                cached: row.get::<i64>(7).map_err(map_turso_err)? != 0,
+                status: row.get::<i64>(8).map_err(map_turso_err)?.clamp(0, 999) as u16,
+                latency_ms: row.get::<i64>(9).map_err(map_turso_err)?.max(0) as u64,
+                created_at: row.get(10).map_err(map_turso_err)?,
+            });
+        }
+        Ok(out)
+    }
+
+    async fn sum_ai_tokens_since(&self, provider_name: &str, since_ms: i64) -> Result<u64> {
+        let conn = connect_db(&self.db)?;
+        let mut rows = conn
+            .query(
+                "SELECT COALESCE(SUM(total_tokens), 0) FROM ai_usage WHERE provider_name = ?1 AND created_at >= ?2 AND cached = 0",
+                (provider_name, since_ms),
+            )
+            .await
+            .map_err(map_turso_err)?;
+        if let Some(row) = rows.next().await.map_err(map_turso_err)? {
+            Ok(row.get::<i64>(0).map_err(map_turso_err)?.max(0) as u64)
+        } else {
+            Ok(0)
+        }
+    }
+}
+
+fn row_to_ai_provider(row: &turso::Row) -> Result<AiProviderRecord> {
+    let nonce = opt_blob(row, 3)?;
+    let ct = opt_blob(row, 4)?;
+    let has_api_key = ct.as_ref().is_some_and(|c| !c.is_empty());
+    Ok(AiProviderRecord {
+        provider: AiProvider {
+            id: row.get(0).map_err(map_turso_err)?,
+            name: row.get(1).map_err(map_turso_err)?,
+            base_url: row.get(2).map_err(map_turso_err)?,
+            has_api_key,
+            default_model: opt_text(row, 5)?,
+            fallback_provider: opt_text(row, 6)?,
+            rate_limit_rpm: opt_i64(row, 7)?.and_then(|v| u32::try_from(v).ok()),
+            cache_ttl_secs: opt_i64(row, 8)?.unwrap_or(0).max(0) as u64,
+            monthly_token_budget: opt_i64(row, 9)?.and_then(|v| u64::try_from(v).ok()),
+            enabled: row.get::<i64>(10).map_err(map_turso_err)? != 0,
+            created_at: row.get(11).map_err(map_turso_err)?,
+            updated_at: row.get(12).map_err(map_turso_err)?,
+        },
+        api_key_nonce: nonce,
+        api_key_ciphertext: ct,
+    })
 }

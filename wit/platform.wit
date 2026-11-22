@@ -195,6 +195,7 @@ interface search {
     }
 
     query: func(binding: string, query: string, fuzzy: bool, limit: u32) -> result<search-result, string>;
+    vector-query: func(binding: string, query: string, vector: list<f32>, alpha: f64, limit: u32) -> result<search-result, string>;
     upsert: func(binding: string, doc-json: string) -> result<string, string>;
     delete: func(binding: string, doc-id: string) -> result<bool, string>;
 }
