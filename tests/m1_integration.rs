@@ -3727,3 +3727,193 @@ async fn prometheus_metrics_and_healthz_access_log_skip() {
         .unwrap();
     assert!(access_logs.iter().all(|l| !l.message.contains("/_healthz")));
 }
+
+#[tokio::test]
+async fn openapi_llms_txt_and_lean_mcp_server_end_to_end() {
+    let h = setup_harness().await;
+    let app = build_router(h.svc.clone());
+    let tok = Some(h.admin_token.as_str());
+    let pj = |b: Bytes| -> serde_json::Value { serde_json::from_slice(&b).unwrap() };
+
+    // 1. Public OpenAPI 3.1.0 & llms.txt
+    let (st_oa, oa_b) = json_req(&app, Method::GET, "/_api/v1/openapi.json", None, None).await;
+    assert_eq!(st_oa, StatusCode::OK);
+    let oa = pj(oa_b);
+    assert_eq!(oa["openapi"], "3.1.0");
+    assert!(oa["paths"]["/_mcp"].is_object());
+
+    let llms_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/_api/v1/llms.txt")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(llms_resp.status(), StatusCode::OK);
+    let llms_body = String::from_utf8(
+        llms_resp
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(llms_body.contains("deploy_stack"));
+
+    // 2. Unauthenticated MCP POST -> 401
+    let (st_unauth, _) = json_req(
+        &app,
+        Method::POST,
+        "/_mcp",
+        None,
+        Some(serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" })),
+    )
+    .await;
+    assert_eq!(st_unauth, StatusCode::UNAUTHORIZED);
+
+    // 3. MCP initialize & tools/list (10 tools)
+    let (st_init, init_b) = json_req(
+        &app,
+        Method::POST,
+        "/_mcp",
+        tok,
+        Some(serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" })),
+    )
+    .await;
+    assert_eq!(st_init, StatusCode::OK);
+    let init_json = pj(init_b);
+    assert_eq!(init_json["result"]["serverInfo"]["name"], "ferropod");
+
+    let (st_notif, _) = json_req(
+        &app,
+        Method::POST,
+        "/_mcp",
+        tok,
+        Some(serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })),
+    )
+    .await;
+    assert_eq!(st_notif, StatusCode::ACCEPTED);
+
+    let (st_list, list_b) = json_req(
+        &app,
+        Method::POST,
+        "/_mcp",
+        tok,
+        Some(serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" })),
+    )
+    .await;
+    assert_eq!(st_list, StatusCode::OK);
+    let tools = pj(list_b)["result"]["tools"].as_array().unwrap().clone();
+    assert_eq!(tools.len(), 10);
+
+    // 4. deploy_stack inline static site + KV + route via MCP
+    let (st_dep, dep_b) = json_req(
+        &app,
+        Method::POST,
+        "/_mcp",
+        tok,
+        Some(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "deploy_stack",
+                "arguments": {
+                    "name": "mcp-app",
+                    "target_env": "prod",
+                    "bindings": { "kv": { "CACHE": "mcp-kv" } },
+                    "static_files": { "index.html": "<h1>Hello from MCP</h1>" },
+                    "route_host": "mcp.local.dev"
+                }
+            }
+        })),
+    )
+    .await;
+    assert_eq!(st_dep, StatusCode::OK);
+    let dep_res = pj(dep_b);
+    assert_eq!(dep_res["result"]["isError"], false);
+
+    let site_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .header(header::HOST, "mcp.local.dev")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(site_resp.status(), StatusCode::OK);
+
+    // 5. manage_kv put/get & platform_overview & diagnose_logs via MCP
+    let (_, kv_put_b) = json_req(
+        &app,
+        Method::POST,
+        "/_mcp",
+        tok,
+        Some(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "manage_kv",
+                "arguments": { "action": "put", "namespace": "mcp-kv", "key": "k1", "value": "v1" }
+            }
+        })),
+    )
+    .await;
+    assert_eq!(pj(kv_put_b)["result"]["isError"], false);
+
+    let (_, kv_get_b) = json_req(
+        &app,
+        Method::POST,
+        "/_mcp",
+        tok,
+        Some(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": {
+                "name": "manage_kv",
+                "arguments": { "action": "get", "namespace": "mcp-kv", "key": "k1" }
+            }
+        })),
+    )
+    .await;
+    let kv_txt = pj(kv_get_b)["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(kv_txt.contains("v1"));
+
+    // 6. Readonly token cannot invoke write tool (returns isError: true)
+    let (_, ro_raw) = h
+        .svc
+        .create_token(&h.admin, "ro-mcp", TokenScope::Readonly, None)
+        .await
+        .unwrap();
+    let (st_ro, ro_b) = json_req(
+        &app,
+        Method::POST,
+        "/_mcp",
+        Some(&ro_raw),
+        Some(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "tools/call",
+            "params": {
+                "name": "manage_kv",
+                "arguments": { "action": "put", "namespace": "mcp-kv", "key": "k2", "value": "v2" }
+            }
+        })),
+    )
+    .await;
+    assert_eq!(st_ro, StatusCode::OK);
+    assert_eq!(pj(ro_b)["result"]["isError"], true);
+}

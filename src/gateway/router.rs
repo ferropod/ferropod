@@ -4,7 +4,7 @@ use axum::{
     http::{header, HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode},
     middleware,
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
     Extension, Json, Router,
 };
 use http_body_util::{BodyExt, LengthLimitError, Limited};
@@ -46,6 +46,8 @@ pub fn build_router(svc: PlatformService) -> Router {
         )
         .nest("/_blob", blob_router)
         .nest("/_api/v1", web::api::router())
+        .route("/_mcp", post(web::mcp::mcp_http_handler))
+        .route("/mcp", post(web::mcp::mcp_http_handler))
         .route("/_panel", get(web::admin_index))
         .route("/_panel/", get(web::admin_index))
         .route("/_panel/assets/{file}", get(web::admin_asset))

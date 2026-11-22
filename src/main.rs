@@ -150,6 +150,19 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         no_restart: bool,
     },
+    /// Start an MCP JSON-RPC 2.0 server over stdio.
+    Mcp {
+        #[arg(long, env = "FERROPOD_DATA_DIR", default_value = "./data")]
+        data_dir: PathBuf,
+        #[arg(
+            long,
+            env = "FERROPOD_MASTER_KEY",
+            default_value = "dev-insecure-master-key-change-me"
+        )]
+        master_key: String,
+        #[arg(long, default_value = "admin")]
+        scope: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -174,15 +187,22 @@ enum TokenCommands {
 }
 
 fn main() -> Result<()> {
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "ferropod=info,tower_http=info".into()),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
-
     let cli = Cli::parse();
+
+    let is_mcp_stdio = matches!(cli.command, Commands::Mcp { .. });
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "ferropod=info,tower_http=info".into());
+    if is_mcp_stdio {
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+            .init();
+    } else {
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(tracing_subscriber::fmt::layer())
+            .init();
+    }
 
     let worker_threads = match &cli.command {
         Commands::Serve { profile, .. } => match profile.resolve() {
@@ -492,6 +512,55 @@ WantedBy=multi-user.target"
                     }
                 }
             }
+        }
+        Commands::Mcp {
+            data_dir,
+            master_key,
+            scope,
+        } => {
+            use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+            let parsed_scope = TokenScope::parse(&scope)?;
+            let caller = Caller {
+                actor: "cli-mcp".into(),
+                scope: parsed_scope,
+            };
+            let cfg = Config::for_profile(
+                Profile::Auto,
+                "127.0.0.1:8080".parse().unwrap(),
+                data_dir,
+                master_key,
+            );
+            let svc = init_service(&cfg).await?;
+            let mut reader = tokio::io::BufReader::new(tokio::io::stdin()).lines();
+            let mut stdout = tokio::io::stdout();
+            while let Some(line) = reader.next_line().await? {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let val: serde_json::Value = match serde_json::from_str(trimmed) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let err_json = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": null,
+                            "error": { "code": -32700, "message": format!("parse error: {e}") }
+                        });
+                        let mut out_line = serde_json::to_vec(&err_json)?;
+                        out_line.push(b'\n');
+                        stdout.write_all(&out_line).await?;
+                        stdout.flush().await?;
+                        continue;
+                    }
+                };
+                if let Some(resp) = ferropod::web::mcp::handle_rpc(&svc, &caller, val).await {
+                    let mut out_line = serde_json::to_vec(&resp)?;
+                    out_line.push(b'\n');
+                    stdout.write_all(&out_line).await?;
+                    stdout.flush().await?;
+                }
+            }
+            let _ = svc.flush_and_checkpoint().await;
         }
     }
     Ok(())

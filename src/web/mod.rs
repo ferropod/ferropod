@@ -9,6 +9,8 @@ use axum::{
 use sha2::{Digest, Sha256};
 
 pub mod api;
+pub mod mcp;
+pub mod openapi;
 
 const ADMIN_HTML: &str = include_str!("assets/index.html");
 const ADMIN_CSS: &str = include_str!("assets/styles.css");

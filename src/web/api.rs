@@ -300,6 +300,8 @@ struct DbStatementItem {
 
 pub fn router() -> Router<PlatformService> {
     Router::new()
+        .route("/openapi.json", get(api_openapi))
+        .route("/llms.txt", get(api_llms_txt))
         .route("/status", get(status))
         .route("/metrics", get(metrics))
         .route("/metrics/prometheus", get(metrics_prometheus))
@@ -433,6 +435,20 @@ fn runtime_routes(prefix: &str) -> Router<PlatformService> {
             &format!("{prefix}/{{id}}/secrets/{{key}}"),
             delete(delete_secret),
         )
+}
+
+async fn api_openapi() -> impl IntoResponse {
+    Json(crate::web::openapi::openapi_document())
+}
+
+async fn api_llms_txt() -> impl IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )],
+        crate::web::openapi::llms_txt(),
+    )
 }
 
 async fn status(
