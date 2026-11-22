@@ -302,6 +302,7 @@ pub fn router() -> Router<PlatformService> {
     Router::new()
         .route("/status", get(status))
         .route("/metrics", get(metrics))
+        .route("/metrics/prometheus", get(metrics_prometheus))
         .route("/resource-groups", get(list_resource_groups))
         .route("/system/info", get(system_info))
         .route("/system/update/check", get(system_update_check))
@@ -593,6 +594,110 @@ async fn metrics(
         profile,
         timestamp_ms: chrono::Utc::now().timestamp_millis(),
     }))
+}
+
+async fn metrics_prometheus(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    use std::fmt::Write as _;
+    use std::sync::atomic::Ordering;
+
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let uptime = process_start_instant().elapsed().as_secs();
+    let rss = read_proc_rss_bytes();
+    let open_fds = read_proc_open_fds();
+    let cpu_cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+
+    let (projects, routes, queues) = tokio::try_join!(
+        svc.list_projects(&caller),
+        svc.list_routes(&caller),
+        svc.queue_list(&caller),
+    )
+    .map_err(ApiError)?;
+
+    let m = svc.metrics();
+    let r2xx = m.http_requests_2xx.load(Ordering::Relaxed);
+    let r3xx = m.http_requests_3xx.load(Ordering::Relaxed);
+    let r4xx = m.http_requests_4xx.load(Ordering::Relaxed);
+    let r5xx = m.http_requests_5xx.load(Ordering::Relaxed);
+    let dur_sum = m.http_duration_ms_sum.load(Ordering::Relaxed);
+    let dur_cnt = m.http_duration_ms_count.load(Ordering::Relaxed);
+    let active = m.active_http_requests.load(Ordering::Relaxed);
+    let rate_limited = m.rate_limited_total.load(Ordering::Relaxed);
+    let worker_errs = m.worker_errors_total.load(Ordering::Relaxed);
+    let worker_oom = m.worker_oom_total.load(Ordering::Relaxed);
+
+    let mut out = String::with_capacity(2048);
+    let _ = writeln!(
+        out,
+        "# HELP ferropod_uptime_seconds Process uptime in seconds.\n# TYPE ferropod_uptime_seconds counter\nferropod_uptime_seconds {uptime}"
+    );
+    let _ = writeln!(
+        out,
+        "# HELP ferropod_process_rss_bytes Resident set size in bytes.\n# TYPE ferropod_process_rss_bytes gauge\nferropod_process_rss_bytes {rss}"
+    );
+    let _ = writeln!(
+        out,
+        "# HELP ferropod_open_fds Number of open file descriptors.\n# TYPE ferropod_open_fds gauge\nferropod_open_fds {open_fds}"
+    );
+    let _ = writeln!(
+        out,
+        "# HELP ferropod_cpu_cores Number of logical CPU cores.\n# TYPE ferropod_cpu_cores gauge\nferropod_cpu_cores {cpu_cores}"
+    );
+    let _ = writeln!(
+        out,
+        "# HELP ferropod_http_requests_total Total HTTP requests handled by status class.\n# TYPE ferropod_http_requests_total counter\nferropod_http_requests_total{{status_class=\"2xx\"}} {r2xx}\nferropod_http_requests_total{{status_class=\"3xx\"}} {r3xx}\nferropod_http_requests_total{{status_class=\"4xx\"}} {r4xx}\nferropod_http_requests_total{{status_class=\"5xx\"}} {r5xx}"
+    );
+    let _ = writeln!(
+        out,
+        "# HELP ferropod_http_request_duration_ms_sum Total accumulated HTTP request duration in milliseconds.\n# TYPE ferropod_http_request_duration_ms_sum counter\nferropod_http_request_duration_ms_sum {dur_sum}"
+    );
+    let _ = writeln!(
+        out,
+        "# HELP ferropod_http_request_duration_ms_count Total count of HTTP requests timed.\n# TYPE ferropod_http_request_duration_ms_count counter\nferropod_http_request_duration_ms_count {dur_cnt}"
+    );
+    let _ = writeln!(
+        out,
+        "# HELP ferropod_http_active_requests Currently in-flight HTTP requests.\n# TYPE ferropod_http_active_requests gauge\nferropod_http_active_requests {active}"
+    );
+    let _ = writeln!(
+        out,
+        "# HELP ferropod_rate_limited_total Total requests rejected by concurrency or route rate limiting.\n# TYPE ferropod_rate_limited_total counter\nferropod_rate_limited_total {rate_limited}"
+    );
+    let _ = writeln!(
+        out,
+        "# HELP ferropod_worker_errors_total Total Wasm Worker runtime invocation errors.\n# TYPE ferropod_worker_errors_total counter\nferropod_worker_errors_total {worker_errs}"
+    );
+    let _ = writeln!(
+        out,
+        "# HELP ferropod_worker_oom_total Total Wasm Worker OOM traps.\n# TYPE ferropod_worker_oom_total counter\nferropod_worker_oom_total {worker_oom}"
+    );
+    let _ = writeln!(
+        out,
+        "# HELP ferropod_projects_total Total apps accessible by caller.\n# TYPE ferropod_projects_total gauge\nferropod_projects_total {}",
+        projects.len()
+    );
+    let _ = writeln!(
+        out,
+        "# HELP ferropod_routes_total Total routes accessible by caller.\n# TYPE ferropod_routes_total gauge\nferropod_routes_total {}",
+        routes.len()
+    );
+    let _ = writeln!(
+        out,
+        "# HELP ferropod_queues_total Total queues accessible by caller.\n# TYPE ferropod_queues_total gauge\nferropod_queues_total {}",
+        queues.len()
+    );
+
+    Ok((
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        out,
+    ))
 }
 
 #[derive(Debug, Deserialize)]

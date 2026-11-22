@@ -198,12 +198,14 @@ impl TokenStore for TursoCoreStore {
             created_at: row.get(5).map_err(map_turso_err)?,
         };
         drop(rows);
-        let _ = conn
-            .execute(
-                "UPDATE api_tokens SET last_used_at = ?1 WHERE id = ?2",
-                (now_secs, id),
-            )
-            .await;
+        if token.last_used_at.is_none_or(|prev| now_secs - prev >= 60) {
+            let _ = conn
+                .execute(
+                    "UPDATE api_tokens SET last_used_at = ?1 WHERE id = ?2",
+                    (now_secs, id),
+                )
+                .await;
+        }
         Ok(Some(token))
     }
 

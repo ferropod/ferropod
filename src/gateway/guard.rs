@@ -1,3 +1,5 @@
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Instant;
 
 use axum::{
@@ -12,7 +14,7 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::core::model::{Caller, FerroError, LogEntry};
-use crate::core::service::PlatformService;
+use crate::core::service::{GatewayMetrics, PlatformService};
 
 #[derive(Debug, Serialize)]
 struct ErrorBody {
@@ -86,15 +88,25 @@ pub async fn authenticate_caller(
     Ok(Caller::from_token(&tok))
 }
 
+struct ActiveRequestGuard(Arc<GatewayMetrics>);
+
+impl Drop for ActiveRequestGuard {
+    fn drop(&mut self) {
+        self.0.active_http_requests.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 /// Request ID injection, global concurrency limiting, and non-blocking access logging middleware.
 pub async fn access_log_middleware(
     State(svc): State<PlatformService>,
     mut req: Request,
     next: Next,
 ) -> Response {
+    let metrics = svc.metrics().clone();
     let permit = match svc.try_acquire_http_permit() {
         Some(p) => p,
         None => {
+            metrics.rate_limited_total.fetch_add(1, Ordering::Relaxed);
             return (
                 StatusCode::TOO_MANY_REQUESTS,
                 Json(ErrorBody {
@@ -104,6 +116,9 @@ pub async fn access_log_middleware(
                 .into_response();
         }
     };
+
+    metrics.active_http_requests.fetch_add(1, Ordering::Relaxed);
+    let _active_guard = ActiveRequestGuard(metrics.clone());
 
     let req_id = req
         .headers()
@@ -128,12 +143,14 @@ pub async fn access_log_middleware(
 
     let elapsed_ms = started.elapsed().as_millis() as u64;
     let status = res.status().as_u16();
+    metrics.record_http(status, elapsed_ms);
     if let Ok(hv) = HeaderValue::from_str(&req_id) {
         res.headers_mut().insert("x-request-id", hv);
     }
 
-    // Skip logging internal loopback TLS checks to avoid noise
-    if path != "/_internal/tls/allow" {
+    // Skip logging internal loopback TLS checks and healthy /_healthz probes to avoid log churn
+    let skip_log = path == "/_internal/tls/allow" || (path == "/_healthz" && status < 400);
+    if !skip_log {
         let level = if status >= 500 {
             "error"
         } else if status >= 400 {

@@ -3662,3 +3662,68 @@ async fn extended_creation_options_mandatory_kv_ttl_and_patch_endpoints() {
     assert_eq!(st_qstats, StatusCode::OK);
     assert_eq!(parse_json(qstats_bytes)["pending"], 2);
 }
+
+#[tokio::test]
+async fn prometheus_metrics_and_healthz_access_log_skip() {
+    let h = setup_harness().await;
+    let app = build_router(h.svc.clone());
+    let tok = Some(h.admin_token.as_str());
+
+    // Call /_healthz multiple times; healthy probes should not spam access logs
+    for _ in 0..3 {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/_healthz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // Trigger one normal API request so HTTP counters & access logs record it
+    let (st_status, _) = json_req(&app, Method::GET, "/_api/v1/status", tok, None).await;
+    assert_eq!(st_status, StatusCode::OK);
+
+    // Query Prometheus endpoint
+    let prom_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/_api/v1/metrics/prometheus")
+                .header(header::AUTHORIZATION, format!("Bearer {}", h.admin_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(prom_resp.status(), StatusCode::OK);
+    let ct = prom_resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(ct.starts_with("text/plain"));
+    let body_bytes = prom_resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8(body_bytes.to_vec()).unwrap();
+    assert!(text.contains("ferropod_http_requests_total{status_class=\"2xx\"}"));
+    assert!(text.contains("ferropod_http_request_duration_ms_count"));
+    assert!(text.contains("ferropod_projects_total"));
+
+    // Confirm /_healthz did not produce access log rows
+    let access_logs = h
+        .logs
+        .query(LogQuery {
+            source: Some("access".into()),
+            limit: Some(50),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(access_logs.iter().all(|l| !l.message.contains("/_healthz")));
+}

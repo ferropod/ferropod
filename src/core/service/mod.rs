@@ -16,6 +16,7 @@ pub use projects::CreateDeploymentInput;
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -46,6 +47,36 @@ pub struct PlatformDeps {
     pub logs: Arc<dyn LogStore>,
 }
 
+/// Lightweight atomic runtime metrics exported via `/_api/v1/metrics/prometheus`.
+#[derive(Debug, Default)]
+pub struct GatewayMetrics {
+    pub http_requests_2xx: AtomicU64,
+    pub http_requests_3xx: AtomicU64,
+    pub http_requests_4xx: AtomicU64,
+    pub http_requests_5xx: AtomicU64,
+    pub http_duration_ms_sum: AtomicU64,
+    pub http_duration_ms_count: AtomicU64,
+    pub rate_limited_total: AtomicU64,
+    pub worker_errors_total: AtomicU64,
+    pub worker_oom_total: AtomicU64,
+    pub active_http_requests: AtomicU64,
+}
+
+impl GatewayMetrics {
+    pub fn record_http(&self, status: u16, elapsed_ms: u64) {
+        match status {
+            200..=299 => self.http_requests_2xx.fetch_add(1, Ordering::Relaxed),
+            300..=399 => self.http_requests_3xx.fetch_add(1, Ordering::Relaxed),
+            400..=499 => self.http_requests_4xx.fetch_add(1, Ordering::Relaxed),
+            _ if status >= 500 => self.http_requests_5xx.fetch_add(1, Ordering::Relaxed),
+            _ => 0,
+        };
+        self.http_duration_ms_sum
+            .fetch_add(elapsed_ms, Ordering::Relaxed);
+        self.http_duration_ms_count.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 /// Unified business orchestration layer shared by REST/Admin, MCP (M3), and Runtime (M2).
 #[derive(Clone)]
 pub struct PlatformService {
@@ -62,6 +93,7 @@ pub struct PlatformService {
     logs: Arc<dyn LogStore>,
     search: Arc<dyn SearchStore>,
     runtime: Arc<dyn WorkerRuntime>,
+    metrics: Arc<GatewayMetrics>,
     routes: Arc<RwLock<HashMap<String, RouteEntry>>>,
     http_concurrency: Arc<Semaphore>,
     route_refresh_lock: Arc<Mutex<()>>,
@@ -89,6 +121,7 @@ impl PlatformService {
             logs: deps.logs,
             search,
             runtime,
+            metrics: Arc::new(GatewayMetrics::default()),
             routes: Arc::new(RwLock::new(HashMap::new())),
             http_concurrency,
             route_refresh_lock: Arc::new(Mutex::new(())),
@@ -96,6 +129,10 @@ impl PlatformService {
         wasmtime_rt.bind_service(svc.clone());
         svc.refresh_routes().await?;
         Ok(svc)
+    }
+
+    pub fn metrics(&self) -> &Arc<GatewayMetrics> {
+        &self.metrics
     }
 
     pub fn runtime(&self) -> &Arc<dyn WorkerRuntime> {

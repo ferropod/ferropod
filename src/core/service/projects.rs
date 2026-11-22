@@ -654,6 +654,20 @@ impl PlatformService {
         match self.runtime.handle_http(ctx, req).await {
             Ok(resp) => Ok(resp),
             Err(err) => {
+                self.metrics
+                    .worker_errors_total
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let msg = err.to_string();
+                let lower = msg.to_ascii_lowercase();
+                if lower.contains("oom")
+                    || lower.contains("memory")
+                    || lower.contains("allocation")
+                    || lower.contains("resource limit")
+                {
+                    self.metrics
+                        .worker_oom_total
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
                 self.logs.emit(LogEntry {
                     id: None,
                     ts: Utc::now().timestamp_millis(),
@@ -661,7 +675,7 @@ impl PlatformService {
                     request_id: Some(request_id),
                     source: "runtime".into(),
                     level: "error".into(),
-                    message: format!("Worker HTTP invocation error: {err}"),
+                    message: format!("Worker HTTP invocation error: {msg}"),
                     meta_json: None,
                 });
                 Err(err)
