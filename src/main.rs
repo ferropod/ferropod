@@ -188,6 +188,40 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         dry_run: bool,
     },
+    /// Inspect or reset persisted platform settings in core.db.
+    Settings {
+        #[command(subcommand)]
+        action: SettingsCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SettingsCommands {
+    /// Print effective platform settings, overrides, defaults, and runtime environment as JSON.
+    Show {
+        #[arg(long, env = "FERROPOD_DATA_DIR", default_value = "./data")]
+        data_dir: PathBuf,
+        #[arg(
+            long,
+            env = "FERROPOD_MASTER_KEY",
+            default_value = "dev-insecure-master-key-change-me"
+        )]
+        master_key: String,
+    },
+    /// Reset persisted platform settings (all or a specific section) back to defaults.
+    Reset {
+        /// Optional section to reset: all | domains | maintenance | runtime | rollback | alerts.
+        #[arg(long)]
+        section: Option<String>,
+        #[arg(long, env = "FERROPOD_DATA_DIR", default_value = "./data")]
+        data_dir: PathBuf,
+        #[arg(
+            long,
+            env = "FERROPOD_MASTER_KEY",
+            default_value = "dev-insecure-master-key-change-me"
+        )]
+        master_key: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -622,6 +656,42 @@ WantedBy=multi-user.target"
                 .await?;
             println!("{}", serde_json::to_string_pretty(&summary)?);
         }
+        Commands::Settings { action } => match action {
+            SettingsCommands::Show {
+                data_dir,
+                master_key,
+            } => {
+                let cfg = Config::for_profile(
+                    Profile::Auto,
+                    "127.0.0.1:8080".parse().unwrap(),
+                    data_dir,
+                    master_key,
+                );
+                let svc = init_service(&cfg).await?;
+                let caller = Caller::system("cli");
+                let bundle = svc.get_platform_settings(&caller).await?;
+                println!("{}", serde_json::to_string_pretty(&bundle)?);
+            }
+            SettingsCommands::Reset {
+                section,
+                data_dir,
+                master_key,
+            } => {
+                let cfg = Config::for_profile(
+                    Profile::Auto,
+                    "127.0.0.1:8080".parse().unwrap(),
+                    data_dir,
+                    master_key,
+                );
+                let svc = init_service(&cfg).await?;
+                let caller = Caller::system("cli");
+                let bundle = svc
+                    .reset_platform_settings(&caller, section.as_deref())
+                    .await?;
+                println!("{}", serde_json::to_string_pretty(&bundle)?);
+                let _ = svc.flush_and_checkpoint().await;
+            }
+        },
     }
     Ok(())
 }

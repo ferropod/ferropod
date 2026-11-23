@@ -186,6 +186,27 @@ pub async fn authenticate_caller(
     Ok(Caller::from_token(&tok))
 }
 
+/// Restrict control-plane/admin routes (`/_panel`, `/_api/v1`, `/_mcp`) to the configured `panel_domain`
+/// (plus loopback hosts for local CLI/recovery access) when `restrict_panel_to_domain` is enabled.
+pub async fn panel_domain_guard_middleware(
+    State(svc): State<PlatformService>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let Some(allowed_domain) = svc.effective_panel_restriction() else {
+        return next.run(req).await;
+    };
+    let Some(raw_host) = crate::gateway::extract_request_host(&req) else {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    };
+    if crate::core::service::is_loopback_host(raw_host)
+        || crate::core::service::normalize_host(raw_host) == allowed_domain
+    {
+        return next.run(req).await;
+    }
+    (StatusCode::NOT_FOUND, "not found").into_response()
+}
+
 struct ActiveRequestGuard(Arc<GatewayMetrics>);
 
 impl Drop for ActiveRequestGuard {

@@ -1,14 +1,16 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use chrono::{Datelike, TimeZone, Utc};
 use reqwest::Client;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::core::model::{
-    AiProvider, AiProviderOpts, AiProviderRecord, AiUsageRecord, AiUsageSummary, Caller,
-    FerroError, Result,
+    default_ai_timeout_secs, AiProvider, AiProviderOpts, AiProviderRecord, AiUsageRecord,
+    AiUsageSummary, ByteStream, Caller, FerroError, Result, TokenScope,
 };
 
 use super::PlatformService;
@@ -49,6 +51,63 @@ pub struct AiProxyResponse {
     pub body: Value,
     pub provider_name: String,
     pub cached: bool,
+}
+
+pub struct AiProxyStreamResponse {
+    pub status: u16,
+    pub content_type: String,
+    pub provider_name: String,
+    pub body: ByteStream,
+}
+
+pub enum AiProxyResult {
+    Json(AiProxyResponse),
+    Stream(AiProxyStreamResponse),
+}
+
+fn extract_sse_usage(
+    line: &str,
+    prompt_tokens: &mut u64,
+    completion_tokens: &mut u64,
+    total_tokens: &mut u64,
+    model_seen: &mut Option<String>,
+) {
+    let trimmed = line.trim();
+    let Some(data) = trimmed.strip_prefix("data:") else {
+        return;
+    };
+    let payload = data.trim();
+    if payload.is_empty() || payload == "[DONE]" {
+        return;
+    }
+    if let Ok(val) = serde_json::from_str::<Value>(payload) {
+        if model_seen.is_none() {
+            if let Some(m) = val.get("model").and_then(|v| v.as_str()) {
+                if !m.trim().is_empty() {
+                    *model_seen = Some(m.to_string());
+                }
+            }
+        }
+        if let Some(usage) = val.get("usage").filter(|u| u.is_object()) {
+            let p = usage
+                .get("prompt_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let c = usage
+                .get("completion_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let t = usage
+                .get("total_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(p + c);
+            if t > 0 || p > 0 || c > 0 {
+                *prompt_tokens = p;
+                *completion_tokens = c;
+                *total_tokens = t;
+            }
+        }
+    }
 }
 
 impl PlatformService {
@@ -105,6 +164,10 @@ impl PlatformService {
                 rate_limit_rpm: opts.rate_limit_rpm.filter(|v| *v > 0),
                 cache_ttl_secs: opts.cache_ttl_secs.unwrap_or(0),
                 monthly_token_budget: opts.monthly_token_budget.filter(|v| *v > 0),
+                timeout_secs: opts
+                    .timeout_secs
+                    .unwrap_or_else(default_ai_timeout_secs)
+                    .clamp(5, 600),
                 enabled: opts.enabled.unwrap_or(true),
                 created_at: now,
                 updated_at: now,
@@ -170,6 +233,9 @@ impl PlatformService {
         if let Some(budget) = opts.monthly_token_budget {
             rec.provider.monthly_token_budget = if budget == 0 { None } else { Some(budget) };
         }
+        if let Some(ts) = opts.timeout_secs {
+            rec.provider.timeout_secs = ts.clamp(5, 600);
+        }
         if let Some(en) = opts.enabled {
             rec.provider.enabled = en;
         }
@@ -222,21 +288,79 @@ impl PlatformService {
         if !caller.scope.allows_read() {
             return Err(FerroError::Forbidden("insufficient scope".into()));
         }
-        let recent = self.registry.list_ai_usage(provider_name, limit).await?;
-        let mut summary = AiUsageSummary {
-            total_requests: recent.len(),
-            ..Default::default()
-        };
-        for item in &recent {
-            if item.cached {
-                summary.cached_requests += 1;
-            }
-            summary.total_prompt_tokens += item.prompt_tokens;
-            summary.total_completion_tokens += item.completion_tokens;
-            summary.total_tokens += item.total_tokens;
+        let project_filter = caller.project_id();
+        let clean_provider = provider_name.map(str::trim).filter(|s| !s.is_empty());
+        let recent = self
+            .registry
+            .list_ai_usage(clean_provider, project_filter, limit)
+            .await?;
+        let (
+            total_requests,
+            cached_requests,
+            total_prompt_tokens,
+            total_completion_tokens,
+            total_tokens,
+            month_tokens,
+        ) = self
+            .registry
+            .aggregate_ai_usage(clean_provider, project_filter, month_start_ms())
+            .await?;
+
+        Ok(AiUsageSummary {
+            total_requests,
+            cached_requests,
+            total_prompt_tokens,
+            total_completion_tokens,
+            total_tokens,
+            month_tokens,
+            recent,
+        })
+    }
+
+    pub async fn list_ai_models(&self, caller: &Caller) -> Result<Value> {
+        if matches!(caller.scope, TokenScope::Readonly) {
+            return Err(FerroError::Forbidden(
+                "readonly scope cannot query AI Gateway models".into(),
+            ));
         }
-        summary.recent = recent;
-        Ok(summary)
+        let providers = self.registry.list_ai_providers().await?;
+        let mut data = Vec::new();
+        for rec in providers {
+            if !rec.provider.enabled {
+                continue;
+            }
+            let model_id = rec
+                .provider
+                .default_model
+                .clone()
+                .unwrap_or_else(|| format!("{}/default", rec.provider.name));
+            data.push(serde_json::json!({
+                "id": model_id,
+                "object": "model",
+                "created": rec.provider.created_at / 1000,
+                "owned_by": rec.provider.name,
+                "ferropod_provider": rec.provider.name,
+            }));
+        }
+        Ok(serde_json::json!({
+            "object": "list",
+            "data": data,
+        }))
+    }
+
+    pub async fn clear_ai_cache(&self, caller: &Caller) -> Result<usize> {
+        Self::require_admin(caller)?;
+        let mut guard = self.ai_cache.write().await;
+        let count = guard.len();
+        guard.clear();
+        drop(guard);
+        self.audit(
+            None,
+            &caller.actor,
+            "ai.cache.clear",
+            serde_json::json!({ "evicted": count }),
+        );
+        Ok(count)
     }
 
     async fn resolve_provider_record(&self, requested: Option<&str>) -> Result<AiProviderRecord> {
@@ -261,13 +385,13 @@ impl PlatformService {
             .ok_or_else(|| FerroError::NotFound("no enabled AI provider configured".into()))
     }
 
-    async fn invoke_single_ai_provider(
+    fn build_provider_request(
         &self,
         client: &Client,
         rec: &AiProviderRecord,
         subpath: &str,
         body: &Value,
-    ) -> std::result::Result<(u16, Value), String> {
+    ) -> reqwest::RequestBuilder {
         let mut payload = body.clone();
         if let Some(obj) = payload.as_object_mut() {
             if !obj.contains_key("model") {
@@ -289,7 +413,22 @@ impl PlatformService {
                 }
             }
         }
-        let resp = req
+        req
+    }
+
+    async fn invoke_single_ai_provider(
+        &self,
+        rec: &AiProviderRecord,
+        subpath: &str,
+        body: &Value,
+    ) -> std::result::Result<(u16, Value), String> {
+        let timeout_secs = rec.provider.timeout_secs.clamp(5, 600);
+        let client = Client::builder()
+            .timeout(Duration::from_secs(timeout_secs))
+            .build()
+            .map_err(|e| format!("ai client init: {e}"))?;
+        let resp = self
+            .build_provider_request(&client, rec, subpath, body)
             .send()
             .await
             .map_err(|e| format!("upstream connect failed: {e}"))?;
@@ -300,19 +439,24 @@ impl PlatformService {
         Ok((status, val))
     }
 
-    pub async fn ai_proxy(
+    async fn send_streaming_ai_provider(
         &self,
-        caller: &Caller,
-        requested_provider: Option<&str>,
+        rec: &AiProviderRecord,
         subpath: &str,
-        body: Value,
-    ) -> Result<AiProxyResponse> {
-        if !caller.scope.allows_read() {
-            return Err(FerroError::Forbidden("insufficient scope".into()));
-        }
-        let primary = self.resolve_provider_record(requested_provider).await?;
+        body: &Value,
+    ) -> std::result::Result<reqwest::Response, String> {
+        let timeout_secs = rec.provider.timeout_secs.clamp(5, 600);
+        let client = Client::builder()
+            .timeout(Duration::from_secs(timeout_secs))
+            .build()
+            .map_err(|e| format!("ai client init: {e}"))?;
+        self.build_provider_request(&client, rec, subpath, body)
+            .send()
+            .await
+            .map_err(|e| format!("upstream connect failed: {e}"))
+    }
 
-        // Enforce per-provider RPM limit
+    async fn enforce_ai_limits(&self, primary: &AiProviderRecord) -> Result<()> {
         if let Some(rpm) = primary.provider.rate_limit_rpm {
             let key = format!("ai:{}", primary.provider.name);
             let (allowed, _, reset) = self.rate_limiter.check_and_record(&key, rpm);
@@ -324,25 +468,81 @@ impl PlatformService {
             }
         }
 
-        // Enforce monthly token budget
         if let Some(budget) = primary.provider.monthly_token_budget {
             let used = self
                 .registry
                 .sum_ai_tokens_since(&primary.provider.name, month_start_ms())
                 .await?;
             if used >= budget {
+                self.fire_alert(
+                    "ai_budget_exceeded",
+                    format!(
+                        "AI provider '{}' monthly token budget exhausted",
+                        primary.provider.name
+                    ),
+                    serde_json::json!({
+                        "provider": primary.provider.name,
+                        "used_tokens": used,
+                        "monthly_token_budget": budget,
+                    }),
+                );
                 return Err(FerroError::RateLimited(format!(
                     "AI provider '{}' monthly token budget ({budget}) exhausted",
                     primary.provider.name
                 )));
             }
         }
+        Ok(())
+    }
+
+    pub async fn ai_proxy(
+        &self,
+        caller: &Caller,
+        requested_provider: Option<&str>,
+        subpath: &str,
+        mut body: Value,
+    ) -> Result<AiProxyResponse> {
+        if let Some(obj) = body.as_object_mut() {
+            obj.remove("stream");
+        }
+        match self
+            .ai_proxy_or_stream(caller, requested_provider, subpath, body)
+            .await?
+        {
+            AiProxyResult::Json(resp) => Ok(resp),
+            AiProxyResult::Stream(_) => Err(FerroError::InvalidArgument(
+                "streaming not supported by this caller".into(),
+            )),
+        }
+    }
+
+    pub async fn ai_proxy_or_stream(
+        &self,
+        caller: &Caller,
+        requested_provider: Option<&str>,
+        subpath: &str,
+        body: Value,
+    ) -> Result<AiProxyResult> {
+        if matches!(caller.scope, TokenScope::Readonly) {
+            return Err(FerroError::Forbidden(
+                "readonly scope cannot invoke AI Gateway".into(),
+            ));
+        }
+        let primary = self.resolve_provider_record(requested_provider).await?;
+        self.enforce_ai_limits(&primary).await?;
 
         let is_stream = body
             .get("stream")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        let cache_enabled = primary.provider.cache_ttl_secs > 0 && !is_stream;
+        if is_stream {
+            return self
+                .ai_proxy_stream(caller, primary, subpath, body)
+                .await
+                .map(AiProxyResult::Stream);
+        }
+
+        let cache_enabled = primary.provider.cache_ttl_secs > 0;
         let ckey = cache_key_for(&primary.provider.name, subpath, &body);
         let now_ms = Utc::now().timestamp_millis();
 
@@ -371,25 +571,20 @@ impl PlatformService {
                             created_at: now_ms,
                         })
                         .await;
-                    return Ok(AiProxyResponse {
+                    return Ok(AiProxyResult::Json(AiProxyResponse {
                         status: 200,
                         body: cached_val.clone(),
                         provider_name: primary.provider.name,
                         cached: true,
-                    });
+                    }));
                 }
             }
         }
 
         let started = Instant::now();
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|e| FerroError::Internal(anyhow::anyhow!("ai client init: {e}")))?;
-
         let mut active = primary.clone();
         let (status, resp_val) = match self
-            .invoke_single_ai_provider(&client, &primary, subpath, &body)
+            .invoke_single_ai_provider(&primary, subpath, &body)
             .await
         {
             Ok((st, val)) if st < 500 => (st, val),
@@ -398,7 +593,7 @@ impl PlatformService {
                     if let Ok(Some(fb_rec)) = self.registry.get_ai_provider(fb_name).await {
                         if fb_rec.provider.enabled {
                             match self
-                                .invoke_single_ai_provider(&client, &fb_rec, subpath, &body)
+                                .invoke_single_ai_provider(&fb_rec, subpath, &body)
                                 .await
                             {
                                 Ok((st2, val2)) => {
@@ -490,11 +685,162 @@ impl PlatformService {
             cache.insert(ckey, (exp, resp_val.clone()));
         }
 
-        Ok(AiProxyResponse {
+        Ok(AiProxyResult::Json(AiProxyResponse {
             status,
             body: resp_val,
             provider_name: active.provider.name,
             cached: false,
+        }))
+    }
+
+    async fn ai_proxy_stream(
+        &self,
+        caller: &Caller,
+        primary: AiProviderRecord,
+        subpath: &str,
+        body: Value,
+    ) -> Result<AiProxyStreamResponse> {
+        let started = Instant::now();
+        let mut active = primary.clone();
+
+        let upstream = match self
+            .send_streaming_ai_provider(&primary, subpath, &body)
+            .await
+        {
+            Ok(resp) if resp.status().as_u16() < 500 => resp,
+            primary_fail => {
+                if let Some(ref fb_name) = primary.provider.fallback_provider {
+                    if let Ok(Some(fb_rec)) = self.registry.get_ai_provider(fb_name).await {
+                        if fb_rec.provider.enabled {
+                            match self
+                                .send_streaming_ai_provider(&fb_rec, subpath, &body)
+                                .await
+                            {
+                                Ok(resp2) => {
+                                    active = fb_rec;
+                                    resp2
+                                }
+                                Err(e2) => {
+                                    return Err(FerroError::Internal(anyhow::anyhow!(
+                                        "primary and fallback AI providers failed: {e2}"
+                                    )));
+                                }
+                            }
+                        } else {
+                            match primary_fail {
+                                Ok(resp) => resp,
+                                Err(msg) => return Err(FerroError::Internal(anyhow::anyhow!(msg))),
+                            }
+                        }
+                    } else {
+                        match primary_fail {
+                            Ok(resp) => resp,
+                            Err(msg) => return Err(FerroError::Internal(anyhow::anyhow!(msg))),
+                        }
+                    }
+                } else {
+                    match primary_fail {
+                        Ok(resp) => resp,
+                        Err(msg) => return Err(FerroError::Internal(anyhow::anyhow!(msg))),
+                    }
+                }
+            }
+        };
+
+        let status = upstream.status().as_u16();
+        let content_type = upstream
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("text/event-stream; charset=utf-8")
+            .to_string();
+
+        let provider_name = active.provider.name.clone();
+        let fallback_model = body
+            .get("model")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+            .or_else(|| active.provider.default_model.clone());
+        let project_id = caller.project_id().map(str::to_string);
+        let svc = self.clone();
+
+        let (tx, rx) = mpsc::channel::<std::io::Result<Bytes>>(32);
+        let mut resp = upstream;
+        let provider_for_task = provider_name.clone();
+        tokio::spawn(async move {
+            let mut sse_buf = String::new();
+            let mut prompt_tokens = 0u64;
+            let mut completion_tokens = 0u64;
+            let mut total_tokens = 0u64;
+            let mut model_seen: Option<String> = None;
+
+            loop {
+                match resp.chunk().await {
+                    Ok(Some(chunk)) => {
+                        if let Ok(text) = std::str::from_utf8(&chunk) {
+                            sse_buf.push_str(text);
+                            while let Some(pos) = sse_buf.find('\n') {
+                                let line: String = sse_buf.drain(..=pos).collect();
+                                extract_sse_usage(
+                                    &line,
+                                    &mut prompt_tokens,
+                                    &mut completion_tokens,
+                                    &mut total_tokens,
+                                    &mut model_seen,
+                                );
+                            }
+                        }
+                        if tx.send(Ok(chunk)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(None) => {
+                        if !sse_buf.is_empty() {
+                            extract_sse_usage(
+                                &sse_buf,
+                                &mut prompt_tokens,
+                                &mut completion_tokens,
+                                &mut total_tokens,
+                                &mut model_seen,
+                            );
+                        }
+                        break;
+                    }
+                    Err(err) => {
+                        let _ = tx.send(Err(std::io::Error::other(err.to_string()))).await;
+                        break;
+                    }
+                }
+            }
+
+            let latency_ms = started.elapsed().as_millis() as u64;
+            let _ = svc
+                .registry
+                .record_ai_usage(&AiUsageRecord {
+                    id: 0,
+                    provider_name: provider_for_task,
+                    project_id,
+                    model: model_seen.or(fallback_model),
+                    prompt_tokens,
+                    completion_tokens,
+                    total_tokens,
+                    cached: false,
+                    status,
+                    latency_ms,
+                    created_at: Utc::now().timestamp_millis(),
+                })
+                .await;
+        });
+
+        let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|item| (item, rx))
+        });
+
+        Ok(AiProxyStreamResponse {
+            status,
+            content_type,
+            provider_name,
+            body: Box::pin(stream),
         })
     }
 }

@@ -2,21 +2,26 @@ use std::collections::BTreeSet;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use axum::{
     body::Body,
+    extract::State,
     http::{header, HeaderValue, Request, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::get,
     Json, Router,
 };
+use axum_server::accept::Accept;
 use axum_server::tls_rustls::RustlsConfig;
 use axum_server::Handle;
 use futures_util::StreamExt;
-use rustls_acme::{caches::DirCache, AcmeConfig};
+use rustls_acme::{axum::AxumAcceptor, caches::DirCache, AcmeConfig};
 use serde::Serialize;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{error, info, warn};
 
 use crate::config::Config;
@@ -148,6 +153,115 @@ pub fn build_https_redirect_router(https_port: u16) -> Router {
         .fallback(move |req: Request<Body>| async move { redirect_to_https(req, https_port) })
 }
 
+/// Build a dynamic HTTP router that enforces HTTP->HTTPS redirects live based on
+/// [`PlatformService::effective_http_redirect_https`] while always keeping `/_healthz` accessible.
+pub fn build_dynamic_http_router(svc: PlatformService, app: Router, https_port: u16) -> Router {
+    let default_redirect = svc.config().tls.http_redirect_https;
+    build_dynamic_http_router_with_default(svc, app, https_port, default_redirect)
+}
+
+fn build_dynamic_http_router_with_default(
+    svc: PlatformService,
+    app: Router,
+    https_port: u16,
+    default_redirect: bool,
+) -> Router {
+    app.layer(middleware::from_fn_with_state(
+        svc,
+        move |State(svc): State<PlatformService>, req: Request<Body>, next: Next| async move {
+            let redirect_enabled = svc
+                .settings_overrides()
+                .http_redirect_https
+                .unwrap_or(default_redirect);
+            if redirect_enabled && req.uri().path() != "/_healthz" {
+                return redirect_to_https(req, https_port);
+            }
+            next.run(req).await
+        },
+    ))
+}
+
+#[derive(Clone)]
+struct HotSwapAcmeAcceptor {
+    inner: Arc<RwLock<AxumAcceptor>>,
+}
+
+impl HotSwapAcmeAcceptor {
+    fn new(acceptor: AxumAcceptor) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(acceptor)),
+        }
+    }
+
+    fn swap(&self, next: AxumAcceptor) {
+        let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
+        *guard = next;
+    }
+}
+
+impl<I, S> Accept<I, S> for HotSwapAcmeAcceptor
+where
+    I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    S: Send + 'static,
+{
+    type Stream = <AxumAcceptor as Accept<I, S>>::Stream;
+    type Service = <AxumAcceptor as Accept<I, S>>::Service;
+    type Future = <AxumAcceptor as Accept<I, S>>::Future;
+
+    fn accept(&self, stream: I, service: S) -> Self::Future {
+        let acceptor = self.inner.read().unwrap_or_else(|e| e.into_inner()).clone();
+        acceptor.accept(stream, service)
+    }
+}
+
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+fn spawn_acme_instance(
+    domains: Vec<String>,
+    email: Option<String>,
+    staging: bool,
+    cache_dir: PathBuf,
+    svc: PlatformService,
+) -> (AxumAcceptor, AbortOnDrop) {
+    let mut acme_cfg = AcmeConfig::new(domains)
+        .cache(DirCache::new(cache_dir))
+        .directory_lets_encrypt(!staging);
+    if let Some(addr) = email.as_deref() {
+        acme_cfg = acme_cfg.contact_push(format!("mailto:{addr}"));
+    }
+
+    let mut state = acme_cfg.state();
+    let acceptor = state.axum_acceptor(state.default_rustls_config());
+    let task = tokio::spawn(async move {
+        while let Some(ev) = state.next().await {
+            match ev {
+                Ok(ok) => {
+                    let msg = format!("{ok:?}");
+                    info!(event = %msg, "acme event");
+                    svc.update_tls_runtime(|rt| {
+                        rt.last_acme_event = Some(msg);
+                        rt.last_acme_error = None;
+                    });
+                }
+                Err(err) => {
+                    let msg = format!("{err:?}");
+                    error!(error = %msg, "acme error");
+                    svc.update_tls_runtime(|rt| {
+                        rt.last_acme_error = Some(msg);
+                    });
+                }
+            }
+        }
+    });
+    (acceptor, AbortOnDrop(task))
+}
+
 fn is_valid_redirect_host(host: &str) -> bool {
     !host.is_empty()
         && !host.chars().any(|c| {
@@ -202,18 +316,38 @@ pub async fn serve_http_and_https<F>(
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    let route_domains = svc.allowed_domains().await;
-    let resolved = resolve_tls(cfg, route_domains)?;
+    let eff = svc.effective_settings();
+    let mut effective_cfg = cfg.clone();
+    if cfg.tls.cert_path.is_none() && cfg.tls.key_path.is_none() && eff.acme_enabled {
+        if effective_cfg.tls.https_bind.is_none() {
+            effective_cfg.tls.https_bind =
+                Some("0.0.0.0:443".parse().expect("valid default HTTPS bind"));
+        }
+        effective_cfg.tls.acme_email = eff.acme_email.clone();
+        effective_cfg.tls.acme_staging = eff.acme_staging;
+    }
+
+    let route_domains = svc.effective_tls_domains().await;
+    let resolved = resolve_tls(&effective_cfg, route_domains)?;
 
     match resolved {
         ResolvedTls::Disabled => {
+            svc.update_tls_runtime(|rt| {
+                rt.tls_mode = "disabled".to_string();
+                rt.tls_active = false;
+                rt.https_bind = None;
+                rt.active_domains.clear();
+            });
             let listener = tokio::net::TcpListener::bind(cfg.bind_addr)
                 .await
                 .with_context(|| format!("failed to bind HTTP address {}", cfg.bind_addr))?;
             info!(bind = %cfg.bind_addr, profile = ?cfg.profile, "ferropod listening (HTTP)");
-            axum::serve(listener, app)
-                .with_graceful_shutdown(shutdown)
-                .await?;
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(shutdown)
+            .await?;
             Ok(())
         }
         ResolvedTls::Manual {
@@ -232,30 +366,41 @@ where
                     )
                 })?;
 
+            svc.update_tls_runtime(|rt| {
+                rt.tls_mode = "manual".to_string();
+                rt.tls_active = true;
+                rt.https_bind = Some(https_bind.to_string());
+                rt.active_domains.clear();
+            });
+
             let http_handle = Handle::new();
             let https_handle = Handle::new();
             spawn_shutdown_bridge(shutdown, http_handle.clone(), https_handle.clone());
 
-            let http_app = if cfg.tls.http_redirect_https {
-                build_https_redirect_router(https_bind.port())
-            } else {
-                app.clone()
-            };
+            let http_app = build_dynamic_http_router_with_default(
+                svc.clone(),
+                app.clone(),
+                https_bind.port(),
+                cfg.tls.http_redirect_https,
+            );
 
             info!(
                 http_bind = %cfg.bind_addr,
                 https_bind = %https_bind,
-                redirect = cfg.tls.http_redirect_https,
+                redirect = svc
+                    .settings_overrides()
+                    .http_redirect_https
+                    .unwrap_or(cfg.tls.http_redirect_https),
                 profile = ?cfg.profile,
                 "ferropod listening (HTTP + Manual HTTPS)"
             );
 
             let http_fut = axum_server::bind(cfg.bind_addr)
                 .handle(http_handle)
-                .serve(http_app.into_make_service());
+                .serve(http_app.into_make_service_with_connect_info::<SocketAddr>());
             let https_fut = axum_server::bind_rustls(https_bind, rustls_cfg)
                 .handle(https_handle)
-                .serve(app.into_make_service());
+                .serve(app.into_make_service_with_connect_info::<SocketAddr>());
 
             tokio::try_join!(http_fut, https_fut)?;
             Ok(())
@@ -274,24 +419,75 @@ where
                     format!("failed to create ACME cache dir {}", cache_dir.display())
                 })?;
 
-            let mut acme_cfg = AcmeConfig::new(domains.clone())
-                .cache(DirCache::new(cache_dir.clone()))
-                .directory_lets_encrypt(!staging);
-            if let Some(addr) = email.as_deref() {
-                acme_cfg = acme_cfg.contact_push(format!("mailto:{addr}"));
-            }
+            svc.update_tls_runtime(|rt| {
+                rt.tls_mode = "acme".to_string();
+                rt.tls_active = true;
+                rt.https_bind = Some(https_bind.to_string());
+                rt.active_domains = domains.clone();
+            });
 
-            let mut state = acme_cfg.state();
-            let acceptor = state.axum_acceptor(state.default_rustls_config());
-
-            let acme_task = tokio::spawn(async move {
-                while let Some(ev) = state.next().await {
-                    match ev {
-                        Ok(ok) => info!(event = ?ok, "acme event"),
-                        Err(err) => error!(error = ?err, "acme error"),
+            let (initial_acceptor, initial_acme_guard) = spawn_acme_instance(
+                domains.clone(),
+                email.clone(),
+                staging,
+                cache_dir.clone(),
+                svc.clone(),
+            );
+            let hot_acceptor = HotSwapAcmeAcceptor::new(initial_acceptor);
+            let mut reload_rx = svc.subscribe_tls_reload();
+            let supervisor_svc = svc.clone();
+            let supervisor_acceptor = hot_acceptor.clone();
+            let supervisor_cache = cache_dir.clone();
+            let supervisor_task = tokio::spawn(async move {
+                let mut cur_domains = domains;
+                let mut cur_email = email;
+                let mut cur_staging = staging;
+                let mut _cur_acme_guard = initial_acme_guard;
+                while reload_rx.changed().await.is_ok() {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    let _ = reload_rx.borrow_and_update();
+                    let eff = supervisor_svc.effective_settings();
+                    let new_domains = supervisor_svc.effective_tls_domains().await;
+                    let new_email = eff
+                        .acme_email
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(ToString::to_string);
+                    let new_staging = eff.acme_staging;
+                    if new_domains.is_empty() {
+                        continue;
                     }
+                    if new_domains == cur_domains
+                        && new_email == cur_email
+                        && new_staging == cur_staging
+                    {
+                        continue;
+                    }
+                    info!(
+                        domains = ?new_domains,
+                        staging = new_staging,
+                        "reloading ACME certificate manager with updated domain set"
+                    );
+                    let (next_acceptor, next_guard) = spawn_acme_instance(
+                        new_domains.clone(),
+                        new_email.clone(),
+                        new_staging,
+                        supervisor_cache.clone(),
+                        supervisor_svc.clone(),
+                    );
+                    supervisor_acceptor.swap(next_acceptor);
+                    _cur_acme_guard = next_guard;
+                    cur_domains = new_domains.clone();
+                    cur_email = new_email;
+                    cur_staging = new_staging;
+                    supervisor_svc.update_tls_runtime(|rt| {
+                        rt.active_domains = new_domains;
+                        rt.reload_generation = rt.reload_generation.saturating_add(1);
+                    });
                 }
             });
+            let _supervisor_guard = AbortOnDrop(supervisor_task);
 
             if https_bind.port() != 443 {
                 warn!(
@@ -304,32 +500,35 @@ where
             let https_handle = Handle::new();
             spawn_shutdown_bridge(shutdown, http_handle.clone(), https_handle.clone());
 
-            let http_app = if cfg.tls.http_redirect_https {
-                build_https_redirect_router(https_bind.port())
-            } else {
-                app.clone()
-            };
+            let http_app = build_dynamic_http_router_with_default(
+                svc.clone(),
+                app.clone(),
+                https_bind.port(),
+                cfg.tls.http_redirect_https,
+            );
 
             info!(
                 http_bind = %cfg.bind_addr,
                 https_bind = %https_bind,
-                domains = ?domains,
+                domains = ?svc.tls_runtime_snapshot().active_domains,
                 staging,
-                redirect = cfg.tls.http_redirect_https,
+                redirect = svc
+                    .settings_overrides()
+                    .http_redirect_https
+                    .unwrap_or(cfg.tls.http_redirect_https),
                 profile = ?cfg.profile,
                 "ferropod listening (HTTP + ACME HTTPS)"
             );
 
             let http_fut = axum_server::bind(cfg.bind_addr)
                 .handle(http_handle)
-                .serve(http_app.into_make_service());
+                .serve(http_app.into_make_service_with_connect_info::<SocketAddr>());
             let https_fut = axum_server::bind(https_bind)
-                .acceptor(acceptor)
+                .acceptor(hot_acceptor)
                 .handle(https_handle)
-                .serve(app.into_make_service());
+                .serve(app.into_make_service_with_connect_info::<SocketAddr>());
 
             let res = tokio::try_join!(http_fut, https_fut);
-            acme_task.abort();
             res?;
             Ok(())
         }

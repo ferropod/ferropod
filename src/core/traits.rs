@@ -4,12 +4,13 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use crate::core::model::{
-    AiProviderRecord, AiUsageRecord, ApiToken, BucketMeta, BucketOpts, ByteRange, ByteStream,
-    CronJob, DbFtsIndexMeta, Deployment, EnqueueOpts, FerroError, Job, JobOutcome, JobStatus,
-    KvKeyMeta, KvNamespaceMeta, KvNamespaceOpts, KvValue, LogEntry, LogQuery, ObjectMeta, Project,
-    ProjectOpts, QueryResult, QueueConfig, QueueStats, RequestCtx, Result, Route, RouteEntry,
-    SearchFieldSchema, SearchIndexMeta, SearchIndexOpts, SearchQueryInput, SearchQueryResult,
-    SqlValue, TargetEnv, TokenScope, UserDbMeta, UserDbOpts, WorkerHttpRequest, WorkerHttpResponse,
+    AiProviderRecord, AiUsageRecord, AlertWebhookRecord, ApiToken, BucketMeta, BucketOpts,
+    ByteRange, ByteStream, CronJob, DbFtsIndexMeta, Deployment, EnqueueOpts, FerroError, Job,
+    JobOutcome, JobStatus, KvKeyMeta, KvNamespaceMeta, KvNamespaceOpts, KvValue, LogEntry,
+    LogQuery, ObjectMeta, Project, ProjectOpts, QueryResult, QueueConfig, QueueStats, RequestCtx,
+    Result, Route, RouteEntry, SearchFieldSchema, SearchIndexMeta, SearchIndexOpts,
+    SearchQueryInput, SearchQueryResult, SqlValue, TargetEnv, TokenScope, UserDbMeta, UserDbOpts,
+    WorkerHttpRequest, WorkerHttpResponse,
 };
 
 #[async_trait]
@@ -182,14 +183,67 @@ pub trait RegistryStore: Send + Sync {
     async fn list_ai_usage(
         &self,
         provider_name: Option<&str>,
+        project_id: Option<&str>,
         limit: usize,
     ) -> Result<Vec<AiUsageRecord>> {
-        let _ = (provider_name, limit);
+        let _ = (provider_name, project_id, limit);
         Ok(Vec::new())
+    }
+    async fn aggregate_ai_usage(
+        &self,
+        provider_name: Option<&str>,
+        project_id: Option<&str>,
+        month_start_ms: i64,
+    ) -> Result<(usize, usize, u64, u64, u64, u64)> {
+        let _ = (provider_name, project_id, month_start_ms);
+        Ok((0, 0, 0, 0, 0, 0))
+    }
+    async fn cleanup_ai_usage_before(&self, cutoff_ms: i64) -> Result<u64> {
+        let _ = cutoff_ms;
+        Ok(0)
     }
     async fn sum_ai_tokens_since(&self, provider_name: &str, since_ms: i64) -> Result<u64> {
         let _ = (provider_name, since_ms);
         Ok(0)
+    }
+
+    async fn upsert_alert_webhook(&self, rec: AlertWebhookRecord) -> Result<AlertWebhookRecord> {
+        let _ = rec;
+        Err(FerroError::NotImplemented("alert webhook store".into()))
+    }
+    async fn get_alert_webhook(&self, id: &str) -> Result<Option<AlertWebhookRecord>> {
+        let _ = id;
+        Ok(None)
+    }
+    async fn list_alert_webhooks(&self) -> Result<Vec<AlertWebhookRecord>> {
+        Ok(Vec::new())
+    }
+    async fn delete_alert_webhook(&self, id: &str) -> Result<bool> {
+        let _ = id;
+        Ok(false)
+    }
+    async fn record_alert_webhook_delivery(
+        &self,
+        id: &str,
+        status: Option<u16>,
+        error: Option<&str>,
+        triggered_at: i64,
+    ) -> Result<()> {
+        let _ = (id, status, error, triggered_at);
+        Ok(())
+    }
+
+    async fn get_platform_setting(&self, key: &str) -> Result<Option<String>> {
+        let _ = key;
+        Ok(None)
+    }
+    async fn set_platform_setting(&self, key: &str, value_json: &str) -> Result<()> {
+        let _ = (key, value_json);
+        Ok(())
+    }
+    async fn delete_platform_setting(&self, key: &str) -> Result<()> {
+        let _ = key;
+        Ok(())
     }
 }
 

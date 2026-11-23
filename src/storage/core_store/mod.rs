@@ -179,6 +179,7 @@ CREATE TABLE IF NOT EXISTS ai_providers (
     rate_limit_rpm INTEGER,
     cache_ttl_secs INTEGER NOT NULL DEFAULT 0,
     monthly_token_budget INTEGER,
+    timeout_secs INTEGER NOT NULL DEFAULT 120,
     enabled INTEGER NOT NULL DEFAULT 1,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
@@ -198,6 +199,27 @@ CREATE TABLE IF NOT EXISTS ai_usage (
     created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_ai_usage_provider_ts ON ai_usage (provider_name, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS alert_webhooks (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    url TEXT NOT NULL,
+    secret_nonce BLOB,
+    secret_ciphertext BLOB,
+    events_json TEXT NOT NULL DEFAULT '["*"]',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    last_status INTEGER,
+    last_error TEXT,
+    last_triggered_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS platform_settings (
+    key TEXT PRIMARY KEY,
+    value_json TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
 "#;
 
 /// Turso MVCC store for `core.db` (control-plane metadata: projects, routes, secrets, tokens, KV namespace
@@ -271,6 +293,11 @@ impl TursoCoreStore {
             ("routes", "basic_auth_pass_hash", "TEXT"),
             ("routes", "canary_deployment_id", "TEXT"),
             ("routes", "canary_weight", "INTEGER NOT NULL DEFAULT 0"),
+            (
+                "ai_providers",
+                "timeout_secs",
+                "INTEGER NOT NULL DEFAULT 120",
+            ),
         ] {
             ensure_column(&conn, table, col, def).await?;
         }

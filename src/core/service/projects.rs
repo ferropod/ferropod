@@ -241,6 +241,7 @@ impl PlatformService {
         self.projects.delete_project(&proj.id).await?;
         self.runtime.delete_project_artifacts(&proj.id).await?;
         self.refresh_routes().await?;
+        self.notify_tls_reload();
         self.audit(
             Some(&proj.id),
             &caller.actor,
@@ -572,6 +573,16 @@ impl PlatformService {
             "deployment.auto_rollback",
             serde_json::json!({ "failed_deployment_id": failed_dep_id, "restored_deployment_id": prev.id }),
         );
+        self.fire_alert(
+            "auto_rollback",
+            format!("Auto-rolled back app '{}' to {}", proj.name, prev.id),
+            serde_json::json!({
+                "project_id": proj.id,
+                "project_name": proj.name,
+                "failed_deployment_id": failed_dep_id,
+                "restored_deployment_id": prev.id,
+            }),
+        );
         Ok(Some(prev))
     }
 
@@ -781,6 +792,7 @@ impl PlatformService {
             .upsert_route(route.clone(), caller.project_id())
             .await?;
         self.refresh_routes().await?;
+        self.notify_tls_reload();
         self.audit(
             Some(&proj.id),
             &caller.actor,
@@ -825,6 +837,7 @@ impl PlatformService {
             .upsert_route(route.clone(), caller.project_id())
             .await?;
         self.refresh_routes().await?;
+        self.notify_tls_reload();
         self.audit(
             Some(&proj.id),
             &caller.actor,
@@ -859,6 +872,7 @@ impl PlatformService {
             return Err(FerroError::NotFound(format!("route '{norm_host}'")));
         }
         self.refresh_routes().await?;
+        self.notify_tls_reload();
         self.audit(
             Some(&existing.project_id),
             &caller.actor,
@@ -936,6 +950,15 @@ impl PlatformService {
                     self.metrics
                         .worker_oom_total
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    self.fire_alert(
+                        "worker_oom",
+                        format!("Worker OOM in app '{project_id}'"),
+                        serde_json::json!({
+                            "project_id": project_id,
+                            "request_id": request_id,
+                            "error": msg,
+                        }),
+                    );
                 }
                 self.logs.emit(LogEntry {
                     id: None,

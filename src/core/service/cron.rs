@@ -436,6 +436,17 @@ impl PlatformService {
         if let Some(msg) = &err_msg {
             status = format!("error: {msg}");
             level = "error";
+            self.fire_alert(
+                "cron_failure",
+                format!("Cron job '{}' failed", job.name),
+                serde_json::json!({
+                    "cron_id": job.id,
+                    "name": job.name,
+                    "project_id": job.project_id,
+                    "schedule": job.schedule,
+                    "error": msg,
+                }),
+            );
         }
 
         job.last_run_at = Some(now);

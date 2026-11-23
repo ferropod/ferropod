@@ -1,4 +1,5 @@
 mod ai;
+mod alerts;
 mod blob;
 mod cron;
 mod db;
@@ -6,28 +7,36 @@ mod kv;
 mod logs;
 mod projects;
 mod queue;
+mod realtime;
 mod search;
 mod secrets;
+mod settings;
 mod tokens;
 
+pub use ai::{AiProxyResponse, AiProxyResult, AiProxyStreamResponse};
 pub use cron::cron_matches_timestamp;
 pub use logs::LogSubscription;
 pub(crate) use projects::normalize_host;
 pub use projects::CreateDeploymentInput;
+pub use realtime::RealtimeHub;
+pub use settings::is_loopback_host;
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
-use tokio::sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore};
+use tokio::sync::{watch, Mutex, OwnedSemaphorePermit, RwLock, Semaphore};
 use tracing::warn;
 
-use crate::config::Config;
+use crate::config::{Config, Profile};
 use crate::core::crypto::Crypto;
-use crate::core::model::{Caller, FerroError, LogEntry, Project, Result, RouteEntry};
+use crate::core::model::{
+    AutoBackupConfig, Caller, FerroError, LogEntry, PlatformSettingsOverrides, Project, Result,
+    RouteEntry, TlsRuntimeState,
+};
 use crate::core::traits::{
     DbManager, KvStore, LogStore, ObjectStore, ProjectStore, QueueStore, RegistryStore,
     SearchStore, SecretStore, TokenStore, WorkerRuntime,
@@ -111,19 +120,37 @@ impl DeploymentHealthTracker {
     }
 
     pub fn record_outcome(&self, dep_id: &str, is_5xx: bool) -> bool {
+        self.record_outcome_with_policy(dep_id, is_5xx, true, 300, 10, 50)
+    }
+
+    pub fn record_outcome_with_policy(
+        &self,
+        dep_id: &str,
+        is_5xx: bool,
+        enabled: bool,
+        window_secs: i64,
+        min_requests: u64,
+        error_rate_pct: u8,
+    ) -> bool {
+        if !enabled {
+            return false;
+        }
         let now = Utc::now().timestamp();
         let mut map = self.windows.lock().unwrap_or_else(|e| e.into_inner());
         let Some(win) = map.get_mut(dep_id) else {
             return false;
         };
-        if win.rolled_back || (now - win.promoted_at_secs) > 300 {
+        if win.rolled_back || (now - win.promoted_at_secs) > window_secs.max(1) {
             return false;
         }
         win.total += 1;
         if is_5xx {
             win.errors_5xx += 1;
         }
-        if win.total >= 10 && win.errors_5xx * 2 >= win.total {
+        let threshold_pct = u64::from(error_rate_pct.clamp(1, 100));
+        if win.total >= min_requests.max(1)
+            && win.errors_5xx.saturating_mul(100) >= win.total.saturating_mul(threshold_pct)
+        {
             win.rolled_back = true;
             true
         } else {
@@ -156,6 +183,11 @@ pub struct PlatformService {
     routes: Arc<RwLock<HashMap<String, RouteEntry>>>,
     http_concurrency: Arc<Semaphore>,
     route_refresh_lock: Arc<Mutex<()>>,
+    settings: Arc<std::sync::RwLock<PlatformSettingsOverrides>>,
+    has_alert_webhook_secret: Arc<AtomicBool>,
+    tls_runtime: Arc<std::sync::RwLock<TlsRuntimeState>>,
+    tls_reload_tx: watch::Sender<u64>,
+    realtime: Arc<RealtimeHub>,
 }
 
 impl PlatformService {
@@ -166,6 +198,49 @@ impl PlatformService {
             Arc::new(TursoSearchStore::open(&config.search_db_path()).await?);
         let wasmtime_rt = Arc::new(WasmtimeRuntime::new(config.clone())?);
         let runtime: Arc<dyn WorkerRuntime> = wasmtime_rt.clone();
+
+        let initial_overrides = match deps.registry.get_platform_setting("runtime").await? {
+            Some(raw) => match serde_json::from_str::<PlatformSettingsOverrides>(&raw) {
+                Ok(parsed) => parsed,
+                Err(e) => {
+                    warn!(error = %e, "ignoring malformed persisted platform settings in core.db");
+                    PlatformSettingsOverrides::default()
+                }
+            },
+            None => PlatformSettingsOverrides::default(),
+        };
+        let has_webhook_secret = deps
+            .registry
+            .get_platform_setting("alert_webhook_secret")
+            .await?
+            .is_some();
+        let initial_tls_mode = if config.tls.cert_path.is_some() && config.tls.key_path.is_some() {
+            "manual"
+        } else if !config.tls.acme_domains.is_empty()
+            || config.tls.acme_email.is_some()
+            || config.tls.acme_staging
+            || config.tls.https_bind.is_some()
+        {
+            "acme"
+        } else {
+            "disabled"
+        };
+        let initial_tls_state = TlsRuntimeState {
+            tls_mode: initial_tls_mode.to_string(),
+            tls_active: false,
+            https_bind: config.tls.https_bind.map(|a| a.to_string()),
+            active_domains: Vec::new(),
+            reload_generation: 0,
+            last_acme_event: None,
+            last_acme_error: None,
+        };
+        let (tls_reload_tx, _) = watch::channel(0u64);
+        let max_rt_channels = match config.profile.resolve() {
+            Profile::LowMem => 256,
+            Profile::Standard | Profile::Auto => 1024,
+        };
+        let realtime = Arc::new(RealtimeHub::new(max_rt_channels));
+
         let svc = Self {
             config,
             crypto,
@@ -188,6 +263,11 @@ impl PlatformService {
             routes: Arc::new(RwLock::new(HashMap::new())),
             http_concurrency,
             route_refresh_lock: Arc::new(Mutex::new(())),
+            settings: Arc::new(std::sync::RwLock::new(initial_overrides)),
+            has_alert_webhook_secret: Arc::new(AtomicBool::new(has_webhook_secret)),
+            tls_runtime: Arc::new(std::sync::RwLock::new(initial_tls_state)),
+            tls_reload_tx,
+            realtime,
         };
         wasmtime_rt.bind_service(svc.clone());
         svc.refresh_routes().await?;
@@ -258,6 +338,8 @@ impl PlatformService {
 
     /// Execute one background maintenance cycle (KV TTL, queue lease reaper/retention, blob GC, log rotation).
     pub async fn run_maintenance_once(&self) {
+        let eff = self.effective_settings();
+
         loop {
             match self.kv.cleanup_expired_batch(500).await {
                 Ok(500) => tokio::time::sleep(Duration::from_millis(50)).await,
@@ -277,8 +359,8 @@ impl PlatformService {
             match self
                 .queue
                 .cleanup_expired_batch(
-                    self.config.queue_pending_retention_secs,
-                    self.config.queue_dlq_retention_secs,
+                    eff.queue_pending_retention_secs,
+                    eff.queue_dlq_retention_secs,
                     500,
                 )
                 .await
@@ -297,23 +379,22 @@ impl PlatformService {
         }
 
         if let Err(e) = self
-            .run_artifact_gc_with_grace(
-                u64::try_from(self.config.blob_gc_grace_secs)
-                    .unwrap_or(0)
-                    .max(300),
-            )
+            .run_artifact_gc_with_grace(u64::try_from(eff.blob_gc_grace_secs).unwrap_or(0).max(300))
             .await
         {
             warn!(error = %e, "artifact gc error");
         }
 
-        if let Err(e) = self
-            .logs
-            .cleanup_old_files(self.config.log_retention_days)
-            .await
-        {
+        if let Err(e) = self.logs.cleanup_old_files(eff.log_retention_days).await {
             warn!(error = %e, "daily log cleanup error");
         }
+
+        let ai_cutoff_ms = Utc::now().timestamp_millis() - (30i64 * 86_400 * 1000);
+        if let Err(e) = self.registry.cleanup_ai_usage_before(ai_cutoff_ms).await {
+            warn!(error = %e, "ai usage cleanup error");
+        }
+
+        self.maybe_run_auto_backup().await;
     }
 
     /// Remove compiled/uploaded artifact files on disk no longer referenced by any deployment.
@@ -349,6 +430,175 @@ impl PlatformService {
         self.queue.snapshot_to(&out_dir.join("queue.db")).await?;
         self.search.snapshot_to(&out_dir.join("search.db")).await?;
         self.snapshot_user_dbs(caller, &out_dir.join("dbs")).await
+    }
+
+    pub async fn get_auto_backup_config(&self, caller: &Caller) -> Result<AutoBackupConfig> {
+        Self::require_admin(caller)?;
+        let raw = self.registry.get_platform_setting("auto_backup").await?;
+        match raw {
+            Some(s) => Ok(serde_json::from_str(&s).unwrap_or_default()),
+            None => Ok(AutoBackupConfig::default()),
+        }
+    }
+
+    pub async fn update_auto_backup_config(
+        &self,
+        caller: &Caller,
+        mut cfg: AutoBackupConfig,
+    ) -> Result<AutoBackupConfig> {
+        Self::require_admin(caller)?;
+        cfg.interval_hours = cfg.interval_hours.clamp(1, 720);
+        cfg.max_backups = cfg.max_backups.clamp(1, 100);
+        let prev = self.get_auto_backup_config(caller).await?;
+        if cfg.last_backup_at_ms.is_none() {
+            cfg.last_backup_at_ms = prev.last_backup_at_ms;
+        }
+        let json = serde_json::to_string(&cfg)
+            .map_err(|e| FerroError::Internal(anyhow::anyhow!("serialize auto_backup: {e}")))?;
+        self.registry
+            .set_platform_setting("auto_backup", &json)
+            .await?;
+        self.audit(
+            None,
+            &caller.actor,
+            "backup.schedule.update",
+            serde_json::json!({
+                "enabled": cfg.enabled,
+                "interval_hours": cfg.interval_hours,
+                "max_backups": cfg.max_backups,
+            }),
+        );
+        Ok(cfg)
+    }
+
+    async fn maybe_run_auto_backup(&self) {
+        let mut cfg = match self.registry.get_platform_setting("auto_backup").await {
+            Ok(Some(s)) => serde_json::from_str::<AutoBackupConfig>(&s).unwrap_or_default(),
+            _ => return,
+        };
+        if !cfg.enabled {
+            return;
+        }
+        let now_ms = Utc::now().timestamp_millis();
+        let interval_ms = i64::from(cfg.interval_hours.max(1)) * 3_600_000;
+        if let Some(last) = cfg.last_backup_at_ms {
+            if now_ms.saturating_sub(last) < interval_ms {
+                return;
+            }
+        }
+        let backups_root = self.config.data_dir.join("backups");
+        let name = format!("auto_{}", Utc::now().format("%Y%m%d_%H%M%S"));
+        let out_dir = backups_root.join(&name);
+        if let Err(e) = self
+            .create_snapshot(&Caller::system("auto-backup"), &out_dir)
+            .await
+        {
+            warn!(error = %e, "scheduled auto-backup snapshot failed");
+            return;
+        }
+        cfg.last_backup_at_ms = Some(now_ms);
+        if let Ok(json) = serde_json::to_string(&cfg) {
+            let _ = self
+                .registry
+                .set_platform_setting("auto_backup", &json)
+                .await;
+        }
+
+        // Prune oldest `auto_*` directories exceeding `max_backups`
+        let keep = cfg.max_backups.max(1);
+        if let Ok(mut rd) = tokio::fs::read_dir(&backups_root).await {
+            let mut auto_dirs = Vec::new();
+            while let Ok(Some(entry)) = rd.next_entry().await {
+                let fname = entry.file_name().to_string_lossy().to_string();
+                if fname.starts_with("auto_") {
+                    if let Ok(meta) = entry.metadata().await {
+                        if meta.is_dir() {
+                            auto_dirs.push(fname);
+                        }
+                    }
+                }
+            }
+            auto_dirs.sort();
+            if auto_dirs.len() > keep {
+                let to_remove = auto_dirs.len() - keep;
+                for old in auto_dirs.into_iter().take(to_remove) {
+                    let _ = tokio::fs::remove_dir_all(backups_root.join(old)).await;
+                }
+            }
+        }
+    }
+
+    pub async fn restore_snapshot(
+        &self,
+        caller: &Caller,
+        backup_dir: &Path,
+    ) -> Result<Vec<String>> {
+        Self::require_admin(caller)?;
+        let src_core = backup_dir.join("core.db");
+        if !src_core.exists() {
+            return Err(FerroError::InvalidArgument(
+                "backup directory does not contain core.db".into(),
+            ));
+        }
+
+        let _ = self.flush_and_checkpoint().await;
+
+        let safety_dir = self.config.data_dir.join("backups").join(format!(
+            "pre_restore_{}",
+            Utc::now().format("%Y%m%d_%H%M%S")
+        ));
+        if let Err(e) = self.create_snapshot(caller, &safety_dir).await {
+            warn!(error = %e, "pre-restore safety snapshot failed");
+        }
+
+        let mut restored = Vec::new();
+        for (name, dest) in [
+            ("core.db", self.config.core_db_path()),
+            ("kv.db", self.config.kv_db_path()),
+            ("queue.db", self.config.queue_db_path()),
+            ("search.db", self.config.search_db_path()),
+        ] {
+            let src = backup_dir.join(name);
+            if src.exists() {
+                copy_restore_db_file(&src, &dest).await?;
+                restored.push(name.to_string());
+            }
+        }
+
+        let src_dbs = backup_dir.join("dbs");
+        if src_dbs.is_dir() {
+            let dest_dbs = self.config.user_dbs_dir();
+            tokio::fs::create_dir_all(&dest_dbs)
+                .await
+                .map_err(|e| FerroError::Internal(anyhow::anyhow!("create dbs dir: {e}")))?;
+            let mut rd = tokio::fs::read_dir(&src_dbs)
+                .await
+                .map_err(|e| FerroError::Internal(anyhow::anyhow!("read backup dbs: {e}")))?;
+            while let Some(entry) = rd
+                .next_entry()
+                .await
+                .map_err(|e| FerroError::Internal(anyhow::anyhow!("iter backup dbs: {e}")))?
+            {
+                let fname = entry.file_name().to_string_lossy().to_string();
+                if fname.ends_with(".db") {
+                    let src = entry.path();
+                    let dest = dest_dbs.join(&fname);
+                    copy_restore_db_file(&src, &dest).await?;
+                    restored.push(format!("dbs/{fname}"));
+                }
+            }
+        }
+
+        self.audit(
+            None,
+            &caller.actor,
+            "backup.restore",
+            serde_json::json!({
+                "backup_dir": backup_dir.display().to_string(),
+                "restored_files": restored,
+            }),
+        );
+        Ok(restored)
     }
 
     pub(super) fn require_admin(caller: &Caller) -> Result<()> {
@@ -439,4 +689,14 @@ fn normalize_resource_group(group: Option<&str>) -> Result<Option<&str>> {
         }
     }
     Ok(group)
+}
+
+async fn copy_restore_db_file(src: &Path, dest: &Path) -> Result<()> {
+    for suffix in ["-wal", "-log", "-shm"] {
+        let dest_sidecar = std::path::PathBuf::from(format!("{}{}", dest.display(), suffix));
+        if dest_sidecar.exists() {
+            let _ = tokio::fs::remove_file(&dest_sidecar).await;
+        }
+    }
+    crate::storage::tx::copy_db_with_sidecars(src, dest).await
 }

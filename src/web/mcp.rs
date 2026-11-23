@@ -13,8 +13,9 @@ use chrono::Utc;
 use serde_json::{json, Value};
 
 use crate::core::model::{
-    Bindings, Caller, EnqueueOpts, FerroError, JobStatus, KvNamespaceOpts, LogQuery, QueueConfig,
-    Result as FerroResult, SearchIndexOpts, SearchQueryInput, SqlValue, TargetEnv, UserDbOpts,
+    AiProviderOpts, Bindings, Caller, EnqueueOpts, FerroError, JobStatus, KvNamespaceOpts,
+    LogQuery, QueueConfig, Result as FerroResult, SearchIndexOpts, SearchQueryInput, SqlValue,
+    TargetEnv, UserDbOpts,
 };
 use crate::core::service::{CreateDeploymentInput, PlatformService};
 use crate::gateway::guard::{authenticate_caller, ApiError};
@@ -180,7 +181,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "search_query",
-            "description": "Query or upsert JSON documents in a FerroPod full-text / hybrid search index.",
+            "description": "Query or upsert JSON documents in a FerroPod full-text / hybrid vector search index.",
             "inputSchema": {
                 "type": "object",
                 "required": ["action", "index"],
@@ -190,7 +191,41 @@ fn tool_definitions() -> Value {
                     "query": { "type": "string", "description": "Search keywords (for query)" },
                     "fuzzy": { "type": "boolean" },
                     "limit": { "type": "integer" },
+                    "vector": {
+                        "type": "array",
+                        "items": { "type": "number" },
+                        "description": "Optional float embedding vector for hybrid BM25 + cosine vector search"
+                    },
+                    "alpha": { "type": "number", "description": "Optional hybrid blend weight (0.0=BM25 only, 1.0=vector only, default 0.5)" },
                     "doc": { "type": "object", "description": "Document JSON object (for upsert)" }
+                }
+            }
+        },
+        {
+            "name": "manage_ai",
+            "description": "Configure AI Gateway upstream providers, inspect token usage/budgets, clear cache, or run a chat completion.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["action"],
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["list_providers", "upsert_provider", "delete_provider", "usage", "chat", "clear_cache"]
+                    },
+                    "provider": { "type": "string", "description": "AI provider name" },
+                    "base_url": { "type": "string", "description": "Upstream OpenAI-compatible base URL (for upsert_provider)" },
+                    "api_key": { "type": "string", "description": "Optional upstream API key (encrypted at rest)" },
+                    "default_model": { "type": "string" },
+                    "fallback_provider": { "type": "string" },
+                    "rate_limit_rpm": { "type": "integer" },
+                    "cache_ttl_secs": { "type": "integer" },
+                    "monthly_token_budget": { "type": "integer" },
+                    "timeout_secs": { "type": "integer" },
+                    "enabled": { "type": "boolean" },
+                    "model": { "type": "string", "description": "Model override (for chat)" },
+                    "messages": { "type": "array", "description": "OpenAI chat messages array (for chat)" },
+                    "prompt": { "type": "string", "description": "Shorthand single user prompt (for chat if messages omitted)" },
+                    "limit": { "type": "integer", "description": "Recent usage rows limit (for usage)" }
                 }
             }
         }
@@ -745,6 +780,12 @@ async fn run_tool(
                         .and_then(|v| v.as_u64())
                         .unwrap_or(10)
                         .clamp(1, 50) as usize;
+                    let vector = args.get("vector").and_then(|v| v.as_array()).map(|arr| {
+                        arr.iter()
+                            .filter_map(|x| x.as_f64().map(|f| f as f32))
+                            .collect::<Vec<f32>>()
+                    });
+                    let alpha = args.get("alpha").and_then(|v| v.as_f64());
                     let res = svc
                         .query_search_index(
                             caller,
@@ -755,8 +796,8 @@ async fn run_tool(
                                 sort: None,
                                 limit: Some(limit),
                                 facets: HashMap::new(),
-                                vector: None,
-                                alpha: None,
+                                vector,
+                                alpha,
                             },
                         )
                         .await?;
@@ -773,6 +814,99 @@ async fn run_tool(
                 other => {
                     return Err(FerroError::InvalidArgument(format!(
                         "unsupported search action '{other}'"
+                    )))
+                }
+            }
+        }
+        "manage_ai" => {
+            let action = str_arg(args, "action")?;
+            match action {
+                "list_providers" => {
+                    let list = svc.list_ai_providers(caller).await?;
+                    serde_json::to_value(list)
+                        .map_err(|e| FerroError::Internal(anyhow::anyhow!("{e}")))?
+                }
+                "upsert_provider" => {
+                    let provider = str_arg(args, "provider")?;
+                    let opts = AiProviderOpts {
+                        name: None,
+                        base_url: opt_str(args, "base_url").map(str::to_string),
+                        api_key: opt_str(args, "api_key").map(str::to_string),
+                        default_model: args
+                            .get("default_model")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string),
+                        fallback_provider: args
+                            .get("fallback_provider")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string),
+                        rate_limit_rpm: args
+                            .get("rate_limit_rpm")
+                            .and_then(|v| v.as_u64())
+                            .and_then(|v| u32::try_from(v).ok()),
+                        cache_ttl_secs: args.get("cache_ttl_secs").and_then(|v| v.as_u64()),
+                        monthly_token_budget: args
+                            .get("monthly_token_budget")
+                            .and_then(|v| v.as_u64()),
+                        timeout_secs: args.get("timeout_secs").and_then(|v| v.as_u64()),
+                        enabled: args.get("enabled").and_then(|v| v.as_bool()),
+                    };
+                    let saved = match svc.update_ai_provider(caller, provider, opts.clone()).await {
+                        Ok(p) => p,
+                        Err(FerroError::NotFound(_)) => {
+                            svc.create_ai_provider(caller, provider, opts).await?
+                        }
+                        Err(e) => return Err(e),
+                    };
+                    serde_json::to_value(saved)
+                        .map_err(|e| FerroError::Internal(anyhow::anyhow!("{e}")))?
+                }
+                "delete_provider" => {
+                    let provider = str_arg(args, "provider")?;
+                    svc.delete_ai_provider(caller, provider).await?;
+                    json!({ "deleted": provider })
+                }
+                "usage" => {
+                    let provider = opt_str(args, "provider");
+                    let limit = args
+                        .get("limit")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(50)
+                        .clamp(1, 500) as usize;
+                    let summary = svc.list_ai_usage(caller, provider, limit).await?;
+                    serde_json::to_value(summary)
+                        .map_err(|e| FerroError::Internal(anyhow::anyhow!("{e}")))?
+                }
+                "chat" => {
+                    let provider = opt_str(args, "provider");
+                    let messages = match args.get("messages").cloned() {
+                        Some(v) => v,
+                        None => {
+                            let prompt = str_arg(args, "prompt")?;
+                            json!([{ "role": "user", "content": prompt }])
+                        }
+                    };
+                    let mut req_body = json!({ "messages": messages });
+                    if let Some(m) = opt_str(args, "model") {
+                        req_body["model"] = json!(m);
+                    }
+                    let res = svc
+                        .ai_proxy(caller, provider, "chat/completions", req_body)
+                        .await?;
+                    json!({
+                        "status": res.status,
+                        "provider": res.provider_name,
+                        "cached": res.cached,
+                        "response": res.body,
+                    })
+                }
+                "clear_cache" => {
+                    let evicted = svc.clear_ai_cache(caller).await?;
+                    json!({ "evicted": evicted })
+                }
+                other => {
+                    return Err(FerroError::InvalidArgument(format!(
+                        "unsupported manage_ai action '{other}'"
                     )))
                 }
             }

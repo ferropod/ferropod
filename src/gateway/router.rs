@@ -1,6 +1,8 @@
+use std::net::{IpAddr, SocketAddr};
+
 use axum::{
     body::Body,
-    extract::State,
+    extract::{ConnectInfo, State},
     http::{header, HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode},
     middleware,
     response::{IntoResponse, Response},
@@ -17,7 +19,7 @@ use crate::core::model::{RequestCtx, TargetEnv, WorkerHttpRequest};
 use crate::core::service::PlatformService;
 use crate::gateway::{
     blob_api::{self, etag_matches},
-    guard::{access_log_middleware, verify_basic_auth},
+    guard::{access_log_middleware, panel_domain_guard_middleware, verify_basic_auth},
     local_api::{
         forward_dynamic_upstream, has_unsafe_path_segments, strip_hop_headers, LocalApiProxy,
     },
@@ -41,23 +43,36 @@ pub fn build_router(svc: PlatformService) -> Router {
         .as_ref()
         .map(|cfg| LocalApiProxy::new(cfg, svc.config().max_blob_upload_bytes));
 
+    let panel_routes = Router::new()
+        .nest("/_api/v1", web::api::router())
+        .route("/_mcp", post(web::mcp::mcp_http_handler))
+        .route("/mcp", post(web::mcp::mcp_http_handler))
+        .route("/_panel", get(web::admin_index))
+        .route("/_panel/", get(web::admin_index))
+        .route("/_panel/assets/{file}", get(web::admin_asset))
+        .layer(middleware::from_fn_with_state(
+            svc.clone(),
+            panel_domain_guard_middleware,
+        ));
+
     Router::new()
         .route(
             "/_healthz",
             get(|| async { Json(HealthzResp { status: "ok" }) }),
         )
         .nest("/_blob", blob_router)
-        .nest("/_api/v1", web::api::router())
+        .route("/_ai/v1/models", get(web::api::ai_list_models))
         .route(
             "/_ai/v1/chat/completions",
             post(web::api::ai_chat_completions),
         )
         .route("/_ai/v1/embeddings", post(web::api::ai_embeddings))
-        .route("/_mcp", post(web::mcp::mcp_http_handler))
-        .route("/mcp", post(web::mcp::mcp_http_handler))
-        .route("/_panel", get(web::admin_index))
-        .route("/_panel/", get(web::admin_index))
-        .route("/_panel/assets/{file}", get(web::admin_asset))
+        .route("/_realtime/{channel}/sse", get(web::api::realtime_sse))
+        .route(
+            "/_realtime/{channel}/publish",
+            post(web::api::realtime_publish),
+        )
+        .merge(panel_routes)
         .fallback(host_route_handler)
         .layer(Extension(local_api))
         .layer(CompressionLayer::new())
@@ -68,24 +83,32 @@ pub fn build_router(svc: PlatformService) -> Router {
         .with_state(svc)
 }
 
-fn client_ip_from_headers(headers: &HeaderMap) -> String {
-    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        if let Some(first) = xff
-            .split(',')
-            .next()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            return first.to_string();
+fn client_ip_from_headers(
+    headers: &HeaderMap,
+    peer_ip: Option<IpAddr>,
+    trust_proxy: bool,
+) -> String {
+    if trust_proxy {
+        if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+            if let Some(first) = xff
+                .split(',')
+                .next()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                return first.to_string();
+            }
+        }
+        if let Some(real_ip) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
+            let t = real_ip.trim();
+            if !t.is_empty() {
+                return t.to_string();
+            }
         }
     }
-    if let Some(real_ip) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
-        let t = real_ip.trim();
-        if !t.is_empty() {
-            return t.to_string();
-        }
-    }
-    "anon".to_string()
+    peer_ip
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| "anon".to_string())
 }
 
 fn attach_rate_limit_headers(resp: &mut Response, info: Option<(u32, u32)>) {
@@ -133,9 +156,15 @@ async fn host_route_handler(
         }
     }
 
+    let peer_ip = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ci| ci.0.ip());
+
     // 2. Per-route sliding-window rate limiting
     let rate_info = if let Some(rpm) = route.rate_limit_rpm.filter(|r| *r > 0) {
-        let ip = client_ip_from_headers(req.headers());
+        let ip =
+            client_ip_from_headers(req.headers(), peer_ip, svc.effective_trust_proxy_headers());
         let rl_key = format!("route:{}:{ip}", route.host);
         let (allowed, remaining, reset_secs) = svc.rate_limiter().check_and_record(&rl_key, rpm);
         if !allowed {
@@ -188,12 +217,19 @@ async fn host_route_handler(
         return resp;
     }
 
-    // 4. Optional deterministic canary weight split
+    // 4. Optional deterministic canary weight split (smooth interleaved pacing)
     let (dep, is_canary) = match route.canary_deployment.filter(|_| route.canary_weight > 0) {
-        Some(canary_dep) if (svc.next_canary_ticket() % 100) < (route.canary_weight as u64) => {
-            (canary_dep, true)
+        Some(canary_dep) => {
+            let slot = svc.next_canary_ticket() % 100;
+            let w = u64::from(route.canary_weight.min(100));
+            let hit = ((slot + 1) * w / 100) > (slot * w / 100);
+            if hit {
+                (canary_dep, true)
+            } else {
+                (active_dep, false)
+            }
         }
-        _ => (active_dep, false),
+        None => (active_dep, false),
     };
     let served_dep_id = dep.id.clone();
 
@@ -357,7 +393,15 @@ async fn host_route_handler(
         let out = finalize_resp(resp);
         if !is_canary && route.target_env == TargetEnv::Prod {
             let is_5xx = out.status().as_u16() >= 500;
-            if svc.health_tracker().record_outcome(&served_dep_id, is_5xx) {
+            let eff = svc.effective_settings();
+            if svc.health_tracker().record_outcome_with_policy(
+                &served_dep_id,
+                is_5xx,
+                eff.auto_rollback_enabled,
+                eff.auto_rollback_window_secs,
+                eff.auto_rollback_min_requests,
+                eff.auto_rollback_error_rate_pct,
+            ) {
                 let _ = svc
                     .auto_rollback_deployment(&route.project_id, &served_dep_id)
                     .await;

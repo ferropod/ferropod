@@ -3,8 +3,9 @@ use chrono::Utc;
 use turso::Value as TursoValue;
 
 use crate::core::model::{
-    AiProvider, AiProviderRecord, AiUsageRecord, CronJob, DbFtsIndexMeta, FerroError,
-    KvNamespaceMeta, KvNamespaceOpts, Result, UserDbMeta, UserDbOpts, DEFAULT_KV_TTL_SECS,
+    default_ai_timeout_secs, AiProvider, AiProviderRecord, AiUsageRecord, AlertWebhook,
+    AlertWebhookRecord, CronJob, DbFtsIndexMeta, FerroError, KvNamespaceMeta, KvNamespaceOpts,
+    Result, UserDbMeta, UserDbOpts, DEFAULT_KV_TTL_SECS,
 };
 use crate::core::traits::RegistryStore;
 use crate::storage::tx::{connect_db, map_turso_err, with_retry};
@@ -559,8 +560,8 @@ impl RegistryStore for TursoCoreStore {
                 let conn = db.connect()?;
                 let p = &r.provider;
                 conn.execute(
-                    "INSERT INTO ai_providers (id, name, base_url, api_key_nonce, api_key_ciphertext, default_model, fallback_provider, rate_limit_rpm, cache_ttl_secs, monthly_token_budget, enabled, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                    "INSERT INTO ai_providers (id, name, base_url, api_key_nonce, api_key_ciphertext, default_model, fallback_provider, rate_limit_rpm, cache_ttl_secs, monthly_token_budget, timeout_secs, enabled, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
                      ON CONFLICT(name) DO UPDATE SET
                         base_url = excluded.base_url,
                         api_key_nonce = COALESCE(excluded.api_key_nonce, ai_providers.api_key_nonce),
@@ -570,6 +571,7 @@ impl RegistryStore for TursoCoreStore {
                         rate_limit_rpm = excluded.rate_limit_rpm,
                         cache_ttl_secs = excluded.cache_ttl_secs,
                         monthly_token_budget = excluded.monthly_token_budget,
+                        timeout_secs = excluded.timeout_secs,
                         enabled = excluded.enabled,
                         updated_at = excluded.updated_at",
                     vec![
@@ -587,6 +589,7 @@ impl RegistryStore for TursoCoreStore {
                         p.monthly_token_budget
                             .map(|v| TursoValue::Integer(v as i64))
                             .unwrap_or(TursoValue::Null),
+                        TursoValue::Integer(p.timeout_secs as i64),
                         TursoValue::Integer(if p.enabled { 1 } else { 0 }),
                         TursoValue::Integer(p.created_at),
                         TursoValue::Integer(p.updated_at),
@@ -605,7 +608,7 @@ impl RegistryStore for TursoCoreStore {
         let conn = connect_db(&self.db)?;
         let mut rows = conn
             .query(
-                "SELECT id, name, base_url, api_key_nonce, api_key_ciphertext, default_model, fallback_provider, rate_limit_rpm, cache_ttl_secs, monthly_token_budget, enabled, created_at, updated_at
+                "SELECT id, name, base_url, api_key_nonce, api_key_ciphertext, default_model, fallback_provider, rate_limit_rpm, cache_ttl_secs, monthly_token_budget, enabled, created_at, updated_at, timeout_secs
                  FROM ai_providers WHERE name = ?1 OR id = ?1 LIMIT 1",
                 [name],
             )
@@ -622,7 +625,7 @@ impl RegistryStore for TursoCoreStore {
         let conn = connect_db(&self.db)?;
         let mut rows = conn
             .query(
-                "SELECT id, name, base_url, api_key_nonce, api_key_ciphertext, default_model, fallback_provider, rate_limit_rpm, cache_ttl_secs, monthly_token_budget, enabled, created_at, updated_at
+                "SELECT id, name, base_url, api_key_nonce, api_key_ciphertext, default_model, fallback_provider, rate_limit_rpm, cache_ttl_secs, monthly_token_budget, enabled, created_at, updated_at, timeout_secs
                  FROM ai_providers ORDER BY created_at ASC",
                 (),
             )
@@ -683,30 +686,41 @@ impl RegistryStore for TursoCoreStore {
     async fn list_ai_usage(
         &self,
         provider_name: Option<&str>,
+        project_id: Option<&str>,
         limit: usize,
     ) -> Result<Vec<AiUsageRecord>> {
         let conn = connect_db(&self.db)?;
         let limit_i = limit.clamp(1, 500) as i64;
-        let mut rows = match provider_name {
-            Some(p) => {
-                conn.query(
-                    "SELECT id, provider_name, project_id, model, prompt_tokens, completion_tokens, total_tokens, cached, status, latency_ms, created_at
-                     FROM ai_usage WHERE provider_name = ?1 ORDER BY id DESC LIMIT ?2",
-                    (p, limit_i),
-                )
-                .await
-                .map_err(map_turso_err)?
-            }
-            None => {
-                conn.query(
-                    "SELECT id, provider_name, project_id, model, prompt_tokens, completion_tokens, total_tokens, cached, status, latency_ms, created_at
-                     FROM ai_usage ORDER BY id DESC LIMIT ?1",
-                    [limit_i],
-                )
-                .await
-                .map_err(map_turso_err)?
-            }
+        let mut conds: Vec<&'static str> = Vec::new();
+        let mut params: Vec<TursoValue> = Vec::new();
+        if let Some(p) = provider_name {
+            params.push(TursoValue::Text(p.to_string()));
+            conds.push(if params.len() == 1 {
+                "provider_name = ?1"
+            } else {
+                "provider_name = ?2"
+            });
+        }
+        if let Some(pid) = project_id {
+            params.push(TursoValue::Text(pid.to_string()));
+            conds.push(if params.len() == 1 {
+                "project_id = ?1"
+            } else {
+                "project_id = ?2"
+            });
+        }
+        let where_clause = if conds.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", conds.join(" AND "))
         };
+        let limit_idx = params.len() + 1;
+        params.push(TursoValue::Integer(limit_i));
+        let sql = format!(
+            "SELECT id, provider_name, project_id, model, prompt_tokens, completion_tokens, total_tokens, cached, status, latency_ms, created_at
+             FROM ai_usage {where_clause} ORDER BY id DESC LIMIT ?{limit_idx}"
+        );
+        let mut rows = conn.query(&sql, params).await.map_err(map_turso_err)?;
         let mut out = Vec::new();
         while let Some(row) = rows.next().await.map_err(map_turso_err)? {
             out.push(AiUsageRecord {
@@ -726,6 +740,71 @@ impl RegistryStore for TursoCoreStore {
         Ok(out)
     }
 
+    async fn aggregate_ai_usage(
+        &self,
+        provider_name: Option<&str>,
+        project_id: Option<&str>,
+        month_start_ms: i64,
+    ) -> Result<(usize, usize, u64, u64, u64, u64)> {
+        let conn = connect_db(&self.db)?;
+        let mut conds: Vec<String> = Vec::new();
+        let mut params: Vec<TursoValue> = vec![TursoValue::Integer(month_start_ms)];
+        if let Some(p) = provider_name {
+            params.push(TursoValue::Text(p.to_string()));
+            conds.push(format!("provider_name = ?{}", params.len()));
+        }
+        if let Some(pid) = project_id {
+            params.push(TursoValue::Text(pid.to_string()));
+            conds.push(format!("project_id = ?{}", params.len()));
+        }
+        let where_clause = if conds.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", conds.join(" AND "))
+        };
+        let sql = format!(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(CASE WHEN cached != 0 THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(prompt_tokens), 0),
+                    COALESCE(SUM(completion_tokens), 0),
+                    COALESCE(SUM(total_tokens), 0),
+                    COALESCE(SUM(CASE WHEN created_at >= ?1 AND cached = 0 THEN total_tokens ELSE 0 END), 0)
+             FROM ai_usage {where_clause}"
+        );
+        let mut rows = conn.query(&sql, params).await.map_err(map_turso_err)?;
+        if let Some(row) = rows.next().await.map_err(map_turso_err)? {
+            let total_req = row.get::<i64>(0).map_err(map_turso_err)?.max(0) as usize;
+            let cached_req = row.get::<i64>(1).map_err(map_turso_err)?.max(0) as usize;
+            let prompt_tok = row.get::<i64>(2).map_err(map_turso_err)?.max(0) as u64;
+            let completion_tok = row.get::<i64>(3).map_err(map_turso_err)?.max(0) as u64;
+            let total_tok = row.get::<i64>(4).map_err(map_turso_err)?.max(0) as u64;
+            let month_tok = row.get::<i64>(5).map_err(map_turso_err)?.max(0) as u64;
+            Ok((
+                total_req,
+                cached_req,
+                prompt_tok,
+                completion_tok,
+                total_tok,
+                month_tok,
+            ))
+        } else {
+            Ok((0, 0, 0, 0, 0, 0))
+        }
+    }
+
+    async fn cleanup_ai_usage_before(&self, cutoff_ms: i64) -> Result<u64> {
+        let affected = with_retry(|| {
+            let db = self.db.clone();
+            async move {
+                let conn = db.connect()?;
+                conn.execute("DELETE FROM ai_usage WHERE created_at < ?1", [cutoff_ms])
+                    .await
+            }
+        })
+        .await?;
+        Ok(affected)
+    }
+
     async fn sum_ai_tokens_since(&self, provider_name: &str, since_ms: i64) -> Result<u64> {
         let conn = connect_db(&self.db)?;
         let mut rows = conn
@@ -741,12 +820,208 @@ impl RegistryStore for TursoCoreStore {
             Ok(0)
         }
     }
+
+    async fn upsert_alert_webhook(&self, rec: AlertWebhookRecord) -> Result<AlertWebhookRecord> {
+        let r = rec.clone();
+        with_retry(|| {
+            let db = self.db.clone();
+            let r = r.clone();
+            async move {
+                let conn = db.connect()?;
+                let w = &r.webhook;
+                let events_json = serde_json::to_string(&w.events)
+                    .unwrap_or_else(|_| "[\"*\"]".to_string());
+                let clear_secret = !w.has_secret;
+                conn.execute(
+                    "INSERT INTO alert_webhooks (id, name, url, secret_nonce, secret_ciphertext, events_json, enabled, last_status, last_error, last_triggered_at, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                     ON CONFLICT(id) DO UPDATE SET
+                        name = excluded.name,
+                        url = excluded.url,
+                        secret_nonce = CASE WHEN ?13 != 0 THEN NULL ELSE COALESCE(excluded.secret_nonce, alert_webhooks.secret_nonce) END,
+                        secret_ciphertext = CASE WHEN ?13 != 0 THEN NULL ELSE COALESCE(excluded.secret_ciphertext, alert_webhooks.secret_ciphertext) END,
+                        events_json = excluded.events_json,
+                        enabled = excluded.enabled,
+                        updated_at = excluded.updated_at",
+                    vec![
+                        TursoValue::Text(w.id.clone()),
+                        TursoValue::Text(w.name.clone()),
+                        TursoValue::Text(w.url.clone()),
+                        opt_blob_param(r.secret_nonce),
+                        opt_blob_param(r.secret_ciphertext),
+                        TursoValue::Text(events_json),
+                        TursoValue::Integer(if w.enabled { 1 } else { 0 }),
+                        w.last_status
+                            .map(|s| TursoValue::Integer(s as i64))
+                            .unwrap_or(TursoValue::Null),
+                        opt_text_param(w.last_error.clone()),
+                        w.last_triggered_at
+                            .map(TursoValue::Integer)
+                            .unwrap_or(TursoValue::Null),
+                        TursoValue::Integer(w.created_at),
+                        TursoValue::Integer(w.updated_at),
+                        TursoValue::Integer(if clear_secret { 1 } else { 0 }),
+                    ],
+                )
+                .await
+            }
+        })
+        .await?;
+        self.get_alert_webhook(&rec.webhook.id)
+            .await?
+            .ok_or_else(|| FerroError::Internal(anyhow::anyhow!("failed to reload alert webhook")))
+    }
+
+    async fn get_alert_webhook(&self, id: &str) -> Result<Option<AlertWebhookRecord>> {
+        let conn = connect_db(&self.db)?;
+        let mut rows = conn
+            .query(
+                "SELECT id, name, url, secret_nonce, secret_ciphertext, events_json, enabled, last_status, last_error, last_triggered_at, created_at, updated_at
+                 FROM alert_webhooks WHERE id = ?1 LIMIT 1",
+                [id],
+            )
+            .await
+            .map_err(map_turso_err)?;
+        if let Some(row) = rows.next().await.map_err(map_turso_err)? {
+            Ok(Some(row_to_alert_webhook(&row)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn list_alert_webhooks(&self) -> Result<Vec<AlertWebhookRecord>> {
+        let conn = connect_db(&self.db)?;
+        let mut rows = conn
+            .query(
+                "SELECT id, name, url, secret_nonce, secret_ciphertext, events_json, enabled, last_status, last_error, last_triggered_at, created_at, updated_at
+                 FROM alert_webhooks ORDER BY created_at ASC",
+                (),
+            )
+            .await
+            .map_err(map_turso_err)?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(map_turso_err)? {
+            out.push(row_to_alert_webhook(&row)?);
+        }
+        Ok(out)
+    }
+
+    async fn delete_alert_webhook(&self, id: &str) -> Result<bool> {
+        let id_s = id.to_string();
+        let affected = with_retry(|| {
+            let db = self.db.clone();
+            let id_s = id_s.clone();
+            async move {
+                let conn = db.connect()?;
+                conn.execute("DELETE FROM alert_webhooks WHERE id = ?1", [id_s])
+                    .await
+            }
+        })
+        .await?;
+        Ok(affected > 0)
+    }
+
+    async fn record_alert_webhook_delivery(
+        &self,
+        id: &str,
+        status: Option<u16>,
+        error: Option<&str>,
+        triggered_at: i64,
+    ) -> Result<()> {
+        let id_s = id.to_string();
+        let err_s = error.map(str::to_string);
+        with_retry(|| {
+            let db = self.db.clone();
+            let id_s = id_s.clone();
+            let err_s = err_s.clone();
+            async move {
+                let conn = db.connect()?;
+                conn.execute(
+                    "UPDATE alert_webhooks
+                     SET last_status = ?1, last_error = ?2, last_triggered_at = ?3
+                     WHERE id = ?4",
+                    vec![
+                        status
+                            .map(|s| TursoValue::Integer(s as i64))
+                            .unwrap_or(TursoValue::Null),
+                        opt_text_param(err_s),
+                        TursoValue::Integer(triggered_at),
+                        TursoValue::Text(id_s),
+                    ],
+                )
+                .await
+            }
+        })
+        .await?;
+        Ok(())
+    }
+
+    async fn get_platform_setting(&self, key: &str) -> Result<Option<String>> {
+        let conn = connect_db(&self.db)?;
+        let mut rows = conn
+            .query(
+                "SELECT value_json FROM platform_settings WHERE key = ?1 LIMIT 1",
+                [key],
+            )
+            .await
+            .map_err(map_turso_err)?;
+        if let Some(row) = rows.next().await.map_err(map_turso_err)? {
+            let val: String = row.get(0).map_err(map_turso_err)?;
+            Ok(Some(val))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn set_platform_setting(&self, key: &str, value_json: &str) -> Result<()> {
+        let key_s = key.to_string();
+        let val_s = value_json.to_string();
+        let now = Utc::now().timestamp_millis();
+        with_retry(|| {
+            let db = self.db.clone();
+            let key_s = key_s.clone();
+            let val_s = val_s.clone();
+            async move {
+                let conn = db.connect()?;
+                conn.execute(
+                    "INSERT INTO platform_settings (key, value_json, updated_at)
+                     VALUES (?1, ?2, ?3)
+                     ON CONFLICT(key) DO UPDATE SET
+                        value_json = excluded.value_json,
+                        updated_at = excluded.updated_at",
+                    (key_s, val_s, now),
+                )
+                .await
+            }
+        })
+        .await?;
+        Ok(())
+    }
+
+    async fn delete_platform_setting(&self, key: &str) -> Result<()> {
+        let key_s = key.to_string();
+        with_retry(|| {
+            let db = self.db.clone();
+            let key_s = key_s.clone();
+            async move {
+                let conn = db.connect()?;
+                conn.execute("DELETE FROM platform_settings WHERE key = ?1", [key_s])
+                    .await
+            }
+        })
+        .await?;
+        Ok(())
+    }
 }
 
 fn row_to_ai_provider(row: &turso::Row) -> Result<AiProviderRecord> {
     let nonce = opt_blob(row, 3)?;
     let ct = opt_blob(row, 4)?;
     let has_api_key = ct.as_ref().is_some_and(|c| !c.is_empty());
+    let timeout_secs = opt_i64(row, 13)?
+        .and_then(|v| u64::try_from(v).ok())
+        .filter(|v| *v > 0)
+        .unwrap_or_else(default_ai_timeout_secs);
     Ok(AiProviderRecord {
         provider: AiProvider {
             id: row.get(0).map_err(map_turso_err)?,
@@ -758,11 +1033,38 @@ fn row_to_ai_provider(row: &turso::Row) -> Result<AiProviderRecord> {
             rate_limit_rpm: opt_i64(row, 7)?.and_then(|v| u32::try_from(v).ok()),
             cache_ttl_secs: opt_i64(row, 8)?.unwrap_or(0).max(0) as u64,
             monthly_token_budget: opt_i64(row, 9)?.and_then(|v| u64::try_from(v).ok()),
+            timeout_secs,
             enabled: row.get::<i64>(10).map_err(map_turso_err)? != 0,
             created_at: row.get(11).map_err(map_turso_err)?,
             updated_at: row.get(12).map_err(map_turso_err)?,
         },
         api_key_nonce: nonce,
         api_key_ciphertext: ct,
+    })
+}
+
+fn row_to_alert_webhook(row: &turso::Row) -> Result<AlertWebhookRecord> {
+    let nonce = opt_blob(row, 3)?;
+    let ct = opt_blob(row, 4)?;
+    let has_secret = ct.as_ref().is_some_and(|c| !c.is_empty());
+    let events_raw = opt_text(row, 5)?.unwrap_or_else(|| "[\"*\"]".to_string());
+    let events: Vec<String> =
+        serde_json::from_str(&events_raw).unwrap_or_else(|_| vec!["*".into()]);
+    Ok(AlertWebhookRecord {
+        webhook: AlertWebhook {
+            id: row.get(0).map_err(map_turso_err)?,
+            name: row.get(1).map_err(map_turso_err)?,
+            url: row.get(2).map_err(map_turso_err)?,
+            has_secret,
+            events,
+            enabled: row.get::<i64>(6).map_err(map_turso_err)? != 0,
+            last_status: opt_i64(row, 7)?.and_then(|v| u16::try_from(v).ok()),
+            last_error: opt_text(row, 8)?,
+            last_triggered_at: opt_i64(row, 9)?,
+            created_at: row.get(10).map_err(map_turso_err)?,
+            updated_at: row.get(11).map_err(map_turso_err)?,
+        },
+        secret_nonce: nonce,
+        secret_ciphertext: ct,
     })
 }

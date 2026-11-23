@@ -58,6 +58,7 @@ mod queue_wit {
             "ferropod:platform/queue": super::host_wit::ferropod::platform::queue,
             "ferropod:platform/bucket": super::host_wit::ferropod::platform::bucket,
             "ferropod:platform/search": super::host_wit::ferropod::platform::search,
+            "ferropod:platform/ai": super::host_wit::ferropod::platform::ai,
             "ferropod:platform/env": super::host_wit::ferropod::platform::env,
         },
         require_store_data_send: true,
@@ -77,6 +78,7 @@ mod scheduled_wit {
             "ferropod:platform/queue": super::host_wit::ferropod::platform::queue,
             "ferropod:platform/bucket": super::host_wit::ferropod::platform::bucket,
             "ferropod:platform/search": super::host_wit::ferropod::platform::search,
+            "ferropod:platform/ai": super::host_wit::ferropod::platform::ai,
             "ferropod:platform/env": super::host_wit::ferropod::platform::env,
         },
         require_store_data_send: true,
@@ -84,7 +86,7 @@ mod scheduled_wit {
 }
 
 use host_wit::ferropod::platform::{
-    bucket as wit_bucket, db as wit_db, env as wit_env, kv as wit_kv, log as wit_log,
+    ai as wit_ai, bucket as wit_bucket, db as wit_db, env as wit_env, kv as wit_kv, log as wit_log,
     queue as wit_queue, search as wit_search,
 };
 use queue_wit::exports::ferropod::platform::queue_consumer as wit_qc;
@@ -437,6 +439,27 @@ impl WasmtimeRuntime {
         Ok(component)
     }
 
+    fn default_max_memory_bytes(&self) -> usize {
+        self.svc
+            .get()
+            .map(|s| s.effective_wasm_max_memory_bytes())
+            .unwrap_or(self.config.wasm_max_memory_bytes)
+    }
+
+    fn default_epoch_timeout_ms(&self) -> u64 {
+        self.svc
+            .get()
+            .map(|s| s.effective_wasm_epoch_timeout_ms())
+            .unwrap_or(self.config.wasm_epoch_timeout_ms)
+    }
+
+    fn default_allow_private_outbound(&self) -> bool {
+        self.svc
+            .get()
+            .map(|s| s.effective_wasm_allow_private_outbound())
+            .unwrap_or(self.config.wasm_allow_private_outbound)
+    }
+
     fn build_store(
         &self,
         ctx: &RequestCtx,
@@ -456,7 +479,7 @@ impl WasmtimeRuntime {
             .wasm_max_memory_mb
             .filter(|mb| *mb > 0)
             .map(|mb| mb.saturating_mul(1024 * 1024))
-            .unwrap_or(self.config.wasm_max_memory_bytes);
+            .unwrap_or_else(|| self.default_max_memory_bytes());
         let limits = StoreLimitsBuilder::new()
             .memory_size(mem_limit)
             .table_elements(self.config.wasm_max_table_elements)
@@ -471,7 +494,7 @@ impl WasmtimeRuntime {
             http: WasiHttpCtx::new(),
             hooks: FerroHttpHooks {
                 blocked_upstream: self.config.local_api.as_ref().map(|c| c.upstream),
-                allow_private_outbound: self.config.wasm_allow_private_outbound
+                allow_private_outbound: self.default_allow_private_outbound()
                     || ctx.allow_private_outbound,
             },
             table: ResourceTable::new(),
@@ -486,7 +509,7 @@ impl WasmtimeRuntime {
         let timeout_ms = ctx
             .timeout_ms
             .filter(|t| *t > 0)
-            .unwrap_or(self.config.wasm_epoch_timeout_ms);
+            .unwrap_or_else(|| self.default_epoch_timeout_ms());
         let ticks = (timeout_ms / EPOCH_TICK_MS).max(1);
         store.set_epoch_deadline(ticks);
         store.epoch_deadline_trap();
@@ -615,7 +638,7 @@ impl WasmtimeRuntime {
         let eff_timeout_ms = ctx
             .timeout_ms
             .filter(|t| *t > 0)
-            .unwrap_or(self.config.wasm_epoch_timeout_ms);
+            .unwrap_or_else(|| self.default_epoch_timeout_ms());
         let timeout_dur = Duration::from_millis(eff_timeout_ms + 500);
         let res = tokio::time::timeout(timeout_dur, async {
             let resp_opt = match rx.await {
@@ -679,7 +702,7 @@ impl WasmtimeRuntime {
             Ok(inner) => inner,
             Err(_) => Err(FerroError::Internal(anyhow!(
                 "worker execution timed out after {}ms",
-                self.config.wasm_epoch_timeout_ms
+                eff_timeout_ms
             ))),
         }
     }
@@ -898,7 +921,7 @@ impl WorkerRuntime for WasmtimeRuntime {
             let eff_timeout_ms = ctx
                 .timeout_ms
                 .filter(|t| *t > 0)
-                .unwrap_or(self.config.wasm_epoch_timeout_ms);
+                .unwrap_or_else(|| self.default_epoch_timeout_ms());
             let timeout_dur = Duration::from_millis(eff_timeout_ms + 500);
             let exec = tokio::time::timeout(timeout_dur, async {
                 let worker = queue_pre
@@ -995,7 +1018,7 @@ impl WorkerRuntime for WasmtimeRuntime {
             let eff_timeout_ms = ctx
                 .timeout_ms
                 .filter(|t| *t > 0)
-                .unwrap_or(self.config.wasm_epoch_timeout_ms);
+                .unwrap_or_else(|| self.default_epoch_timeout_ms());
             let timeout_dur = Duration::from_millis(eff_timeout_ms + 500);
             let exec = tokio::time::timeout(timeout_dur, async {
                 let worker = sched_pre
@@ -1905,6 +1928,53 @@ impl wit_search::Host for HostState {
             .delete_search_doc(&self.caller, index_ref, &doc_id)
             .await
             .map_err(|e| e.to_string())
+    }
+}
+
+impl wit_ai::Host for HostState {
+    async fn chat_completions(
+        &mut self,
+        provider: Option<String>,
+        body_json: String,
+    ) -> std::result::Result<wit_ai::ChatResponse, String> {
+        let parsed: serde_json::Value =
+            serde_json::from_str(&body_json).map_err(|e| format!("invalid json body: {e}"))?;
+        let res = self
+            .svc
+            .ai_proxy(
+                &self.caller,
+                provider.as_deref(),
+                "chat/completions",
+                parsed,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(wit_ai::ChatResponse {
+            status: res.status,
+            provider: res.provider_name,
+            cached: res.cached,
+            body_json: res.body.to_string(),
+        })
+    }
+
+    async fn embeddings(
+        &mut self,
+        provider: Option<String>,
+        body_json: String,
+    ) -> std::result::Result<wit_ai::ChatResponse, String> {
+        let parsed: serde_json::Value =
+            serde_json::from_str(&body_json).map_err(|e| format!("invalid json body: {e}"))?;
+        let res = self
+            .svc
+            .ai_proxy(&self.caller, provider.as_deref(), "embeddings", parsed)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(wit_ai::ChatResponse {
+            status: res.status,
+            provider: res.provider_name,
+            cached: res.cached,
+            body_json: res.body.to_string(),
+        })
     }
 }
 

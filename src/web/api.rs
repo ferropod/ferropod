@@ -21,17 +21,17 @@ use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 
 use crate::core::model::{
-    AiProviderOpts, Bindings, BucketOpts, CronJobOpts, EnqueueOpts, FerroError, JobStatus,
-    KvNamespaceOpts, LogQuery, ProjectOpts, QueueConfig, RouteOpts, SearchFieldSchema,
-    SearchIndexOpts, SearchQueryInput, SqlValue, TargetEnv, TokenScope, UserDbOpts,
-    DEFAULT_KV_TTL_SECS,
+    AiProviderOpts, AlertWebhookOpts, AutoBackupConfig, Bindings, BucketOpts, CronJobOpts,
+    EnqueueOpts, FerroError, JobStatus, KvNamespaceOpts, LogQuery, PlatformSettingsPatch,
+    ProjectOpts, QueueConfig, RouteOpts, SearchFieldSchema, SearchIndexOpts, SearchQueryInput,
+    SqlValue, TargetEnv, TokenScope, UserDbOpts, DEFAULT_KV_TTL_SECS,
 };
-use crate::core::service::{CreateDeploymentInput, PlatformService};
+use crate::core::service::{AiProxyResult, CreateDeploymentInput, PlatformService};
 use crate::gateway::guard::{authenticate_caller, ApiError};
 use crate::update;
 
 #[derive(Debug, Deserialize)]
-struct AuthQuery {
+pub struct AuthQuery {
     token: Option<String>,
 }
 
@@ -42,6 +42,9 @@ struct StatusResp {
     profile: String,
     actor: String,
     scope: String,
+    instance_name: Option<String>,
+    panel_domain: Option<String>,
+    base_domain: Option<String>,
     projects: usize,
     routes: usize,
     queues: usize,
@@ -49,6 +52,8 @@ struct StatusResp {
     dbs: usize,
     kv_namespaces: usize,
     search_indexes: usize,
+    ai_providers: usize,
+    alert_webhooks: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -335,8 +340,31 @@ pub fn router() -> Router<PlatformService> {
         .route("/system/update/check", get(system_update_check))
         .route("/system/releases", get(system_releases))
         .route("/system/update/apply", post(system_update_apply))
+        .route(
+            "/settings",
+            get(get_platform_settings).patch(update_platform_settings),
+        )
+        .route("/settings/reset", post(reset_platform_settings))
+        .route("/settings/dns-check", post(settings_dns_check))
+        .route("/settings/alerts/test", post(settings_test_alert))
+        .route(
+            "/alerts/webhooks",
+            get(alert_webhooks_list).post(alert_webhooks_create),
+        )
+        .route(
+            "/alerts/webhooks/{id}",
+            patch(alert_webhooks_update).delete(alert_webhooks_delete),
+        )
+        .route("/alerts/webhooks/{id}/test", post(alert_webhooks_test))
+        .route("/realtime/channels", get(realtime_list_channels))
         .route("/backups", get(list_backups).post(create_backup))
+        .route(
+            "/backups/schedule",
+            get(get_backup_schedule).patch(update_backup_schedule),
+        )
         .route("/backups/{name}", delete(delete_backup))
+        .route("/backups/{name}/download", get(download_backup))
+        .route("/backups/{name}/restore", post(restore_backup))
         .route("/crons", get(cron_list).post(cron_create))
         .route("/crons/{id}", patch(cron_update).delete(cron_delete))
         .route("/crons/{id}/run", post(cron_run))
@@ -402,6 +430,7 @@ pub fn router() -> Router<PlatformService> {
             patch(ai_update_provider).delete(ai_delete_provider),
         )
         .route("/ai/usage", get(ai_usage_summary))
+        .route("/ai/cache/clear", post(ai_clear_cache))
 }
 
 async fn list_resource_groups(
@@ -490,22 +519,36 @@ async fn status(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
     let caller = authenticate_caller(&svc, &headers, None).await?;
-    let (projects, routes, queues, buckets, dbs, kv_namespaces, search_indexes) = tokio::try_join!(
-        svc.list_projects(&caller),
-        svc.list_routes(&caller),
-        svc.queue_list(&caller),
-        svc.list_buckets(&caller),
-        svc.list_user_dbs(&caller),
-        svc.list_kv_namespaces(&caller),
-        svc.list_search_indexes(&caller),
-    )
-    .map_err(ApiError)?;
+    let (projects, routes, queues, buckets, dbs, kv_namespaces, search_indexes, ai_providers) =
+        tokio::try_join!(
+            svc.list_projects(&caller),
+            svc.list_routes(&caller),
+            svc.queue_list(&caller),
+            svc.list_buckets(&caller),
+            svc.list_user_dbs(&caller),
+            svc.list_kv_namespaces(&caller),
+            svc.list_search_indexes(&caller),
+            svc.list_ai_providers(&caller),
+        )
+        .map_err(ApiError)?;
+    let alert_webhooks = if caller.scope.allows_admin() {
+        svc.list_alert_webhooks(&caller)
+            .await
+            .map(|l| l.len())
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let eff = svc.effective_settings();
     Ok(Json(StatusResp {
         status: "ok",
         version: update::CURRENT_VERSION,
         profile: format!("{:?}", svc.config().profile),
         actor: caller.actor.clone(),
         scope: caller.scope.as_str(),
+        instance_name: eff.instance_name,
+        panel_domain: eff.panel_domain,
+        base_domain: eff.base_domain,
         projects: projects.len(),
         routes: routes.len(),
         queues: queues.len(),
@@ -513,6 +556,8 @@ async fn status(
         dbs: dbs.len(),
         kv_namespaces: kv_namespaces.len(),
         search_indexes: search_indexes.len(),
+        ai_providers: ai_providers.len(),
+        alert_webhooks,
     }))
 }
 
@@ -530,6 +575,15 @@ struct MetricsResp {
     open_fds: usize,
     profile: String,
     timestamp_ms: i64,
+    http_requests_2xx: u64,
+    http_requests_3xx: u64,
+    http_requests_4xx: u64,
+    http_requests_5xx: u64,
+    http_avg_latency_ms: f64,
+    active_http_requests: u64,
+    rate_limited_total: u64,
+    worker_errors_total: u64,
+    worker_oom_total: u64,
 }
 
 fn process_start_instant() -> &'static std::time::Instant {
@@ -630,6 +684,18 @@ async fn metrics(
     } else {
         512 * 1024 * 1024
     };
+    let gm = svc.metrics();
+    let dur_cnt = gm
+        .http_duration_ms_count
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let dur_sum = gm
+        .http_duration_ms_sum
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let http_avg_latency_ms = if dur_cnt > 0 {
+        ((dur_sum as f64 / dur_cnt as f64) * 100.0).round() / 100.0
+    } else {
+        0.0
+    };
     Ok(Json(MetricsResp {
         uptime_secs: process_start_instant().elapsed().as_secs(),
         rss_bytes,
@@ -643,6 +709,31 @@ async fn metrics(
         open_fds,
         profile,
         timestamp_ms: chrono::Utc::now().timestamp_millis(),
+        http_requests_2xx: gm
+            .http_requests_2xx
+            .load(std::sync::atomic::Ordering::Relaxed),
+        http_requests_3xx: gm
+            .http_requests_3xx
+            .load(std::sync::atomic::Ordering::Relaxed),
+        http_requests_4xx: gm
+            .http_requests_4xx
+            .load(std::sync::atomic::Ordering::Relaxed),
+        http_requests_5xx: gm
+            .http_requests_5xx
+            .load(std::sync::atomic::Ordering::Relaxed),
+        http_avg_latency_ms,
+        active_http_requests: gm
+            .active_http_requests
+            .load(std::sync::atomic::Ordering::Relaxed),
+        rate_limited_total: gm
+            .rate_limited_total
+            .load(std::sync::atomic::Ordering::Relaxed),
+        worker_errors_total: gm
+            .worker_errors_total
+            .load(std::sync::atomic::Ordering::Relaxed),
+        worker_oom_total: gm
+            .worker_oom_total
+            .load(std::sync::atomic::Ordering::Relaxed),
     }))
 }
 
@@ -903,6 +994,17 @@ async fn delete_backup(
             "admin scope required".into(),
         )));
     }
+    let target = validate_backup_dir(&svc, &name).await?;
+    tokio::fs::remove_dir_all(&target)
+        .await
+        .map_err(|e| ApiError(FerroError::Internal(anyhow::anyhow!("delete backup: {e}"))))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn validate_backup_dir(
+    svc: &PlatformService,
+    name: &str,
+) -> Result<std::path::PathBuf, ApiError> {
     if name.is_empty()
         || name.contains('/')
         || name.contains('\\')
@@ -913,7 +1015,7 @@ async fn delete_backup(
             "invalid backup name".into(),
         )));
     }
-    let target = svc.config().data_dir.join("backups").join(&name);
+    let target = svc.config().data_dir.join("backups").join(name);
     let meta = tokio::fs::symlink_metadata(&target)
         .await
         .map_err(|e| match e.kind() {
@@ -929,10 +1031,120 @@ async fn delete_backup(
             "invalid backup directory".into(),
         )));
     }
-    tokio::fs::remove_dir_all(&target)
+    Ok(target)
+}
+
+async fn download_backup(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Query(q): Query<AuthQuery>,
+) -> Result<axum::response::Response, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, q.token.as_deref()).await?;
+    if !caller.scope.allows_admin() {
+        return Err(ApiError(FerroError::Forbidden(
+            "admin scope required".into(),
+        )));
+    }
+    let target = validate_backup_dir(&svc, &name).await?;
+    let archive_root = name.clone();
+    let gz_bytes = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<u8>> {
+        let mut buf = Vec::new();
+        {
+            let encoder = flate2::write::GzEncoder::new(&mut buf, flate2::Compression::default());
+            let mut builder = tar::Builder::new(encoder);
+            builder.append_dir_all(&archive_root, &target)?;
+            let encoder = builder.into_inner()?;
+            encoder.finish()?;
+        }
+        Ok(buf)
+    })
+    .await
+    .map_err(|e| ApiError(FerroError::Internal(anyhow::anyhow!("archive join: {e}"))))?
+    .map_err(|e| ApiError(FerroError::Internal(anyhow::anyhow!("archive backup: {e}"))))?;
+
+    let disposition = format!("attachment; filename=\"{name}.tar.gz\"");
+    Ok((
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "application/gzip".to_string(),
+            ),
+            (axum::http::header::CONTENT_DISPOSITION, disposition),
+            (axum::http::header::CACHE_CONTROL, "no-store".to_string()),
+        ],
+        Bytes::from(gz_bytes),
+    )
+        .into_response())
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RestoreBackupReq {
+    #[serde(default)]
+    restart: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct RestoreBackupResp {
+    backup: String,
+    restored_files: Vec<String>,
+    restarting: bool,
+}
+
+async fn restore_backup(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    req: Option<Json<RestoreBackupReq>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    if !caller.scope.allows_admin() {
+        return Err(ApiError(FerroError::Forbidden(
+            "admin scope required".into(),
+        )));
+    }
+    let target = validate_backup_dir(&svc, &name).await?;
+    let restored_files = svc
+        .restore_snapshot(&caller, &target)
         .await
-        .map_err(|e| ApiError(FerroError::Internal(anyhow::anyhow!("delete backup: {e}"))))?;
-    Ok(StatusCode::NO_CONTENT)
+        .map_err(ApiError)?;
+    let restart = req.map(|r| r.0.restart).unwrap_or(false);
+    if restart {
+        tokio::spawn(async {
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            update::request_restart();
+        });
+    }
+    Ok(Json(RestoreBackupResp {
+        backup: name,
+        restored_files,
+        restarting: restart,
+    }))
+}
+
+async fn get_backup_schedule(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let cfg = svc
+        .get_auto_backup_config(&caller)
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(cfg))
+}
+
+async fn update_backup_schedule(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Json(req): Json<AutoBackupConfig>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let saved = svc
+        .update_auto_backup_config(&caller, req)
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(saved))
 }
 
 async fn list_projects(
@@ -2383,6 +2595,81 @@ async fn system_update_apply(
     Ok(Json(res))
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct ResetSettingsReq {
+    section: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DnsCheckReq {
+    domain: String,
+    #[serde(default)]
+    check_wildcard: bool,
+}
+
+async fn get_platform_settings(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let bundle = svc.get_platform_settings(&caller).await.map_err(ApiError)?;
+    Ok(Json(bundle))
+}
+
+async fn update_platform_settings(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Json(patch): Json<PlatformSettingsPatch>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let request_host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|h| !h.is_empty());
+    let bundle = svc
+        .update_platform_settings(&caller, patch, request_host)
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(bundle))
+}
+
+async fn reset_platform_settings(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    body: Option<Json<ResetSettingsReq>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let section = body.and_then(|Json(r)| r.section);
+    let bundle = svc
+        .reset_platform_settings(&caller, section.as_deref())
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(bundle))
+}
+
+async fn settings_dns_check(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Json(req): Json<DnsCheckReq>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let res = svc
+        .check_domain_dns(&caller, &req.domain, req.check_wildcard)
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(res))
+}
+
+async fn settings_test_alert(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let res = svc.test_alert_webhook(&caller).await.map_err(ApiError)?;
+    Ok(Json(res))
+}
+
 #[derive(Debug, Deserialize)]
 struct CreateAiProviderReq {
     name: String,
@@ -2393,6 +2680,7 @@ struct CreateAiProviderReq {
     rate_limit_rpm: Option<u32>,
     cache_ttl_secs: Option<u64>,
     monthly_token_budget: Option<u64>,
+    timeout_secs: Option<u64>,
     enabled: Option<bool>,
 }
 
@@ -2405,6 +2693,7 @@ struct UpdateAiProviderReq {
     rate_limit_rpm: Option<u32>,
     cache_ttl_secs: Option<u64>,
     monthly_token_budget: Option<u64>,
+    timeout_secs: Option<u64>,
     enabled: Option<bool>,
 }
 
@@ -2443,6 +2732,7 @@ async fn ai_create_provider(
                 rate_limit_rpm: req.rate_limit_rpm,
                 cache_ttl_secs: req.cache_ttl_secs,
                 monthly_token_budget: req.monthly_token_budget,
+                timeout_secs: req.timeout_secs,
                 enabled: req.enabled,
             },
         )
@@ -2471,6 +2761,7 @@ async fn ai_update_provider(
                 rate_limit_rpm: req.rate_limit_rpm,
                 cache_ttl_secs: req.cache_ttl_secs,
                 monthly_token_budget: req.monthly_token_budget,
+                timeout_secs: req.timeout_secs,
                 enabled: req.enabled,
             },
         )
@@ -2504,6 +2795,24 @@ async fn ai_usage_summary(
     Ok(Json(summary))
 }
 
+async fn ai_clear_cache(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let evicted = svc.clear_ai_cache(&caller).await.map_err(ApiError)?;
+    Ok(Json(serde_json::json!({ "evicted": evicted })))
+}
+
+pub async fn ai_list_models(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let models = svc.list_ai_models(&caller).await.map_err(ApiError)?;
+    Ok(Json(models))
+}
+
 async fn ai_proxy_inner(
     svc: PlatformService,
     headers: HeaderMap,
@@ -2520,21 +2829,36 @@ async fn ai_proxy_inner(
                 .and_then(|v| v.as_str())
                 .map(str::to_string)
         });
-    let res = svc
-        .ai_proxy(&caller, requested.as_deref(), subpath, body)
+    match svc
+        .ai_proxy_or_stream(&caller, requested.as_deref(), subpath, body)
         .await
-        .map_err(ApiError)?;
-    let status = StatusCode::from_u16(res.status).unwrap_or(StatusCode::OK);
-    let cache_hdr = if res.cached { "HIT" } else { "MISS" };
-    Ok((
-        status,
-        [
-            ("x-ferropod-cache", cache_hdr.to_string()),
-            ("x-ferropod-provider", res.provider_name),
-        ],
-        Json(res.body),
-    )
-        .into_response())
+        .map_err(ApiError)?
+    {
+        AiProxyResult::Json(res) => {
+            let status = StatusCode::from_u16(res.status).unwrap_or(StatusCode::OK);
+            let cache_hdr = if res.cached { "HIT" } else { "MISS" };
+            Ok((
+                status,
+                [
+                    ("x-ferropod-cache", cache_hdr.to_string()),
+                    ("x-ferropod-provider", res.provider_name),
+                ],
+                Json(res.body),
+            )
+                .into_response())
+        }
+        AiProxyResult::Stream(st) => {
+            let status = StatusCode::from_u16(st.status).unwrap_or(StatusCode::OK);
+            Ok(axum::response::Response::builder()
+                .status(status)
+                .header(axum::http::header::CONTENT_TYPE, st.content_type)
+                .header(axum::http::header::CACHE_CONTROL, "no-cache")
+                .header("x-ferropod-cache", "BYPASS")
+                .header("x-ferropod-provider", st.provider_name)
+                .body(axum::body::Body::from_stream(st.body))
+                .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response()))
+        }
+    }
 }
 
 pub async fn ai_chat_completions(
@@ -2551,4 +2875,141 @@ pub async fn ai_embeddings(
     Json(body): Json<serde_json::Value>,
 ) -> Result<axum::response::Response, ApiError> {
     ai_proxy_inner(svc, headers, "embeddings", body).await
+}
+
+async fn alert_webhooks_list(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    Ok(Json(
+        svc.list_alert_webhooks(&caller).await.map_err(ApiError)?,
+    ))
+}
+
+async fn alert_webhooks_create(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Json(req): Json<AlertWebhookOpts>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let saved = svc
+        .create_alert_webhook(&caller, req)
+        .await
+        .map_err(ApiError)?;
+    Ok((StatusCode::CREATED, Json(saved)))
+}
+
+async fn alert_webhooks_update(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<AlertWebhookOpts>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let updated = svc
+        .update_alert_webhook(&caller, &id, req)
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(updated))
+}
+
+async fn alert_webhooks_delete(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    svc.delete_alert_webhook(&caller, &id)
+        .await
+        .map_err(ApiError)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn alert_webhooks_test(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let res = svc
+        .test_alert_webhook_by_id(&caller, &id)
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(res))
+}
+
+async fn realtime_list_channels(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let channels = svc
+        .realtime_list_channels(&caller)
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(channels))
+}
+
+pub async fn realtime_sse(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Path(channel): Path<String>,
+    Query(q): Query<AuthQuery>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, q.token.as_deref()).await?;
+    let rx = svc
+        .realtime_subscribe(&caller, &channel)
+        .await
+        .map_err(ApiError)?;
+
+    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+        loop {
+            match rx.recv().await {
+                Ok(msg) => {
+                    if let Ok(ev) = Event::default()
+                        .id(msg.id.clone())
+                        .event(msg.event.clone())
+                        .json_data(&msg)
+                    {
+                        return Some((Ok::<Event, Infallible>(ev), rx));
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    return Some((
+                        Ok(Event::default().event("lagged").data(skipped.to_string())),
+                        rx,
+                    ));
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    });
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+pub async fn realtime_publish(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Path(channel): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let (event, data) = if let Some(obj) = body.as_object() {
+        if obj.contains_key("data") {
+            (
+                obj.get("event").and_then(|v| v.as_str()),
+                obj.get("data").cloned().unwrap_or(serde_json::Value::Null),
+            )
+        } else {
+            (obj.get("event").and_then(|v| v.as_str()), body.clone())
+        }
+    } else {
+        (None, body)
+    };
+    let msg = svc
+        .realtime_publish(&caller, &channel, event, data)
+        .await
+        .map_err(ApiError)?;
+    Ok((StatusCode::CREATED, Json(msg)))
 }

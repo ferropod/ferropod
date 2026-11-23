@@ -200,6 +200,18 @@ interface search {
     delete: func(binding: string, doc-id: string) -> result<bool, string>;
 }
 
+interface ai {
+    record chat-response {
+        status: u16,
+        provider: string,
+        cached: bool,
+        body-json: string,
+    }
+
+    chat-completions: func(provider: option<string>, body-json: string) -> result<chat-response, string>;
+    embeddings: func(provider: option<string>, body-json: string) -> result<chat-response, string>;
+}
+
 world host-imports {
     import log;
     import kv;
@@ -207,6 +219,7 @@ world host-imports {
     import queue;
     import bucket;
     import search;
+    import ai;
     import env;
 }
 

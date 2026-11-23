@@ -79,6 +79,14 @@ impl Crypto {
         hex::encode(mac.finalize().into_bytes())
     }
 
+    /// Compute lowercase hex-encoded HMAC-SHA256 over `payload` with `secret`.
+    pub fn hmac_sha256_hex(secret: &[u8], payload: &[u8]) -> String {
+        let mut mac =
+            <HmacSha256 as Mac>::new_from_slice(secret).expect("HMAC accepts arbitrary key size");
+        mac.update(payload);
+        hex::encode(mac.finalize().into_bytes())
+    }
+
     /// Verify a presigned Blob URL signature in constant time and check expiry.
     pub fn verify_blob_op(
         &self,
