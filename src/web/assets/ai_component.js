@@ -173,14 +173,37 @@ aiSheet.replaceSync(`
   }
   .empty-state { padding: 28px 16px; text-align: center; color: var(--muted); font-size: 13px; }
 
-  input[type="text"], input[type="password"], input[type="number"], input[type="url"], select, textarea {
+  input[type="text"], input[type="password"], input[type="number"], input[type="url"], input:not([type]), select, textarea {
     width: 100%;
-    padding: 8px 11px;
+    min-height: 38px;
+    padding: 7px 11px;
     border-radius: var(--radius-sm);
     border: 1px solid var(--border);
-    background: var(--surface);
+    background-color: var(--surface);
     color: var(--text);
+    font-size: 13px;
+    line-height: 1.4;
     outline: none;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease;
+  }
+  select {
+    appearance: none;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    padding-right: 32px;
+    background-image: var(--select-arrow);
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    background-size: 14px 14px;
+    cursor: pointer;
+    text-overflow: ellipsis;
+  }
+  select:hover:not(:disabled) { border-color: var(--border-strong); }
+  select option, select optgroup { background-color: var(--surface); color: var(--text); }
+  input:disabled, select:disabled, textarea:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+    background-color: var(--surface-subtle);
   }
   textarea { min-height: 96px; resize: vertical; }
   input:focus, select:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
@@ -301,6 +324,19 @@ function emitToast(el, message, kind = 'info') {
   }));
 }
 
+function requestConfirm(el, message, onConfirm, opts = {}) {
+  const ev = new CustomEvent('fp-confirm', {
+    detail: { message, onConfirm, ...opts },
+    bubbles: true,
+    composed: true,
+    cancelable: true
+  });
+  el.dispatchEvent(ev);
+  if (!ev.defaultPrevented && window.confirm(message)) {
+    onConfirm();
+  }
+}
+
 class FpAiGateway extends HTMLElement {
   constructor() {
     super();
@@ -325,6 +361,7 @@ class FpAiGateway extends HTMLElement {
       meta: '',
       output: ''
     };
+    this._onLangChange = () => { if (this.isConnected) this.render(); };
   }
 
   set token(val) {
@@ -354,8 +391,13 @@ class FpAiGateway extends HTMLElement {
   }
 
   connectedCallback() {
+    window.addEventListener('fp-lang-change', this._onLangChange);
     this.render();
     this.refreshAll();
+  }
+
+  disconnectedCallback() {
+    window.removeEventListener('fp-lang-change', this._onLangChange);
   }
 
   async refreshAll() {
@@ -841,9 +883,9 @@ class FpAiGateway extends HTMLElement {
     sr.querySelectorAll('[data-del-prov]').forEach((btn) => {
       btn.addEventListener('click', () => {
         const name = btn.getAttribute('data-del-prov');
-        if (window.confirm(t('ai.deleteProviderConfirm', { name }))) {
+        requestConfirm(this, t('ai.deleteProviderConfirm', { name }), () => {
           this.deleteProvider(name);
-        }
+        });
       });
     });
 
@@ -861,6 +903,11 @@ class FpAiGateway extends HTMLElement {
     const closeDlg = () => { if (dlg && dlg.open) dlg.close(); };
     if (sr.getElementById('ai-dlg-close')) sr.getElementById('ai-dlg-close').addEventListener('click', closeDlg);
     if (sr.getElementById('ai-dlg-cancel')) sr.getElementById('ai-dlg-cancel').addEventListener('click', closeDlg);
+    if (dlg) {
+      dlg.addEventListener('click', (ev) => {
+        if (ev.target === dlg) closeDlg();
+      });
+    }
 
     const pForm = sr.getElementById('ai-provider-form');
     if (pForm) {

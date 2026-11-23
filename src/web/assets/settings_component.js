@@ -38,30 +38,32 @@ settingsSheet.replaceSync(`
 
   .tabs {
     display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
+    gap: 4px;
     margin-bottom: 16px;
     border-bottom: 1px solid var(--border);
-    padding-bottom: 10px;
+    overflow-x: auto;
+    scrollbar-width: none;
   }
+  .tabs::-webkit-scrollbar { display: none; }
   .tab-btn {
-    border: 1px solid transparent;
+    padding: 9px 14px;
+    border: none;
+    border-bottom: 2px solid transparent;
     background: transparent;
     color: var(--muted);
-    padding: 7px 14px;
-    border-radius: var(--radius-sm);
-    font-size: 13px;
-    font-weight: 600;
+    font-size: 13.5px;
+    font-weight: 500;
     cursor: pointer;
+    white-space: nowrap;
     display: inline-flex;
     align-items: center;
     gap: 6px;
   }
-  .tab-btn:hover { color: var(--text); background: var(--surface-subtle); }
+  .tab-btn:hover { color: var(--text); }
   .tab-btn.active {
     color: var(--accent);
-    background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+    border-bottom-color: var(--accent);
+    font-weight: 600;
   }
 
   .panel {
@@ -110,28 +112,58 @@ settingsSheet.replaceSync(`
   .field input[type="password"],
   .field input[type="url"],
   .field input[type="email"],
+  .field input:not([type]),
   .field select,
-  .field textarea {
+  .field textarea,
+  select {
     width: 100%;
-    padding: 8px 10px;
+    min-height: 38px;
+    padding: 7px 11px;
     border-radius: var(--radius-sm);
     border: 1px solid var(--border);
-    background: var(--bg);
+    background-color: var(--surface);
     color: var(--text);
-    font-size: 13.5px;
+    font-size: 13px;
+    line-height: 1.4;
     outline: none;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease;
+  }
+  select,
+  .field select {
+    appearance: none;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    padding-right: 32px;
+    background-image: var(--select-arrow);
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    background-size: 14px 14px;
+    cursor: pointer;
+    text-overflow: ellipsis;
+  }
+  select:hover:not(:disabled),
+  .field select:hover:not(:disabled) {
+    border-color: var(--border-strong);
+  }
+  select option,
+  select optgroup {
+    background-color: var(--surface);
+    color: var(--text);
   }
   .field input:focus,
   .field select:focus,
-  .field textarea:focus {
+  .field textarea:focus,
+  select:focus {
     border-color: var(--accent);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
   }
   .field input:disabled,
   .field select:disabled,
-  .field textarea:disabled {
-    opacity: 0.65;
+  .field textarea:disabled,
+  select:disabled {
+    opacity: 0.6;
     cursor: not-allowed;
+    background-color: var(--surface-subtle);
   }
   .field textarea { min-height: 76px; resize: vertical; }
   .field-hint { font-size: 12px; color: var(--muted); }
@@ -368,6 +400,19 @@ class FpPlatformSettings extends HTMLElement {
       composed: true,
       detail: { message, kind }
     }));
+  }
+
+  requestConfirm(message, onConfirm, opts = {}) {
+    const ev = new CustomEvent('fp-confirm', {
+      bubbles: true,
+      composed: true,
+      cancelable: true,
+      detail: { message, onConfirm, ...opts }
+    });
+    this.dispatchEvent(ev);
+    if (!ev.defaultPrevented && window.confirm(message)) {
+      onConfirm();
+    }
   }
 
   notifySettingsChanged() {
@@ -1244,6 +1289,9 @@ class FpPlatformSettings extends HTMLElement {
     `;
     dlg.querySelector('#dlg-close').onclick = () => dlg.close();
     dlg.querySelector('#dlg-cancel').onclick = () => dlg.close();
+    dlg.onclick = (ev) => {
+      if (ev.target === dlg) dlg.close();
+    };
     dlg.querySelector('#ai-prov-form').onsubmit = async (ev) => {
       ev.preventDefault();
       const sr = this.shadowRoot;
@@ -1308,9 +1356,9 @@ class FpPlatformSettings extends HTMLElement {
     const resetAllBtn = sr.getElementById('btn-reset-all');
     if (resetAllBtn) {
       resetAllBtn.addEventListener('click', () => {
-        if (window.confirm(this.t('settings.confirmResetAll'))) {
+        this.requestConfirm(this.t('settings.confirmResetAll'), () => {
           this.resetSection('all');
-        }
+        });
       });
     }
 
@@ -1363,17 +1411,18 @@ class FpPlatformSettings extends HTMLElement {
     });
 
     sr.querySelectorAll('[data-del-provider]').forEach((btn) => {
-      btn.addEventListener('click', async () => {
+      btn.addEventListener('click', () => {
         const name = btn.getAttribute('data-del-provider');
-        if (!window.confirm(this.t('settings.aiDeleteConfirm', { name }))) return;
-        try {
-          await this.api('/_api/v1/ai/providers/' + encodeURIComponent(name), { method: 'DELETE' });
-          this.toast(this.t('common.updated'), 'success');
-          await this.loadAiData();
-          this.render();
-        } catch (e) {
-          this.toast(e.message, 'error');
-        }
+        this.requestConfirm(this.t('settings.aiDeleteConfirm', { name }), async () => {
+          try {
+            await this.api('/_api/v1/ai/providers/' + encodeURIComponent(name), { method: 'DELETE' });
+            this.toast(this.t('common.updated'), 'success');
+            await this.loadAiData();
+            this.render();
+          } catch (e) {
+            this.toast(e.message, 'error');
+          }
+        });
       });
     });
 

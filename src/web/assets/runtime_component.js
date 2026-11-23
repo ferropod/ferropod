@@ -167,14 +167,37 @@ runtimeSheet.replaceSync(`
   }
   .empty-state { padding: 28px 16px; text-align: center; color: var(--muted); font-size: 13px; }
 
-  input[type="text"], input[type="search"], select, textarea {
+  input[type="text"], input[type="search"], input[type="number"], input:not([type]), select, textarea {
     width: 100%;
-    padding: 8px 11px;
+    min-height: 38px;
+    padding: 7px 11px;
     border-radius: var(--radius-sm);
     border: 1px solid var(--border);
-    background: var(--surface);
+    background-color: var(--surface);
     color: var(--text);
+    font-size: 13px;
+    line-height: 1.4;
     outline: none;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease;
+  }
+  select {
+    appearance: none;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    padding-right: 32px;
+    background-image: var(--select-arrow);
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    background-size: 14px 14px;
+    cursor: pointer;
+    text-overflow: ellipsis;
+  }
+  select:hover:not(:disabled) { border-color: var(--border-strong); }
+  select option, select optgroup { background-color: var(--surface); color: var(--text); }
+  input:disabled, select:disabled, textarea:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+    background-color: var(--surface-subtle);
   }
   input:focus, select:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
   textarea { min-height: 84px; resize: vertical; }
@@ -414,6 +437,7 @@ class FpRuntimePanel extends HTMLElement {
       result: null,
       loading: false
     };
+    this._onLangChange = () => { if (this.isConnected) this.render(); };
   }
 
   set status(v) { this._status = v; if (this.isConnected) this.render(); }
@@ -437,7 +461,12 @@ class FpRuntimePanel extends HTMLElement {
   }
 
   connectedCallback() {
+    window.addEventListener('fp-lang-change', this._onLangChange);
     this.render();
+  }
+
+  disconnectedCallback() {
+    window.removeEventListener('fp-lang-change', this._onLangChange);
   }
 
   async runInvoke() {
@@ -789,6 +818,7 @@ class FpProjectBindings extends HTMLElement {
     this._saving = false;
     this._targetEnv = 'prod';
     this._initializedForDep = null;
+    this._onLangChange = () => { if (this.isConnected) this.render(); };
   }
 
   set project(p) { this._project = p; this._syncInitialRows(); if (this.isConnected) this.render(); }
@@ -895,8 +925,13 @@ class FpProjectBindings extends HTMLElement {
   }
 
   connectedCallback() {
+    window.addEventListener('fp-lang-change', this._onLangChange);
     this._syncInitialRows();
     this.render();
+  }
+
+  disconnectedCallback() {
+    window.removeEventListener('fp-lang-change', this._onLangChange);
   }
 
   render() {

@@ -248,6 +248,7 @@ class FpSystemUpdates extends HTMLElement {
     this._error = '';
     this._expandedTags = new Set();
     this._pollTimer = null;
+    this._onLangChange = () => { if (this.isConnected) this.render(); };
   }
 
   set token(v) { this._token = v || ''; }
@@ -273,6 +274,19 @@ class FpSystemUpdates extends HTMLElement {
     }));
   }
 
+  requestConfirm(message, onConfirm, opts = {}) {
+    const ev = new CustomEvent('fp-confirm', {
+      bubbles: true,
+      composed: true,
+      cancelable: true,
+      detail: { message, onConfirm, ...opts }
+    });
+    this.dispatchEvent(ev);
+    if (!ev.defaultPrevented && window.confirm(message)) {
+      onConfirm();
+    }
+  }
+
   async api(path, opts = {}) {
     const headers = Object.assign({ Accept: 'application/json' }, opts.headers || {});
     if (this._token) headers.Authorization = 'Bearer ' + this._token;
@@ -289,11 +303,13 @@ class FpSystemUpdates extends HTMLElement {
   }
 
   connectedCallback() {
+    window.addEventListener('fp-lang-change', this._onLangChange);
     this.render();
     this.loadInitial();
   }
 
   disconnectedCallback() {
+    window.removeEventListener('fp-lang-change', this._onLangChange);
     if (this._pollTimer) {
       clearInterval(this._pollTimer);
       this._pollTimer = null;
@@ -355,12 +371,20 @@ class FpSystemUpdates extends HTMLElement {
     }
   }
 
-  async applyUpdate(tag, force = false) {
+  applyUpdate(tag, force = false) {
     if (!this.isAdmin() || this._applyingTag || this._restarting) return;
     const label = tag || (this._check && this._check.latest ? this._check.latest.tag : 'latest');
     const confirmMsg = this.t('updates.confirmApply', { version: label });
-    if (!window.confirm(confirmMsg)) return;
+    this.requestConfirm(confirmMsg, () => {
+      this._doApplyUpdate(tag, label, force);
+    }, {
+      title: this.t('updates.title'),
+      confirmLabel: this.t('common.confirm'),
+      danger: false
+    });
+  }
 
+  async _doApplyUpdate(tag, label, force) {
     this._applyingTag = label;
     this._error = '';
     this.render();

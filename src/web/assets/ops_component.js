@@ -155,14 +155,37 @@ opsSheet.replaceSync(`
   }
   .empty-state { padding: 28px 16px; text-align: center; color: var(--muted); font-size: 13px; }
 
-  input[type="text"], input[type="number"], input[type="url"], input[type="password"], select, textarea {
+  input[type="text"], input[type="number"], input[type="url"], input[type="password"], input:not([type]), select, textarea {
     width: 100%;
-    padding: 8px 11px;
+    min-height: 38px;
+    padding: 7px 11px;
     border-radius: var(--radius-sm);
     border: 1px solid var(--border);
-    background: var(--surface);
+    background-color: var(--surface);
     color: var(--text);
+    font-size: 13px;
+    line-height: 1.4;
     outline: none;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease;
+  }
+  select {
+    appearance: none;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    padding-right: 32px;
+    background-image: var(--select-arrow);
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    background-size: 14px 14px;
+    cursor: pointer;
+    text-overflow: ellipsis;
+  }
+  select:hover:not(:disabled) { border-color: var(--border-strong); }
+  select option, select optgroup { background-color: var(--surface); color: var(--text); }
+  input:disabled, select:disabled, textarea:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+    background-color: var(--surface-subtle);
   }
   textarea { min-height: 76px; resize: vertical; }
   input:focus, select:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
@@ -293,6 +316,19 @@ function emitToast(el, message, kind = 'info') {
   }));
 }
 
+function requestConfirm(el, message, onConfirm, opts = {}) {
+  const ev = new CustomEvent('fp-confirm', {
+    detail: { message, onConfirm, ...opts },
+    bubbles: true,
+    composed: true,
+    cancelable: true
+  });
+  el.dispatchEvent(ev);
+  if (!ev.defaultPrevented && window.confirm(message)) {
+    onConfirm();
+  }
+}
+
 const nowMs = Date.now();
 const systemTasks = [
   { id: 'sys_kv_ttl', name: 'KV TTL Batch Cleanup', schedule: '*/1 * * * *', target: 'internal:kv_ttl_gc', enabled: true, last_run: nowMs - 42000, last_status: 'ok' },
@@ -331,6 +367,7 @@ class FpOpsCenter extends HTMLElement {
     this._rtPubChannel = 'default';
     this._rtPubEvent = 'message';
     this._rtPubData = '{"hello":"world"}';
+    this._onLangChange = () => { if (this.isConnected) this.render(); };
   }
 
   set token(val) {
@@ -381,6 +418,7 @@ class FpOpsCenter extends HTMLElement {
   }
 
   connectedCallback() {
+    window.addEventListener('fp-lang-change', this._onLangChange);
     if (!this._isAdmin()) this._tab = 'cron';
     this.render();
     if (this._isAdmin()) {
@@ -391,6 +429,7 @@ class FpOpsCenter extends HTMLElement {
   }
 
   disconnectedCallback() {
+    window.removeEventListener('fp-lang-change', this._onLangChange);
     this._stopRealtimeSse(false);
   }
 
@@ -1216,6 +1255,12 @@ rclone sync ./data/backups remote:ferropod-backups</pre>
       });
     });
 
+    root.querySelectorAll('dialog.fp-dialog').forEach((dlg) => {
+      dlg.addEventListener('click', (ev) => {
+        if (ev.target === dlg) dlg.close();
+      });
+    });
+
     const abForm = root.getElementById('auto-backup-form');
     if (abForm) {
       abForm.addEventListener('submit', (ev) => {
@@ -1274,9 +1319,9 @@ rclone sync ./data/backups remote:ferropod-backups</pre>
     root.querySelectorAll('[data-del-backup]').forEach((btn) => {
       btn.addEventListener('click', () => {
         const name = btn.getAttribute('data-del-backup');
-        if (window.confirm(t('ops.deleteBackupConfirm', { name }))) {
+        requestConfirm(this, t('ops.deleteBackupConfirm', { name }), () => {
           this.deleteBackup(name);
-        }
+        });
       });
     });
 
@@ -1295,7 +1340,14 @@ rclone sync ./data/backups remote:ferropod-backups</pre>
       });
     });
     root.querySelectorAll('[data-del-wh]').forEach((btn) => {
-      btn.addEventListener('click', () => this.deleteWebhook(btn.getAttribute('data-del-wh')));
+      btn.addEventListener('click', () => {
+        const id = btn.getAttribute('data-del-wh');
+        const w = this._webhooks.find((x) => x.id === id);
+        const label = w ? w.name : id;
+        requestConfirm(this, `${t('common.confirmDeleteTitle')}: ${label}?`, () => {
+          this.deleteWebhook(id);
+        });
+      });
     });
 
     const whForm = root.getElementById('webhook-form');
@@ -1435,7 +1487,12 @@ rclone sync ./data/backups remote:ferropod-backups</pre>
 
     root.querySelectorAll('[data-del-cron]').forEach((btn) => {
       btn.addEventListener('click', () => {
-        this.deleteCron(btn.getAttribute('data-del-cron'));
+        const id = btn.getAttribute('data-del-cron');
+        const item = this._crons.find((c) => c.id === id);
+        const label = item ? item.name : id;
+        requestConfirm(this, `${t('common.confirmDeleteTitle')}: ${label}?`, () => {
+          this.deleteCron(id);
+        });
       });
     });
   }

@@ -173,14 +173,37 @@ sharedSheet.replaceSync(`
   .badge-warn { background: var(--warn-soft); color: var(--warn); }
   .badge-danger { background: var(--danger-soft); color: var(--danger); }
 
-  input[type="text"], input[type="search"], select, textarea {
+  input[type="text"], input[type="search"], input[type="number"], input:not([type]), select, textarea {
     width: 100%;
-    padding: 8px 11px;
+    min-height: 38px;
+    padding: 7px 11px;
     border-radius: var(--radius-sm);
     border: 1px solid var(--border);
-    background: var(--surface);
+    background-color: var(--surface);
     color: var(--text);
+    font-size: 13px;
+    line-height: 1.4;
     outline: none;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease;
+  }
+  select {
+    appearance: none;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    padding-right: 32px;
+    background-image: var(--select-arrow);
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    background-size: 14px 14px;
+    cursor: pointer;
+    text-overflow: ellipsis;
+  }
+  select:hover:not(:disabled) { border-color: var(--border-strong); }
+  select option, select optgroup { background-color: var(--surface); color: var(--text); }
+  input:disabled, select:disabled, textarea:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+    background-color: var(--surface-subtle);
   }
   input:focus, select:focus, textarea:focus {
     border-color: var(--accent);
@@ -446,6 +469,7 @@ class FpLogSearchPanel extends HTMLElement {
       windowSecs: '86400',
       limit: '100'
     };
+    this._onLangChange = () => { if (this.isConnected) this.render(); };
   }
 
   set projects(list) {
@@ -483,7 +507,12 @@ class FpLogSearchPanel extends HTMLElement {
   }
 
   connectedCallback() {
+    window.addEventListener('fp-lang-change', this._onLangChange);
     this.render();
+  }
+
+  disconnectedCallback() {
+    window.removeEventListener('fp-lang-change', this._onLangChange);
   }
 
   _levelBadge(level) {
@@ -607,18 +636,25 @@ class FpLogSearchPanel extends HTMLElement {
   _bindEvents() {
     const root = this.shadowRoot;
     const form = root.getElementById('log-fts-form');
+    const emitQuery = () => {
+      this._syncFiltersFromDom();
+      this.dispatchEvent(new CustomEvent('fp-log-query', {
+        detail: { ...this._filters },
+        bubbles: true,
+        composed: true
+      }));
+      this.render();
+    };
     if (form) {
       form.addEventListener('submit', (ev) => {
         ev.preventDefault();
-        this._syncFiltersFromDom();
-        this.dispatchEvent(new CustomEvent('fp-log-query', {
-          detail: { ...this._filters },
-          bubbles: true,
-          composed: true
-        }));
-        this.render();
+        emitQuery();
       });
     }
+    ['lf-source', 'lf-level', 'lf-project', 'lf-window', 'lf-limit'].forEach((id) => {
+      const sel = root.getElementById(id);
+      if (sel) sel.addEventListener('change', emitQuery);
+    });
   }
 }
 

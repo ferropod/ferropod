@@ -323,13 +323,17 @@
     root.innerHTML = '';
   }
 
-  function confirmAction(message, onConfirm) {
+  function confirmAction(message, onConfirm, opts) {
+    opts = opts || {};
+    var title = opts.title || t('common.confirmDeleteTitle');
+    var confirmLabel = opts.confirmLabel || t('common.confirm');
+    var btnClass = opts.danger === false ? 'btn btn-primary' : 'btn btn-danger';
     openModal({
-      title: t('common.confirmDeleteTitle'),
+      title: title,
       body: '<p style="margin:0;">' + esc(message) + '</p>',
       footer:
         '<button type="button" class="btn" id="confirm-cancel">' + esc(t('common.cancel')) + '</button>' +
-        '<button type="button" class="btn btn-danger" id="confirm-ok">' + esc(t('common.confirm')) + '</button>',
+        '<button type="button" class="' + btnClass + '" id="confirm-ok">' + esc(confirmLabel) + '</button>',
       onMount: function () {
         $('confirm-cancel').addEventListener('click', closeModal);
         $('confirm-ok').addEventListener('click', function () {
@@ -1853,13 +1857,23 @@
       });
     });
     if ($('kv-filter-btn')) {
-      $('kv-filter-btn').addEventListener('click', async function () {
+      var runKvFilter = async function () {
         state.kvPrefix = $('kv-prefix-input').value.trim();
         try {
           await loadKvKeys();
           renderKv(false);
         } catch (e) { toast(e.message, 'error'); }
-      });
+      };
+      $('kv-filter-btn').addEventListener('click', runKvFilter);
+      if ($('kv-prefix-input')) {
+        $('kv-prefix-input').addEventListener('keydown', function (ev) {
+          if (ev.key === 'Enter') {
+            ev.preventDefault();
+            runKvFilter();
+          }
+        });
+        $('kv-prefix-input').addEventListener('search', runKvFilter);
+      }
     }
     if ($('kv-put-btn')) {
       $('kv-put-btn').addEventListener('click', function () {
@@ -2647,13 +2661,23 @@
     });
 
     if ($('blob-filter-btn')) {
-      $('blob-filter-btn').addEventListener('click', async function () {
+      var runBlobFilter = async function () {
         state.blobPrefix = $('blob-prefix-input').value.trim();
         try {
           await loadBucketObjects();
           renderBlobs(false);
         } catch (e) { toast(e.message, 'error'); }
-      });
+      };
+      $('blob-filter-btn').addEventListener('click', runBlobFilter);
+      if ($('blob-prefix-input')) {
+        $('blob-prefix-input').addEventListener('keydown', function (ev) {
+          if (ev.key === 'Enter') {
+            ev.preventDefault();
+            runBlobFilter();
+          }
+        });
+        $('blob-prefix-input').addEventListener('search', runBlobFilter);
+      }
     }
     if ($('blob-toggle-pub')) {
       $('blob-toggle-pub').addEventListener('click', async function () {
@@ -3141,28 +3165,40 @@
     try {
       var indexes = await api(path);
       if (!isCurrentFts()) return;
-      panel.innerHTML = '<div class="panel-header"><h3 class="panel-title">' + esc(t('dbs.tabFts')) + '</h3></div>' +
-        '<div class="panel-body stack gap-md"><p class="muted text-xs">' + esc(t('dbs.ftsSubtitle')) + '</p>' +
-        (canWrite ? '<form id="fts-create-form" class="stack gap-sm">' +
-        '<input id="fts-name" required placeholder="' + esc(t('dbs.ftsIndexName')) + '">' +
-        '<input id="fts-table" required placeholder="' + esc(t('dbs.ftsTable')) + '">' +
-        '<input id="fts-columns" required placeholder="' + esc(t('dbs.ftsColumns')) + '">' +
-        '<select id="fts-tokenizer">' +
-        '<option value="unicode61">unicode61 (Default)</option>' +
-        '<option value="cjk_jieba">cjk_jieba (CJK / Chinese)</option>' +
-        '<option value="ngram3">ngram3 (Substring)</option>' +
-        '<option value="raw">raw (Exact)</option>' +
-        '</select>' +
-        '<button type="submit" class="btn btn-primary">' + esc(t('dbs.ftsNewIndex')) + '</button></form>' : '') +
-        (indexes.length ? indexes.map(function (idx) {
-          return '<div class="panel"><div class="panel-body stack gap-sm"><strong>' + esc(idx.name) + '</strong>' +
-            '<span class="muted">' + esc(idx.table + ' (' + idx.columns.join(', ') + ')' + (idx.tokenizer ? ' · ' + idx.tokenizer : '')) + '</span>' +
-            '<form class="row" data-fts-query="' + esc(idx.name) + '"><input name="query" required placeholder="' +
-            esc(t('dbs.ftsTestPlaceholder')) + '"><button class="btn" type="submit">' + esc(t('common.search')) + '</button></form>' +
-            '<pre class="code-block hidden" data-fts-result="' + esc(idx.name) + '"></pre>' +
-            (canWrite ? '<button class="btn btn-danger btn-sm" data-fts-delete="' + esc(idx.name) + '">' + esc(t('common.delete')) + '</button>' : '') +
-            '</div></div>';
-        }).join('') : '<div class="empty-state">' + esc(t('dbs.ftsNoIndexes')) + '</div>') + '</div>';
+      panel.innerHTML =
+        '<div class="panel-header"><div><h3 class="panel-title">' + esc(t('dbs.tabFts')) + '</h3>' +
+        '<div class="muted text-xs">' + esc(t('dbs.ftsSubtitle')) + '</div></div></div>' +
+        '<div class="panel-body stack gap-md">' +
+        (canWrite
+          ? '<form id="fts-create-form" class="form-grid">' +
+            '<div class="field"><label for="fts-name">' + esc(t('dbs.ftsIndexName')) + '</label><input type="text" id="fts-name" required placeholder="' + esc(t('dbs.ftsIndexName')) + '"></div>' +
+            '<div class="field"><label for="fts-table">' + esc(t('dbs.ftsTable')) + '</label><input type="text" id="fts-table" required placeholder="' + esc(t('dbs.ftsTable')) + '"></div>' +
+            '<div class="field"><label for="fts-columns">' + esc(t('dbs.ftsColumns')) + '</label><input type="text" id="fts-columns" required placeholder="' + esc(t('dbs.ftsColumns')) + '"></div>' +
+            '<div class="field"><label for="fts-tokenizer">' + esc(t('dbs.ftsTokenizer')) + '</label><select id="fts-tokenizer">' +
+            '<option value="unicode61">unicode61 (Default)</option>' +
+            '<option value="cjk_jieba">cjk_jieba (CJK / Chinese)</option>' +
+            '<option value="ngram3">ngram3 (Substring)</option>' +
+            '<option value="raw">raw (Exact)</option>' +
+            '</select></div>' +
+            '<div class="span-2 row"><button type="submit" class="btn btn-primary">' + esc(t('dbs.ftsNewIndex')) + '</button></div>' +
+            '</form>'
+          : '') +
+        (indexes.length
+          ? indexes.map(function (idx) {
+              return '<div class="panel"><div class="panel-header"><div class="row"><strong class="mono">' + esc(idx.name) + '</strong>' +
+                '<span class="badge badge-neutral mono">' + esc(idx.table + ' (' + idx.columns.join(', ') + ')') + '</span>' +
+                (idx.tokenizer ? '<span class="badge badge-info mono">' + esc(idx.tokenizer) + '</span>' : '') +
+                '</div>' +
+                (canWrite ? '<button type="button" class="btn btn-danger btn-sm" data-fts-delete="' + esc(idx.name) + '">' + esc(t('common.delete')) + '</button>' : '') +
+                '</div>' +
+                '<div class="panel-body stack gap-sm">' +
+                '<form class="input-group" data-fts-query="' + esc(idx.name) + '"><input type="search" name="query" required placeholder="' +
+                esc(t('dbs.ftsTestPlaceholder')) + '"><button class="btn btn-primary" type="submit">' + esc(t('common.search')) + '</button></form>' +
+                '<pre class="code-block hidden" data-fts-result="' + esc(idx.name) + '"></pre>' +
+                '</div></div>';
+            }).join('')
+          : '<div class="empty-state">' + esc(t('dbs.ftsNoIndexes')) + '</div>') +
+        '</div>';
       if ($('fts-create-form')) $('fts-create-form').addEventListener('submit', async function (event) {
         event.preventDefault();
         try {
@@ -3400,13 +3436,16 @@
       return;
     }
     searchState.result = result;
-    renderSearch();
+    renderSearch(false);
   }
 
-  async function renderSearch() {
+  async function renderSearch(fetchData) {
     var root = $('view-root');
     if (state.currentRoute !== 'search') return;
     var isCurrentSearch = beginViewRender('search');
+    if (fetchData) {
+      root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
+    }
     try {
       var data = await Promise.all([api('/_api/v1/search'), api('/_api/v1/apps')]);
       if (!isCurrentSearch()) return;
@@ -3431,6 +3470,17 @@
         return '<option value="' + esc(item.id) + '"' + (item.id === searchState.selected ? ' selected' : '') +
           '>' + esc(item.name) + '</option>';
       }).join('');
+      var idxMenu = searchState.indexes.length
+        ? groupedMenu(searchState.indexes, function (item) {
+            return '<button type="button" class="list-menu-item' + (item.id === searchState.selected ? ' active' : '') + '" data-select-search-idx="' + esc(item.id) + '">' +
+              '<span class="truncate">' + esc(item.name) + '</span>' +
+              '<span class="row gap-xs" style="flex-wrap:nowrap;">' +
+              (item.project_id ? '<span class="badge badge-neutral text-xs">' + esc(projectNameById(item.project_id)) + '</span>' : '') +
+              '<span class="badge badge-neutral text-xs mono">' + esc(item.doc_count || 0) + '</span>' +
+              '</span></button>';
+          })
+        : '<div class="empty-state" style="padding:20px 10px;">' + esc(t('search.noIndexes')) + '</div>';
+
       var facetEntries = (searchState.result && searchState.result.facets) ? Object.keys(searchState.result.facets) : [];
       var facetsHtml = facetEntries.length ? '<div class="row gap-xs">' + facetEntries.map(function (field) {
         var vals = searchState.result.facets[field] || {};
@@ -3440,13 +3490,28 @@
         }).join('');
       }).join('') + '</div>' : '';
 
-      root.innerHTML = '<div class="page-head"><h2 class="page-title">' + esc(t('search.title')) + '</h2>' +
-        (!isReadonly() ? '<button class="btn btn-primary" id="search-create-index">' + esc(t('search.newIndex')) + '</button>' : '') + '</div>' +
-        '<div class="panel"><div class="panel-body stack gap-md">' +
-        '<select id="search-index-select">' + options + '</select>' +
-        (selected ? '<form id="real-search-form" class="stack gap-sm">' +
+      var detailHtml = !selected
+        ? '<div class="panel"><div class="empty-state">' + esc(t('search.selectIndex')) + '</div></div>'
+        : '<div class="panel"><div class="panel-header"><div class="toolbar">' +
+          '<div><div class="row gap-xs"><h3 class="panel-title mono">' + esc(selected.name) + '</h3>' +
+          (selected.tokenizer ? '<span class="badge badge-info mono">' + esc(selected.tokenizer) + '</span>' : '') +
+          '<span class="badge badge-neutral mono">' + esc(t('search.statDocs')) + ': ' + esc(selected.doc_count || 0) + '</span>' +
+          '</div>' +
+          (selected.description ? '<div class="muted text-xs">' + esc(selected.description) + '</div>' : '') +
+          '</div>' +
+          (writable
+            ? '<div class="row">' +
+              '<button type="button" class="btn btn-sm" id="search-commit-index">' + esc(t('search.commitIndex')) + '</button>' +
+              '<button type="button" class="btn btn-sm" id="search-edit-index">' + esc(t('common.editConfig')) + '</button>' +
+              '<button type="button" class="btn btn-danger btn-sm" id="search-delete-index">' + esc(t('search.deleteIndex')) + '</button>' +
+              '</div>'
+            : '') +
+          '</div></div>' +
+          '<div class="panel-body stack gap-md">' +
+          '<select id="search-index-select" class="hidden">' + options + '</select>' +
+          '<form id="real-search-form" class="stack gap-sm">' +
           '<div class="row">' +
-          '<input id="real-search-query" value="' + esc(searchState.query) + '" placeholder="' + esc(t('search.queryPlaceholder')) + '" style="flex:1 1 220px;">' +
+          '<input type="search" id="real-search-query" value="' + esc(searchState.query) + '" placeholder="' + esc(t('search.queryPlaceholder')) + '" style="flex:1 1 220px;">' +
           '<label class="checkbox-row"><input type="checkbox" id="real-search-fuzzy"' + (searchState.fuzzy ? ' checked' : '') + '> ' + esc(t('search.fuzzy')) + '</label>' +
           '<select id="real-search-sort" style="width:auto;">' +
           '<option value=""' + (!searchState.sort ? ' selected' : '') + '>' + esc(t('search.sortRelevance')) + '</option>' +
@@ -3456,29 +3521,55 @@
           '</div>' +
           '<details class="adv-options"' + (searchState.vectorText ? ' open' : '') + '><summary>' + esc(t('search.hybridVector')) + '</summary>' +
           '<div class="adv-options-body form-grid">' +
-          '<div class="field"><label>' + esc(t('search.vectorArray')) + '</label><input type="text" id="real-search-vector" class="mono" value="' + esc(searchState.vectorText) + '" placeholder="[0.12, -0.34, 0.56]"></div>' +
-          '<div class="field"><label>' + esc(t('search.vectorAlpha')) + '</label><input type="number" id="real-search-alpha" min="0" max="1" step="0.05" value="' + esc(searchState.alpha) + '"></div>' +
+          '<div class="field"><label for="real-search-vector">' + esc(t('search.vectorArray')) + '</label><input type="text" id="real-search-vector" class="mono" value="' + esc(searchState.vectorText) + '" placeholder="[0.12, -0.34, 0.56]"></div>' +
+          '<div class="field"><label for="real-search-alpha">' + esc(t('search.vectorAlpha')) + '</label><input type="number" id="real-search-alpha" min="0" max="1" step="0.05" value="' + esc(searchState.alpha) + '"></div>' +
           '</div></details></form>' +
           facetsHtml +
           (searchState.result ? '<pre class="code-block">' + esc(JSON.stringify(searchState.result, null, 2)) + '</pre>' : '') +
-          (writable ? '<form id="real-search-doc-form" class="stack gap-sm"><label>' + esc(t('search.docJsonLabel')) + '</label>' +
-          '<textarea id="real-search-doc" rows="5" required>{ "id": "", "title": "", "body": "" }</textarea>' +
-          '<button class="btn btn-primary" type="submit">' + esc(t('common.save')) + '</button></form>' : '') +
-          '<div class="stack gap-sm">' + docs.map(function (doc) {
-            return '<div class="panel"><pre class="code-block">' + esc(JSON.stringify(doc, null, 2)) + '</pre>' +
-              (writable && doc.id ? '<button class="btn btn-danger btn-sm" data-search-doc-delete="' + esc(doc.id) + '">' + esc(t('common.delete')) + '</button>' : '') + '</div>';
-          }).join('') + '</div>' +
-          '<div class="row gap-xs"><button class="btn btn-sm" id="search-prev"' + (searchState.offset === 0 ? ' disabled' : '') + '>' + esc(t('search.previousPage')) + '</button>' +
-          '<button class="btn btn-sm" id="search-next"' + (!hasMoreDocs ? ' disabled' : '') + '>' + esc(t('search.nextPage')) + '</button></div>' +
-          (writable ? '<div class="row gap-xs"><button class="btn" id="search-commit-index">' + esc(t('search.commitIndex')) + '</button><button class="btn" id="search-edit-index">' + esc(t('common.editConfig')) + '</button><button class="btn btn-danger" id="search-delete-index">' + esc(t('search.deleteIndex')) + '</button></div>' : '') : '') +
-        '</div></div>';
-      $('search-index-select').addEventListener('change', function (event) {
-        searchState.selected = event.target.value;
-        searchState.offset = 0;
-        searchState.facets = {};
-        searchState.result = null;
-        renderSearch();
+          (writable
+            ? '<form id="real-search-doc-form" class="stack gap-sm"><div class="field"><label for="real-search-doc">' + esc(t('search.docJsonLabel')) + '</label>' +
+              '<textarea id="real-search-doc" class="mono" rows="5" required>{ "id": "", "title": "", "body": "" }</textarea></div>' +
+              '<div class="row"><button class="btn btn-primary" type="submit">' + esc(t('common.save')) + '</button></div></form>'
+            : '') +
+          (docs.length
+            ? '<div class="stack gap-sm">' + docs.map(function (doc) {
+                return '<div class="panel"><div class="panel-header"><span class="mono text-xs text-strong">' + esc(doc.id || '-') + '</span>' +
+                  (writable && doc.id ? '<button type="button" class="btn btn-danger btn-sm" data-search-doc-delete="' + esc(doc.id) + '">' + esc(t('common.delete')) + '</button>' : '') +
+                  '</div><div class="panel-body" style="padding:12px;"><pre class="code-block" style="margin:0;">' + esc(JSON.stringify(doc, null, 2)) + '</pre></div></div>';
+              }).join('') + '</div>'
+            : '<div class="empty-state">' + esc(t('common.empty')) + '</div>') +
+          '<div class="row gap-xs"><button type="button" class="btn btn-sm" id="search-prev"' + (searchState.offset === 0 ? ' disabled' : '') + '>' + esc(t('search.previousPage')) + '</button>' +
+          '<button type="button" class="btn btn-sm" id="search-next"' + (!hasMoreDocs ? ' disabled' : '') + '>' + esc(t('search.nextPage')) + '</button></div>' +
+          '</div></div>';
+
+      root.innerHTML =
+        '<div class="page-head"><div><h2 class="page-title">' + esc(t('search.title')) + '</h2>' +
+        '<p class="page-subtitle">' + esc(t('search.subtitle')) + '</p></div>' +
+        (!isReadonly() ? '<button type="button" class="btn btn-primary" id="search-create-index">' + esc(t('search.newIndex')) + '</button>' : '') +
+        '</div>' +
+        '<div class="split-layout">' +
+        '<div class="panel"><div class="panel-header"><h3 class="panel-title">' + esc(t('search.indexes')) + '</h3></div>' +
+        '<div class="list-menu">' + idxMenu + '</div></div>' +
+        detailHtml + '</div>';
+
+      root.querySelectorAll('[data-select-search-idx]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          searchState.selected = btn.getAttribute('data-select-search-idx');
+          searchState.offset = 0;
+          searchState.facets = {};
+          searchState.result = null;
+          renderSearch(false);
+        });
       });
+      if ($('search-index-select')) {
+        $('search-index-select').addEventListener('change', function (event) {
+          searchState.selected = event.target.value;
+          searchState.offset = 0;
+          searchState.facets = {};
+          searchState.result = null;
+          renderSearch(false);
+        });
+      }
       if ($('search-commit-index') && selected) {
         $('search-commit-index').addEventListener('click', async function () {
           try {
@@ -3561,9 +3652,12 @@
             '<div class="field"><label>' + esc(t('search.facetFields')) + '</label><input type="text" id="search-index-facets" placeholder="category,status,lang,source,level"></div>' +
             '</div></details>' +
             '</form>',
-          footer: '<button form="search-index-form" class="btn btn-primary" type="submit">' + esc(t('common.create')) + '</button>',
+          footer:
+            '<button type="button" class="btn" id="si-cancel">' + esc(t('common.cancel')) + '</button>' +
+            '<button form="search-index-form" class="btn btn-primary" type="submit">' + esc(t('common.create')) + '</button>',
           onMount: function () {
             loadResourceGroupOptions();
+            $('si-cancel').addEventListener('click', closeModal);
             $('search-index-form').addEventListener('submit', async function (event) {
               event.preventDefault();
               var facetsRaw = $('search-index-facets').value.trim();
@@ -3588,7 +3682,23 @@
           }
         });
       });
-      if ($('real-search-form')) $('real-search-form').addEventListener('submit', async function (event) {
+      if ($('real-search-sort')) {
+      $('real-search-sort').addEventListener('change', async function () {
+        if ($('real-search-query')) searchState.query = $('real-search-query').value;
+        searchState.fuzzy = Boolean($('real-search-fuzzy') && $('real-search-fuzzy').checked);
+        searchState.sort = $('real-search-sort').value;
+        try { await runRealSearchQuery(selected.id); } catch (e) { toast(e.message, 'error'); }
+      });
+    }
+    if ($('real-search-fuzzy')) {
+      $('real-search-fuzzy').addEventListener('change', async function () {
+        if ($('real-search-query')) searchState.query = $('real-search-query').value;
+        searchState.fuzzy = Boolean($('real-search-fuzzy').checked);
+        searchState.sort = $('real-search-sort') ? $('real-search-sort').value : '';
+        try { await runRealSearchQuery(selected.id); } catch (e) { toast(e.message, 'error'); }
+      });
+    }
+    if ($('real-search-form')) $('real-search-form').addEventListener('submit', async function (event) {
         event.preventDefault();
         searchState.query = $('real-search-query').value;
         searchState.fuzzy = Boolean($('real-search-fuzzy') && $('real-search-fuzzy').checked);
@@ -4201,6 +4311,18 @@
     document.addEventListener('fp-toast', function (ev) {
       if (ev.detail && ev.detail.message) {
         toast(ev.detail.message, ev.detail.kind || 'info');
+      }
+    });
+
+    document.addEventListener('fp-confirm', function (ev) {
+      var d = ev.detail || {};
+      if (d.message && typeof d.onConfirm === 'function') {
+        ev.preventDefault();
+        confirmAction(d.message, d.onConfirm, {
+          title: d.title,
+          confirmLabel: d.confirmLabel,
+          danger: d.danger !== false
+        });
       }
     });
 

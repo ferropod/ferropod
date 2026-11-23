@@ -211,6 +211,7 @@ class FpPerfMonitor extends HTMLElement {
     this._rssHistory = [];
     this._rttHistory = [];
     this._loadHistory = [];
+    this._onLangChange = () => { if (this.isConnected) this.render(); };
   }
 
   set token(val) {
@@ -221,12 +222,14 @@ class FpPerfMonitor extends HTMLElement {
   }
 
   connectedCallback() {
+    window.addEventListener('fp-lang-change', this._onLangChange);
     this.render();
     this.refresh();
     this._startPolling();
   }
 
   disconnectedCallback() {
+    window.removeEventListener('fp-lang-change', this._onLangChange);
     this._stopPolling();
   }
 
