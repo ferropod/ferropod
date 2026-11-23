@@ -57,3 +57,9 @@ tempfile = "3"
 http-body-util = "0.1"
 rcgen = "0.14"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = 0

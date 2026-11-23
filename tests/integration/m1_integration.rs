@@ -3778,6 +3778,10 @@ async fn openapi_llms_txt_and_lean_mcp_server_end_to_end() {
     let oa = pj(oa_b);
     assert_eq!(oa["openapi"], "3.1.0");
     assert!(oa["paths"]["/_mcp"].is_object());
+    assert!(oa["paths"]["/_api/v1/apps"].is_object());
+
+    let (st_apps, _) = json_req(&app, Method::GET, "/_api/v1/apps", tok, None).await;
+    assert_eq!(st_apps, StatusCode::OK);
 
     let llms_resp = app
         .clone()
