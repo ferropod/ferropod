@@ -20,11 +20,15 @@ pub struct Manifest {
     #[serde(default)]
     pub bindings: Bindings,
     #[serde(default)]
+    pub secrets: HashMap<String, String>,
+    #[serde(default)]
     pub routes: Vec<RouteSpec>,
     #[serde(default)]
     pub migrations: Vec<MigrationSpec>,
     #[serde(default)]
     pub crons: Vec<CronSpec>,
+    #[serde(default)]
+    pub ai_providers: Vec<AiProviderSpec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +75,46 @@ pub struct RouteSpec {
     pub host: String,
     #[serde(default = "default_prod")]
     pub env: TargetEnv,
+    #[serde(default)]
+    pub proxy_prefix: Option<String>,
+    #[serde(default)]
+    pub proxy_upstream: Option<String>,
+    #[serde(default)]
+    pub rate_limit_rpm: Option<u32>,
+    #[serde(default)]
+    pub basic_auth_user: Option<String>,
+    #[serde(default)]
+    pub basic_auth_password: Option<String>,
+    #[serde(default)]
+    pub basic_auth_password_env: Option<String>,
+    #[serde(default)]
+    pub canary_deployment_id: Option<String>,
+    #[serde(default)]
+    pub canary_weight: Option<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiProviderSpec {
+    pub name: String,
+    pub base_url: String,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub api_key_env: Option<String>,
+    #[serde(default)]
+    pub default_model: Option<String>,
+    #[serde(default)]
+    pub fallback_provider: Option<String>,
+    #[serde(default)]
+    pub rate_limit_rpm: Option<u32>,
+    #[serde(default)]
+    pub cache_ttl_secs: Option<u64>,
+    #[serde(default)]
+    pub monthly_token_budget: Option<u64>,
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 }
 
 fn default_prod() -> TargetEnv {
@@ -120,6 +164,10 @@ pub struct DeploySummary {
     pub migrations_applied: usize,
     pub routes_bound: usize,
     pub crons_synced: usize,
+    #[serde(default)]
+    pub secrets_synced: usize,
+    #[serde(default)]
+    pub ai_providers_synced: usize,
     pub planned_actions: Vec<String>,
 }
 
@@ -496,10 +544,18 @@ pub async fn deploy_manifest(opts: DeployOptions) -> Result<DeploySummary> {
                 .planned_actions
                 .push(format!("bind route '{}' -> {}", r.host, r.env.as_str()));
         }
+        for key in manifest.secrets.keys() {
+            summary.planned_actions.push(format!("set secret '{key}'"));
+        }
         for c in &manifest.crons {
             summary
                 .planned_actions
                 .push(format!("sync cron '{}' ({})", c.name, c.schedule));
+        }
+        for p in &manifest.ai_providers {
+            summary
+                .planned_actions
+                .push(format!("sync AI provider '{}' ({})", p.name, p.base_url));
         }
         return Ok(summary);
     }
@@ -947,8 +1003,40 @@ pub async fn deploy_manifest(opts: DeployOptions) -> Result<DeploySummary> {
     let dep = check_status(dep_resp, "create deployment").await?;
     summary.deployment_id = dep["id"].as_str().map(str::to_string);
 
+    // 6.5 Sync project secrets (values prefixed with '$' resolve from process env)
+    for (k, raw_val) in &manifest.secrets {
+        let resolved_val = if let Some(var_name) = raw_val.strip_prefix('$') {
+            std::env::var(var_name).with_context(|| {
+                format!("environment variable '{var_name}' referenced by secret '{k}' is not set")
+            })?
+        } else {
+            raw_val.clone()
+        };
+        let resp = client
+            .post(format!("{server}/_api/v1/projects/{project_id}/secrets"))
+            .header("Authorization", &auth_header)
+            .json(&serde_json::json!({
+                "key": k,
+                "value": resolved_val,
+            }))
+            .send()
+            .await?;
+        check_status(resp, &format!("set secret '{k}'")).await?;
+        summary.secrets_synced += 1;
+    }
+
     // 7. Upsert routes
     for r in &manifest.routes {
+        let resolved_pass = match (&r.basic_auth_password, &r.basic_auth_password_env) {
+            (Some(p), _) => Some(p.clone()),
+            (None, Some(env_name)) => Some(std::env::var(env_name).with_context(|| {
+                format!(
+                    "env var '{env_name}' for route '{}' basic_auth_password_env is not set",
+                    r.host
+                )
+            })?),
+            (None, None) => None,
+        };
         let resp = client
             .post(format!("{server}/_api/v1/routes"))
             .header("Authorization", &auth_header)
@@ -956,6 +1044,13 @@ pub async fn deploy_manifest(opts: DeployOptions) -> Result<DeploySummary> {
                 "host": r.host,
                 "project": project_id,
                 "target_env": r.env,
+                "proxy_prefix": r.proxy_prefix,
+                "proxy_upstream": r.proxy_upstream,
+                "rate_limit_rpm": r.rate_limit_rpm,
+                "basic_auth_user": r.basic_auth_user,
+                "basic_auth_password": resolved_pass,
+                "canary_deployment_id": r.canary_deployment_id,
+                "canary_weight": r.canary_weight,
             }))
             .send()
             .await?;
@@ -1014,6 +1109,50 @@ pub async fn deploy_manifest(opts: DeployOptions) -> Result<DeploySummary> {
             }
             summary.crons_synced += 1;
         }
+    }
+
+    // 9. Sync AI Gateway providers
+    for p in &manifest.ai_providers {
+        let resolved_key = match (&p.api_key, &p.api_key_env) {
+            (Some(k), _) => Some(k.clone()),
+            (None, Some(env_name)) => Some(std::env::var(env_name).with_context(|| {
+                format!(
+                    "env var '{env_name}' for AI provider '{}' api_key_env is not set",
+                    p.name
+                )
+            })?),
+            (None, None) => None,
+        };
+        let body = serde_json::json!({
+            "name": p.name,
+            "base_url": p.base_url,
+            "api_key": resolved_key,
+            "default_model": p.default_model,
+            "fallback_provider": p.fallback_provider,
+            "rate_limit_rpm": p.rate_limit_rpm,
+            "cache_ttl_secs": p.cache_ttl_secs,
+            "monthly_token_budget": p.monthly_token_budget,
+            "timeout_secs": p.timeout_secs,
+            "enabled": p.enabled,
+        });
+        let create_resp = client
+            .post(format!("{server}/_api/v1/ai/providers"))
+            .header("Authorization", &auth_header)
+            .json(&body)
+            .send()
+            .await?;
+        if create_resp.status() == StatusCode::CONFLICT {
+            let patch_resp = client
+                .patch(format!("{server}/_api/v1/ai/providers/{}", p.name))
+                .header("Authorization", &auth_header)
+                .json(&body)
+                .send()
+                .await?;
+            check_status(patch_resp, &format!("update ai provider '{}'", p.name)).await?;
+        } else {
+            check_status(create_resp, &format!("create ai provider '{}'", p.name)).await?;
+        }
+        summary.ai_providers_synced += 1;
     }
 
     Ok(summary)
