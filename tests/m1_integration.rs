@@ -1551,14 +1551,23 @@ async fn admin_ui_assets_and_enriched_status() {
         assert!(body.contains("/_panel/assets/styles.css"));
         assert!(body.contains("/_panel/assets/i18n.js"));
         assert!(body.contains("/_panel/assets/app.js"));
+        assert!(body.contains("#/ai"));
+        assert!(body.contains("select-lang"));
         assert!(body.contains("user-scalable=no"));
         assert!(body.contains("maximum-scale=1.0"));
+        assert!(!body.contains("data-nav=\"routes\""));
+        assert!(!body.contains("href=\"#/routes\""));
     }
 
     for (asset, expected_ct) in [
         ("/_panel/assets/styles.css", "text/css"),
         ("/_panel/assets/i18n.js", "application/javascript"),
+        ("/_panel/assets/i18n_zh_tw.json", "application/json"),
+        ("/_panel/assets/i18n_ja.json", "application/json"),
+        ("/_panel/assets/i18n_ko.json", "application/json"),
+        ("/_panel/assets/i18n_es.json", "application/json"),
         ("/_panel/assets/app.js", "application/javascript"),
+        ("/_panel/assets/ai_component.js", "application/javascript"),
         (
             "/_panel/assets/runtime_component.js",
             "application/javascript",
@@ -1586,7 +1595,17 @@ async fn admin_ui_assets_and_enriched_status() {
                 .unwrap(),
             "no-cache"
         );
-        if asset == "/_panel/assets/styles.css" {
+        if expected_ct == "application/json" {
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&bytes)
+                .unwrap_or_else(|e| panic!("invalid JSON in {asset}: {e}"));
+            assert!(
+                json.get("app.pageTitle")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| !s.is_empty()),
+                "missing app.pageTitle in {asset}"
+            );
+        } else if asset == "/_panel/assets/styles.css" {
             let css = String::from_utf8(
                 resp.into_body()
                     .collect()
@@ -1599,9 +1618,24 @@ async fn admin_ui_assets_and_enriched_status() {
             assert!(css.contains("repeat(4, minmax(0, 1fr))"));
             assert!(css.contains("touch-action: manipulation"));
             assert!(css.contains("overflow-wrap: anywhere"));
+        } else if asset == "/_panel/assets/app.js" {
+            let js = String::from_utf8(
+                resp.into_body()
+                    .collect()
+                    .await
+                    .unwrap()
+                    .to_bytes()
+                    .to_vec(),
+            )
+            .unwrap();
+            assert!(!js.contains("function renderRoutes"));
+            assert!(js.contains("openAppRouteModal"));
+            assert!(js.contains("PATCH"));
         } else if matches!(
             asset,
-            "/_panel/assets/runtime_component.js" | "/_panel/assets/ops_component.js"
+            "/_panel/assets/runtime_component.js"
+                | "/_panel/assets/ops_component.js"
+                | "/_panel/assets/ai_component.js"
         ) {
             let js = String::from_utf8(
                 resp.into_body()
@@ -1614,6 +1648,9 @@ async fn admin_ui_assets_and_enriched_status() {
             .unwrap();
             assert!(js.contains("stack-mobile"));
             assert!(js.contains("data-label"));
+            if asset == "/_panel/assets/runtime_component.js" {
+                assert!(js.contains("runtime-search-input"));
+            }
         }
     }
 
@@ -3809,7 +3846,7 @@ async fn openapi_llms_txt_and_lean_mcp_server_end_to_end() {
     .await;
     assert_eq!(st_list, StatusCode::OK);
     let tools = pj(list_b)["result"]["tools"].as_array().unwrap().clone();
-    assert_eq!(tools.len(), 10);
+    assert_eq!(tools.len(), 11);
 
     // 4. deploy_stack inline static site + KV + route via MCP
     let (st_dep, dep_b) = json_req(
@@ -4457,8 +4494,8 @@ async fn dynamic_route_proxy_basic_auth_rate_limit_canary_health_and_rollback() 
         .unwrap();
     assert_eq!(rolled.id, dep1.id);
 
-    // Also test Wasm Worker health check gate rejecting unhealthy WAT worker (if it traps)
-    let broken_wat = r#"(module (memory (export "memory") 1))"#;
+    // Also test Wasm Worker health check gate rejecting unhealthy WAT component (lacks incoming-handler)
+    let broken_wat = r#"(component)"#;
     let wp = h
         .svc
         .create_project(&h.admin, "hc-worker", None)
