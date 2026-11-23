@@ -7,6 +7,7 @@
     'zh-CN': {
       'app.brand': 'ferropod',
       'app.subtitle': '轻量级自托管 PaaS',
+      'app.pageTitle': 'ferropod 面板',
 
       'auth.title': '连接面板',
       'auth.subtitle': '输入 Bearer 访问令牌以管理应用、路由、存储、数据库与实时日志。',
@@ -25,6 +26,7 @@
       'theme.dark': '深色',
       'theme.toggle': '切换主题',
       'lang.switch': 'EN',
+      'lang.label': '语言',
 
       'nav.overview': '概览',
       'nav.projects': '应用',
@@ -42,6 +44,7 @@
       'nav.logs': '日志中心',
       'nav.ops': '备份与定时',
       'nav.updates': '系统更新',
+      'nav.settings': '平台设置',
       'nav.more': '更多',
       'nav.groupPlatform': '平台',
       'nav.groupData': '数据与应用',
@@ -200,15 +203,40 @@
       'routes.title': '域名路由',
       'routes.subtitle': '将域名映射到应用的生产或预览环境。',
       'routes.new': '添加路由',
+      'routes.edit': '编辑域名路由',
       'routes.empty': '暂无路由规则。',
       'routes.host': '域名 (Host)',
       'routes.hostPlaceholder': '例如：app.example.com',
       'routes.project': '目标应用',
       'routes.targetEnv': '目标环境',
+      'routes.policies': '流量与访问策略',
+      'routes.proxyPrefix': '反向代理路径前缀',
+      'routes.proxyUpstream': '反向代理上游地址',
+      'routes.proxyUpstreamRequired': '配置代理前缀时必须填写上游地址（http:// 或 https://）。',
+      'routes.rateLimitRpm': '限流上限（次/分钟）',
+      'routes.rateLimitPlaceholder': '0 或留空表示不限流',
+      'routes.invalidRateLimit': '限流上限必须为非负整数。',
+      'routes.basicAuthUser': 'Basic Auth 用户名',
+      'routes.basicAuthPassword': 'Basic Auth 密码',
+      'routes.basicAuthKeepHint': '留空保持当前密码不变',
+      'routes.basicAuthEnabledHint': '当前已启用 Basic Auth（用户：{user}）',
+      'routes.clearBasicAuth': '清除 Basic Auth 认证保护',
+      'routes.basicAuthPairRequired': '启用或修改 Basic Auth 时需同时填写用户名和密码。',
+      'routes.canaryDeployment': '灰度部署版本 (Canary)',
+      'routes.canaryNone': '不启用灰度分流',
+      'routes.canaryWeight': '灰度流量比例 (%)',
+      'routes.canaryDepRequired': '设置灰度比例前请先选择目标部署版本。',
+      'routes.canaryWeightInvalid': '灰度比例必须为 0 到 100 之间的整数。',
+      'routes.conflictOtherApp': '域名 "{host}" 当前已绑定到应用 {app}，继续保存会将其改绑至当前应用。',
+      'routes.conflictSameApp': '域名 "{host}" 已绑定到当前应用，继续保存将覆盖原有配置（建议直接点击列表中的编辑）。',
+      'routes.conflictConfirm': '我确认覆盖 / 改绑该域名',
+      'routes.conflictConfirmRequired': '请先勾选确认覆盖或改绑该域名。',
       'routes.saved': '路由已保存',
       'routes.deleted': '路由已删除',
       'routes.deleteConfirm': '确定删除域名路由 "{host}" 吗？',
       'routes.searchPlaceholder': '按域名或应用过滤...',
+      'routes.suggestedHost': '推荐子域名',
+      'routes.useSuggested': '填入',
 
       'kv.title': 'KV 键值存储',
       'kv.subtitle': '浏览命名空间、管理持久化/内存临时键值对及原子计数器。',
@@ -544,6 +572,8 @@
       'runtime.witInterfaces': 'WIT 宿主绑定接口',
       'runtime.workloads': '应用列表',
       'runtime.workloadsHint': '点击「管理绑定」可视化绑定数据库、KV、队列与存储桶',
+      'runtime.searchPlaceholder': '按应用名称、ID、分组或绑定域名搜索...',
+      'runtime.noMatch': '没有匹配的应用或域名。',
       'runtime.noWorkloads': '暂无应用。',
       'runtime.active': '运行中',
       'runtime.idle': '未部署',
@@ -617,12 +647,213 @@
       'updates.showNotes': '展开说明',
       'updates.hideNotes': '收起说明',
       'updates.installVersion': '安装此版本',
-      'updates.reinstall': '重新安装'
+      'updates.reinstall': '重新安装',
+
+      'settings.title': '平台设置',
+      'settings.subtitle': '集中管理实例域名与 HTTPS/ACME、数据保留、默认运行护栏、告警通知与 AI 网关。',
+      'settings.tabDomains': '域名与网络',
+      'settings.tabRuntime': '运行与清理',
+      'settings.tabIntegrations': '集成与告警',
+      'settings.tabSystem': '系统环境',
+      'settings.resetAll': '全部恢复默认',
+      'settings.resetSection': '恢复本区默认',
+      'settings.confirmResetAll': '确定要重置所有平台设置并清除已保存的告警密钥吗？',
+      'settings.resetDone': '已恢复为默认设置',
+      'settings.saved': '平台设置已保存',
+      'settings.saving': '保存中...',
+      'settings.checking': '检测中...',
+      'settings.checkDns': '检测 DNS',
+      'settings.checkWildcardDns': '检测泛解析 DNS',
+      'settings.dnsDomainRequired': '请先输入要检测的域名',
+      'settings.dnsReachable': 'DNS 可解析',
+      'settings.dnsUnreachable': '未解析到记录',
+      'settings.domainsIdentityTitle': '实例标识与域名路由',
+      'settings.instanceName': '实例名称',
+      'settings.instanceNameHint': '可选标识，将显示在面板标签页标题与告警负载中。',
+      'settings.publicScheme': '对外访问协议',
+      'settings.publicSchemeHint': '用于生成展示链接与 MCP 配置片段。',
+      'settings.schemeAuto': '自动（跟随当前浏览器协议）',
+      'settings.panelDomain': '管理面板域名',
+      'settings.panelDomainHint': '为 /_panel 与 /_api/v1 指定专属域名，同时自动加入 ACME 证书托管列表。',
+      'settings.restrictPanel': '仅允许通过面板域名访问管理后台',
+      'settings.restrictPanelHint': '开启后，通过其他应用域名访问 /_panel、/_api/v1 或 /_mcp 将返回 404（本地回环仍可访问）。',
+      'settings.lockoutWarningTitle': '防锁死提醒',
+      'settings.lockoutWarningBody': '您当前正通过 "{current}" 访问，保存后仅允许 "{target}" 与回环地址访问面板。',
+      'settings.confirmLockoutRisk': '我已确认域名解析正常，仍要保存该限制',
+      'settings.baseDomain': '默认应用根域名',
+      'settings.baseDomainHint': '配好 *.根域名 的泛解析后，添加应用路由时可一键填入推荐子域名。',
+      'settings.trustProxyHeaders': '信任前置代理转发头 (X-Forwarded-For / X-Real-IP)',
+      'settings.trustProxyHeadersHint': '运行在 Cloudflare / Nginx / Caddy 之后请保持开启；若直接暴露在公网且无反代，请关闭以防止伪造限流 IP。',
+      'settings.tlsTitle': 'HTTPS 与 Let\'s Encrypt (ACME)',
+      'settings.tlsRestartNotice': '当前进程启动时未监听 HTTPS 端口，已保存 ACME 配置；请以支持 443 端口的启动参数重启实例以启用内置 HTTPS。',
+      'settings.tlsMode': 'TLS 模式',
+      'settings.httpsBind': 'HTTPS 监听地址',
+      'settings.tlsGeneration': '热重载代数',
+      'settings.acmeLastEvent': '最近 ACME 事件',
+      'settings.managedTlsDomains': '已托管证书域名',
+      'settings.acmeEmail': 'ACME 联系邮箱',
+      'settings.extraTlsDomains': '附加 TLS 域名（逗号或换行分隔）',
+      'settings.acmeEnabled': '启用自动 Let\'s Encrypt HTTPS (TLS-ALPN-01)',
+      'settings.acmeStaging': '使用 Let\'s Encrypt Staging 测试环境（避免触发签发频控）',
+      'settings.httpRedirectHttps': '强制将 HTTP 请求永久重定向至 HTTPS (308，保留 /_healthz)',
+      'settings.hotReloadHint': 'HTTPS 已运行状态下，域名、邮箱与 HTTP 跳转开关支持零停机热更新。',
+      'settings.retentionTitle': '数据保留与垃圾回收策略',
+      'settings.logRetentionDays': '日志保留天数',
+      'settings.queuePendingRetention': '队列 Pending 保留秒数',
+      'settings.queueDlqRetention': '死信队列 (DLQ) 保留秒数',
+      'settings.blobGcGrace': 'Blob / 产物 GC 宽限秒数',
+      'settings.defaultLabel': 'Profile 默认：{value}',
+      'settings.wasmDefaultsTitle': 'Wasm Worker 默认护栏',
+      'settings.wasmMaxMemoryMb': '默认最大内存 (MiB)',
+      'settings.wasmEpochTimeoutMs': '默认执行超时 (ms)',
+      'settings.wasmAllowPrivateOutbound': '默认允许 Worker 出站访问内网/私网地址',
+      'settings.autoRollbackTitle': '生产部署自动健康回滚',
+      'settings.autoRollbackEnabled': '启用 5xx 错误率飙升自动回滚',
+      'settings.autoRollbackWindow': '发布后观察窗口 (秒)',
+      'settings.autoRollbackMinRequests': '触发评估最小请求数',
+      'settings.autoRollbackErrorRate': '5xx 错误率阈值 (%)',
+      'settings.runtimeApplyHint': '维护周期、Worker 默认限制与自动回滚策略保存后立即生效。',
+      'settings.invalidInteger': '无效整数：{value}',
+      'settings.alertsTitle': 'Webhook 告警通知',
+      'settings.secretConfigured': '已配置签名密钥',
+      'settings.alertWebhookUrl': 'Webhook 接收地址',
+      'settings.alertWebhookSecret': 'HMAC-SHA256 签名密钥',
+      'settings.secretKeepHint': '留空保持当前密钥不变',
+      'settings.clearSecret': '清除现有签名密钥',
+      'settings.alertOnRollback': '触发自动回滚时告警',
+      'settings.alertOnCronFailure': '定时任务失败时告警',
+      'settings.alertOnWorkerOom': 'Worker 发生 OOM 时告警',
+      'settings.alertTestOk': '测试告警发送成功',
+      'settings.alertTestFail': '测试告警发送失败',
+      'settings.testingAlert': '发送中...',
+      'settings.sendTestAlert': '发送测试告警',
+      'settings.aiGatewayTitle': 'AI 网关提供商 (AI Gateway)',
+      'settings.aiAddProvider': '添加提供商',
+      'settings.aiEditProvider': '编辑提供商',
+      'settings.aiRequests': '累计请求（含缓存命中）',
+      'settings.aiTotalTokens': '累计消耗 Tokens',
+      'settings.aiProxyEndpoint': 'OpenAI 兼容代理端点',
+      'settings.aiDefaultModel': '默认模型',
+      'settings.aiFallback': '故障转移提供商',
+      'settings.aiQuotas': '限流 / 月配额',
+      'settings.aiNoProviders': '尚未配置 AI 网关上游提供商，点击右上角「添加提供商」接入 OpenAI 兼容服务。',
+      'settings.aiDeleteConfirm': '确定删除 AI 提供商 "{name}" 吗？',
+      'settings.aiMonthlyBudget': '月 Token 上限',
+      'settings.enabled': '已启用',
+      'settings.disabled': '已停用',
+      'settings.mcpTitle': 'MCP 与 AI Agent 接入端点',
+      'settings.mcpSnippetLabel': 'MCP 客户端配置示例 (Streamable HTTP)',
+      'settings.masterKeyWarnTitle': '安全提醒：正在使用默认 Master Key',
+      'settings.masterKeyWarnBody': '检测到 FERROPOD_MASTER_KEY 仍为默认或过短密钥，建议立即通过环境变量替换为强随机密钥。',
+      'settings.systemEnvTitle': '启动配置与宿主资源预算（只读）',
+      'settings.httpBind': 'HTTP 监听地址',
+      'settings.dataDir': '数据目录',
+      'settings.certCacheDir': '证书缓存目录',
+      'settings.memoryBudget': '有效内存预算',
+      'settings.cpuCores': 'CPU 逻辑核心',
+      'settings.tokioThreads': 'Tokio 工作线程',
+      'settings.maxConcurrency': '全局并发上限',
+      'settings.queueConcurrency': '队列并发上限',
+      'settings.maxOpenDbs': '最大打开用户库句柄',
+      'settings.maxBlobUpload': '单文件上传上限',
+      'settings.wasmCacheCap': 'AOT 模块缓存上限',
+
+      'nav.ai': 'AI 网关',
+      'overview.aiProviders': 'AI 提供商',
+      'overview.endpointsTitle': 'AI 与开发者接入端点',
+      'projectDetail.verifyHealth': '发布前健康探测',
+      'search.fuzzy': '模糊匹配',
+      'search.sortRelevance': '按相关性排序',
+      'search.sortUpdated': '按更新时间倒序',
+      'search.hybridVector': '混合向量检索 (Vector + BM25)',
+      'search.vectorArray': '查询向量 (JSON 浮点数组)',
+      'search.vectorAlpha': '向量权重 Alpha (0.0–1.0)',
+      'search.commitIndex': '提交索引',
+      'search.committed': '索引已提交',
+      'perf.httpTelemetry': 'HTTP 与 Worker 遥测',
+      'perf.rateLimited': '限流',
+      'perf.workerErrors': 'Worker 异常',
+
+      'ai.title': 'AI 网关 (AI Gateway)',
+      'ai.subtitle': '统一管理 OpenAI 兼容上游提供商、主备故障转移、RPM 限流、内存缓存与月度 Token 预算。',
+      'ai.tabProviders': '提供商配置',
+      'ai.tabUsage': '用量与预算',
+      'ai.tabPlayground': '在线调试台',
+      'ai.newProvider': '添加提供商',
+      'ai.providersList': '已配置提供商',
+      'ai.clearCache': '清空缓存',
+      'ai.cacheCleared': '已清理 {count} 条响应缓存',
+      'ai.providerSaved': 'AI 提供商已保存',
+      'ai.providerDeleted': 'AI 提供商已删除',
+      'ai.deleteProviderConfirm': '确定删除 AI 提供商 "{name}" 吗？',
+      'ai.noProviders': '暂未配置 AI 提供商。点击右上角「添加提供商」接入。',
+      'ai.defaultModel': '默认模型',
+      'ai.fallback': '故障转移备用',
+      'ai.limits': '限流 / 缓存 / 超时',
+      'ai.monthlyBudget': '月 Token 预算',
+      'ai.apiKey': 'API 密钥',
+      'ai.configured': '已加密保存',
+      'ai.keepKeyHint': '留空保持当前密钥不变',
+      'ai.rpmLimit': '每分钟请求限制 (RPM)',
+      'ai.cacheTtl': '缓存 TTL (秒，0 关闭)',
+      'ai.timeoutSecs': '上游超时 (秒)',
+      'ai.totalRequests': '累计请求',
+      'ai.cacheHits': '缓存命中',
+      'ai.totalTokens': '累计 Tokens',
+      'ai.monthTokens': '本月 Tokens',
+      'ai.recentUsage': '最近调用明细',
+      'ai.provider': '提供商',
+      'ai.noUsage': '暂无 AI 网关调用记录。',
+      'ai.playgroundTitle': 'AI 网关调试台',
+      'ai.readonlyDisabled': '只读令牌禁止调用 AI 网关。',
+      'ai.autoProvider': '自动选择首可用提供商',
+      'ai.mode': '调用模式',
+      'ai.modelOverride': '模型覆盖（可选）',
+      'ai.streamSse': '启用 SSE 流式输出 (stream: true)',
+      'ai.prompt': '输入提示词 / 文本',
+      'ai.sendRequest': '发送请求',
+
+      'ops.download': '下载 (.tar.gz)',
+      'ops.restore': '恢复快照',
+      'ops.restoreConfirm': '确定从快照 "{name}" 恢复所有数据库吗？系统将先创建一份恢复前安全快照。',
+      'ops.restoreDone': '已恢复 {count} 个数据库文件',
+      'ops.restoreRestart': '恢复后自动优雅重启实例以重新加载所有连接（推荐）',
+      'ops.autoBackupTitle': '定时自动快照',
+      'ops.autoBackupInterval': '间隔 (小时)',
+      'ops.autoBackupKeep': '保留份数',
+      'ops.autoBackupSaved': '自动快照策略已保存',
+      'ops.tabAlerts': '告警 Webhooks',
+      'ops.tabRealtime': '实时 Pub-Sub',
+
+      'alerts.title': '多目标告警 Webhooks',
+      'alerts.newWebhook': '新增 Webhook',
+      'alerts.saved': '告警 Webhook 已保存',
+      'alerts.deleted': '告警 Webhook 已删除',
+      'alerts.testBtn': '发送测试',
+      'alerts.testOk': '测试推送成功 (HTTP {status})',
+      'alerts.testFailed': '测试推送失败',
+      'alerts.events': '订阅事件',
+      'alerts.secret': 'HMAC 签名密钥',
+      'alerts.empty': '尚未配置多目标告警 Webhook。',
+
+      'realtime.channelsTitle': '活跃频道列表',
+      'realtime.channel': '频道名称',
+      'realtime.subscribers': '订阅数',
+      'realtime.publishedCount': '累计推送',
+      'realtime.inspectBtn': '监听此频道',
+      'realtime.noChannels': '当前无活跃频道。',
+      'realtime.streamTitle': '实时 SSE 监听',
+      'realtime.noEvents': '连接频道后将在此实时显示收到的事件...',
+      'realtime.publishTitle': '发布实时消息',
+      'realtime.eventName': '事件名称',
+      'realtime.publishBtn': '发送消息',
+      'realtime.published': '实时消息已广播'
     },
 
     en: {
       'app.brand': 'ferropod',
       'app.subtitle': 'Lightweight Self-Hosted PaaS',
+      'app.pageTitle': 'ferropod Panel',
 
       'auth.title': 'Connect to Panel',
       'auth.subtitle': 'Enter a Bearer API token to manage apps, routes, storage, databases, and logs.',
@@ -641,6 +872,7 @@
       'theme.dark': 'Dark',
       'theme.toggle': 'Toggle theme',
       'lang.switch': '中文',
+      'lang.label': 'Language',
 
       'nav.overview': 'Overview',
       'nav.projects': 'Apps',
@@ -658,6 +890,7 @@
       'nav.logs': 'Logs',
       'nav.ops': 'Backups & Cron',
       'nav.updates': 'Updates',
+      'nav.settings': 'Settings',
       'nav.more': 'More',
       'nav.groupPlatform': 'Platform',
       'nav.groupData': 'Data & Apps',
@@ -816,15 +1049,40 @@
       'routes.title': 'Routes',
       'routes.subtitle': 'Map hostnames to production or preview deployments of an app.',
       'routes.new': 'Add Route',
+      'routes.edit': 'Edit Route',
       'routes.empty': 'No routes configured.',
       'routes.host': 'Hostname',
       'routes.hostPlaceholder': 'e.g. app.example.com',
       'routes.project': 'Target app',
       'routes.targetEnv': 'Target Environment',
+      'routes.policies': 'Policies',
+      'routes.proxyPrefix': 'Reverse Proxy Prefix',
+      'routes.proxyUpstream': 'Reverse Proxy Upstream',
+      'routes.proxyUpstreamRequired': 'Proxy upstream URL is required when a proxy prefix is set.',
+      'routes.rateLimitRpm': 'Rate Limit (req/min)',
+      'routes.rateLimitPlaceholder': '0 or blank for unlimited',
+      'routes.invalidRateLimit': 'Rate limit must be a non-negative integer.',
+      'routes.basicAuthUser': 'Basic Auth Username',
+      'routes.basicAuthPassword': 'Basic Auth Password',
+      'routes.basicAuthKeepHint': 'Leave blank to keep existing password',
+      'routes.basicAuthEnabledHint': 'Basic Auth currently enabled (user: {user})',
+      'routes.clearBasicAuth': 'Remove Basic Auth protection',
+      'routes.basicAuthPairRequired': 'Both username and password are required to set or update Basic Auth.',
+      'routes.canaryDeployment': 'Canary Deployment',
+      'routes.canaryNone': 'Disabled',
+      'routes.canaryWeight': 'Canary Weight (%)',
+      'routes.canaryDepRequired': 'Select a canary deployment before setting a non-zero weight.',
+      'routes.canaryWeightInvalid': 'Canary weight must be an integer between 0 and 100.',
+      'routes.conflictOtherApp': 'Hostname "{host}" is currently bound to app {app}. Saving will reassign it to this app.',
+      'routes.conflictSameApp': 'Hostname "{host}" is already bound to this app. Saving will overwrite its settings (consider editing it in the list instead).',
+      'routes.conflictConfirm': 'I confirm overwriting / reassigning this hostname',
+      'routes.conflictConfirmRequired': 'Please confirm overwriting or reassigning the existing hostname.',
       'routes.saved': 'Route saved',
       'routes.deleted': 'Route deleted',
       'routes.deleteConfirm': 'Delete route "{host}"?',
       'routes.searchPlaceholder': 'Filter by host or app...',
+      'routes.suggestedHost': 'Suggested subdomain',
+      'routes.useSuggested': 'Use',
 
       'kv.title': 'KV Store',
       'kv.subtitle': 'Browse namespaces, manage persistent or ephemeral keys, and run atomic counters.',
@@ -1160,6 +1418,8 @@
       'runtime.witInterfaces': 'WIT Host Interfaces',
       'runtime.workloads': 'Apps',
       'runtime.workloadsHint': 'Click "Bindings" to visually bind DB, KV, Queue, and Bucket resources',
+      'runtime.searchPlaceholder': 'Filter by app name, ID, group, or domain...',
+      'runtime.noMatch': 'No matching apps or domains.',
       'runtime.noWorkloads': 'No apps yet.',
       'runtime.active': 'Active',
       'runtime.idle': 'Not Deployed',
@@ -1233,18 +1493,273 @@
       'updates.showNotes': 'Show Notes',
       'updates.hideNotes': 'Hide Notes',
       'updates.installVersion': 'Install',
-      'updates.reinstall': 'Reinstall'
+      'updates.reinstall': 'Reinstall',
+
+      'settings.title': 'Platform Settings',
+      'settings.subtitle': 'Manage instance domains & HTTPS/ACME, retention policies, default worker guardrails, alerts, and AI Gateway.',
+      'settings.tabDomains': 'Domains & Network',
+      'settings.tabRuntime': 'Runtime & Retention',
+      'settings.tabIntegrations': 'Integrations & Alerts',
+      'settings.tabSystem': 'System Environment',
+      'settings.resetAll': 'Reset All',
+      'settings.resetSection': 'Reset Section',
+      'settings.confirmResetAll': 'Reset all platform settings to Profile defaults and clear the stored webhook signing secret?',
+      'settings.resetDone': 'Settings reset to defaults',
+      'settings.saved': 'Platform settings saved',
+      'settings.saving': 'Saving...',
+      'settings.checking': 'Checking...',
+      'settings.checkDns': 'Check DNS',
+      'settings.checkWildcardDns': 'Check Wildcard DNS',
+      'settings.dnsDomainRequired': 'Enter a domain name first',
+      'settings.dnsReachable': 'DNS Reachable',
+      'settings.dnsUnreachable': 'No DNS Records',
+      'settings.domainsIdentityTitle': 'Instance Identity & Routing Domains',
+      'settings.instanceName': 'Instance Name',
+      'settings.instanceNameHint': 'Optional label shown in the panel title and webhook alert payloads.',
+      'settings.publicScheme': 'Public Scheme',
+      'settings.publicSchemeHint': 'Used when generating display URLs and MCP client snippets.',
+      'settings.schemeAuto': 'Auto (match current browser scheme)',
+      'settings.panelDomain': 'Panel Domain',
+      'settings.panelDomainHint': 'Dedicated hostname for /_panel and /_api/v1; automatically included in ACME certificate management.',
+      'settings.restrictPanel': 'Restrict panel access to Panel Domain only',
+      'settings.restrictPanelHint': 'When enabled, requests to /_panel, /_api/v1, or /_mcp on other app domains return 404 (loopback remains allowed).',
+      'settings.lockoutWarningTitle': 'Anti-Lockout Warning',
+      'settings.lockoutWarningBody': 'You are connected via "{current}". Enabling restriction limits panel access to "{target}" and loopback hosts.',
+      'settings.confirmLockoutRisk': 'I verified DNS works and want to enable this restriction anyway',
+      'settings.baseDomain': 'Default App Base Domain',
+      'settings.baseDomainHint': 'With a wildcard *.base-domain DNS record, adding app routes offers a one-click suggested subdomain.',
+      'settings.trustProxyHeaders': 'Trust Reverse Proxy Headers (X-Forwarded-For / X-Real-IP)',
+      'settings.trustProxyHeadersHint': 'Keep enabled behind Cloudflare/Nginx/Caddy; disable when exposed directly to the public internet to prevent rate-limit spoofing.',
+      'settings.tlsTitle': 'HTTPS & Let\'s Encrypt (ACME)',
+      'settings.tlsRestartNotice': 'This process started without an HTTPS listener. ACME preferences are saved; restart with HTTPS/443 enabled to start serving TLS.',
+      'settings.tlsMode': 'TLS Mode',
+      'settings.httpsBind': 'HTTPS Bind',
+      'settings.tlsGeneration': 'Hot-Reload Gen',
+      'settings.acmeLastEvent': 'Last ACME Event',
+      'settings.managedTlsDomains': 'Managed TLS Domains',
+      'settings.acmeEmail': 'ACME Contact Email',
+      'settings.extraTlsDomains': 'Extra TLS Domains (comma or newline separated)',
+      'settings.acmeEnabled': 'Enable automatic Let\'s Encrypt HTTPS (TLS-ALPN-01)',
+      'settings.acmeStaging': 'Use Let\'s Encrypt Staging directory (for testing without rate limits)',
+      'settings.httpRedirectHttps': 'Redirect HTTP traffic to HTTPS (308 Permanent Redirect, keeping /_healthz)',
+      'settings.hotReloadHint': 'When HTTPS is active, domain list changes, ACME email/staging, and HTTP->HTTPS redirect hot-reload without restarting.',
+      'settings.retentionTitle': 'Data Retention & Garbage Collection',
+      'settings.logRetentionDays': 'Log Retention (days)',
+      'settings.queuePendingRetention': 'Queue Pending Retention (secs)',
+      'settings.queueDlqRetention': 'Queue DLQ Retention (secs)',
+      'settings.blobGcGrace': 'Blob / Artifact GC Grace (secs)',
+      'settings.defaultLabel': 'Profile default: {value}',
+      'settings.wasmDefaultsTitle': 'Wasm Worker Default Guardrails',
+      'settings.wasmMaxMemoryMb': 'Default Max Memory (MiB)',
+      'settings.wasmEpochTimeoutMs': 'Default Epoch Timeout (ms)',
+      'settings.wasmAllowPrivateOutbound': 'Allow Workers to reach private/loopback networks by default',
+      'settings.autoRollbackTitle': 'Automatic Production Health Rollback',
+      'settings.autoRollbackEnabled': 'Enable automatic rollback on 5xx error spike',
+      'settings.autoRollbackWindow': 'Observation Window (secs)',
+      'settings.autoRollbackMinRequests': 'Minimum Requests Before Evaluation',
+      'settings.autoRollbackErrorRate': '5xx Error Rate Threshold (%)',
+      'settings.runtimeApplyHint': 'Retention, worker defaults, and auto-rollback settings apply immediately on save.',
+      'settings.invalidInteger': 'Invalid integer: {value}',
+      'settings.alertsTitle': 'Webhook Alerting',
+      'settings.secretConfigured': 'Signing Secret Configured',
+      'settings.alertWebhookUrl': 'Webhook URL',
+      'settings.alertWebhookSecret': 'HMAC-SHA256 Signing Secret',
+      'settings.secretKeepHint': 'Leave blank to keep existing secret',
+      'settings.clearSecret': 'Clear stored signing secret',
+      'settings.alertOnRollback': 'Alert on Auto-Rollback',
+      'settings.alertOnCronFailure': 'Alert on Cron Failure',
+      'settings.alertOnWorkerOom': 'Alert on Worker OOM',
+      'settings.alertTestOk': 'Test alert delivered successfully',
+      'settings.alertTestFail': 'Test alert delivery failed',
+      'settings.testingAlert': 'Sending...',
+      'settings.sendTestAlert': 'Send Test Alert',
+      'settings.aiGatewayTitle': 'AI Gateway Providers',
+      'settings.aiAddProvider': 'Add Provider',
+      'settings.aiEditProvider': 'Edit Provider',
+      'settings.aiRequests': 'Total Requests (Cached)',
+      'settings.aiTotalTokens': 'Total Tokens',
+      'settings.aiProxyEndpoint': 'OpenAI-Compatible Endpoint',
+      'settings.aiDefaultModel': 'Default Model',
+      'settings.aiFallback': 'Fallback',
+      'settings.aiQuotas': 'Rate / Monthly Budget',
+      'settings.aiNoProviders': 'No AI Gateway providers configured yet. Click "Add Provider" to connect an OpenAI-compatible upstream.',
+      'settings.aiDeleteConfirm': 'Delete AI provider "{name}"?',
+      'settings.aiMonthlyBudget': 'Monthly Token Budget',
+      'settings.enabled': 'Enabled',
+      'settings.disabled': 'Disabled',
+      'settings.mcpTitle': 'MCP & AI Agent Endpoints',
+      'settings.mcpSnippetLabel': 'MCP Client Configuration (Streamable HTTP)',
+      'settings.masterKeyWarnTitle': 'Security Warning: Default Master Key in Use',
+      'settings.masterKeyWarnBody': 'FERROPOD_MASTER_KEY is still set to a default or short secret. Replace it with a strong random value via environment configuration.',
+      'settings.systemEnvTitle': 'Bootstrap Configuration & Host Resources (Read-Only)',
+      'settings.httpBind': 'HTTP Bind',
+      'settings.dataDir': 'Data Directory',
+      'settings.certCacheDir': 'TLS Cert Cache',
+      'settings.memoryBudget': 'Memory Budget',
+      'settings.cpuCores': 'CPU Cores',
+      'settings.tokioThreads': 'Tokio Worker Threads',
+      'settings.maxConcurrency': 'Max HTTP Concurrency',
+      'settings.queueConcurrency': 'Queue Concurrency',
+      'settings.maxOpenDbs': 'Max Open User DBs',
+      'settings.maxBlobUpload': 'Max Blob Upload',
+      'settings.wasmCacheCap': 'Wasm Compiled Cache Cap',
+
+      'nav.ai': 'AI Gateway',
+      'overview.aiProviders': 'AI Providers',
+      'overview.endpointsTitle': 'AI & Developer Endpoints',
+      'projectDetail.verifyHealth': 'Verify health before promote',
+      'search.fuzzy': 'Fuzzy',
+      'search.sortRelevance': 'Sort: Relevance',
+      'search.sortUpdated': 'Sort: Recently Updated',
+      'search.hybridVector': 'Hybrid Vector Search (Vector + BM25)',
+      'search.vectorArray': 'Query Vector (JSON float array)',
+      'search.vectorAlpha': 'Vector Weight Alpha (0.0–1.0)',
+      'search.commitIndex': 'Commit Index',
+      'search.committed': 'Search index committed',
+      'perf.httpTelemetry': 'HTTP & Worker Telemetry',
+      'perf.rateLimited': 'Rate Limited',
+      'perf.workerErrors': 'Worker Err',
+
+      'ai.title': 'AI Gateway',
+      'ai.subtitle': 'Manage OpenAI-compatible upstream providers, failover chains, RPM limits, response cache, and monthly token budgets.',
+      'ai.tabProviders': 'Providers',
+      'ai.tabUsage': 'Usage & Budget',
+      'ai.tabPlayground': 'Playground',
+      'ai.newProvider': 'Add Provider',
+      'ai.providersList': 'Configured Providers',
+      'ai.clearCache': 'Clear Cache',
+      'ai.cacheCleared': 'Cleared {count} cached AI responses',
+      'ai.providerSaved': 'AI provider saved',
+      'ai.providerDeleted': 'AI provider deleted',
+      'ai.deleteProviderConfirm': 'Delete AI provider "{name}"?',
+      'ai.noProviders': 'No AI Gateway providers configured yet.',
+      'ai.defaultModel': 'Default Model',
+      'ai.fallback': 'Fallback Provider',
+      'ai.limits': 'RPM / Cache / Timeout',
+      'ai.monthlyBudget': 'Monthly Token Budget',
+      'ai.apiKey': 'API Key',
+      'ai.configured': 'Encrypted',
+      'ai.keepKeyHint': 'Leave blank to keep existing secret',
+      'ai.rpmLimit': 'Rate Limit (RPM)',
+      'ai.cacheTtl': 'Cache TTL (secs, 0 disables)',
+      'ai.timeoutSecs': 'Upstream Timeout (secs)',
+      'ai.totalRequests': 'Total Requests',
+      'ai.cacheHits': 'Cache Hits',
+      'ai.totalTokens': 'Total Tokens',
+      'ai.monthTokens': 'This Month Tokens',
+      'ai.recentUsage': 'Recent Usage Logs',
+      'ai.provider': 'Provider',
+      'ai.noUsage': 'No AI Gateway usage recorded yet.',
+      'ai.playgroundTitle': 'AI Gateway Playground',
+      'ai.readonlyDisabled': 'Read-only tokens cannot invoke the AI Gateway.',
+      'ai.autoProvider': 'Auto (first enabled provider)',
+      'ai.mode': 'Mode',
+      'ai.modelOverride': 'Model Override (optional)',
+      'ai.streamSse': 'Enable SSE Streaming (stream: true)',
+      'ai.prompt': 'Prompt / Input Text',
+      'ai.sendRequest': 'Send Request',
+
+      'ops.download': 'Download (.tar.gz)',
+      'ops.restore': 'Restore',
+      'ops.restoreConfirm': 'Restore all databases from snapshot "{name}"? A pre-restore safety snapshot will be created first.',
+      'ops.restoreDone': 'Restored {count} database file(s)',
+      'ops.restoreRestart': 'Gracefully restart instance after restore to reload all DB handles (recommended)',
+      'ops.autoBackupTitle': 'Scheduled Auto-Backup',
+      'ops.autoBackupInterval': 'Interval (hours)',
+      'ops.autoBackupKeep': 'Keep Last',
+      'ops.autoBackupSaved': 'Auto-backup schedule saved',
+      'ops.tabAlerts': 'Alert Webhooks',
+      'ops.tabRealtime': 'Realtime Pub-Sub',
+
+      'alerts.title': 'Alert Webhooks',
+      'alerts.newWebhook': 'Add Webhook',
+      'alerts.saved': 'Alert webhook saved',
+      'alerts.deleted': 'Alert webhook deleted',
+      'alerts.testBtn': 'Test',
+      'alerts.testOk': 'Test delivered (HTTP {status})',
+      'alerts.testFailed': 'Test delivery failed',
+      'alerts.events': 'Subscribed Events',
+      'alerts.secret': 'HMAC Secret',
+      'alerts.empty': 'No alert webhooks configured yet.',
+
+      'realtime.channelsTitle': 'Active Channels',
+      'realtime.channel': 'Channel',
+      'realtime.subscribers': 'Subscribers',
+      'realtime.publishedCount': 'Published',
+      'realtime.inspectBtn': 'Listen',
+      'realtime.noChannels': 'No active realtime channels.',
+      'realtime.streamTitle': 'Live SSE Subscriber',
+      'realtime.noEvents': 'Connect to a channel to watch live SSE events...',
+      'realtime.publishTitle': 'Publish Message',
+      'realtime.eventName': 'Event Name',
+      'realtime.publishBtn': 'Publish',
+      'realtime.published': 'Realtime message published'
     }
   };
 
+  var LOCALES = [
+    { code: 'en', label: 'English', short: 'EN', asset: null },
+    { code: 'zh-CN', label: '简体中文', short: '简中', asset: null },
+    { code: 'zh-TW', label: '繁體中文', short: '繁中', asset: '/_panel/assets/i18n_zh_tw.json' },
+    { code: 'ja', label: '日本語', short: '日本語', asset: '/_panel/assets/i18n_ja.json' },
+    { code: 'ko', label: '한국어', short: '한국어', asset: '/_panel/assets/i18n_ko.json' },
+    { code: 'es', label: 'Español', short: 'ES', asset: '/_panel/assets/i18n_es.json' }
+  ];
+
+  var pendingLoads = {};
+
+  function normalizeLocale(raw) {
+    if (!raw) return null;
+    var norm = String(raw).trim().toLowerCase().replace(/_/g, '-');
+    if (!norm) return null;
+    if (norm === 'zh-tw' || norm === 'zh-hk' || norm === 'zh-mo' || norm.indexOf('zh-hant') === 0) {
+      return 'zh-TW';
+    }
+    if (norm === 'zh' || norm === 'zh-cn' || norm === 'zh-sg' || norm.indexOf('zh-hans') === 0 || norm.indexOf('zh-') === 0) {
+      return 'zh-CN';
+    }
+    if (norm === 'ja' || norm.indexOf('ja-') === 0) return 'ja';
+    if (norm === 'ko' || norm.indexOf('ko-') === 0) return 'ko';
+    if (norm === 'es' || norm.indexOf('es-') === 0) return 'es';
+    if (norm === 'en' || norm.indexOf('en-') === 0) return 'en';
+    return null;
+  }
+
+  function findLocaleMeta(code) {
+    for (var i = 0; i < LOCALES.length; i++) {
+      if (LOCALES[i].code === code) return LOCALES[i];
+    }
+    return null;
+  }
+
   function detectLocale() {
+    try {
+      if (typeof window !== 'undefined' && window.location && window.location.search) {
+        var params = new URLSearchParams(window.location.search);
+        var queryLang = normalizeLocale(params.get('lang'));
+        if (queryLang) return queryLang;
+      }
+    } catch (_) {}
     var saved = null;
     try {
       saved = localStorage.getItem(STORAGE_KEY);
     } catch (_) {}
-    if (saved && DICT[saved]) return saved;
-    var nav = (navigator.language || navigator.userLanguage || 'en').toLowerCase();
-    return nav.indexOf('zh') === 0 ? 'zh-CN' : 'en';
+    var savedNorm = normalizeLocale(saved);
+    if (savedNorm) return savedNorm;
+
+    var list = [];
+    if (typeof navigator !== 'undefined') {
+      if (Array.isArray(navigator.languages) && navigator.languages.length) {
+        list = navigator.languages;
+      } else if (navigator.language || navigator.userLanguage) {
+        list = [navigator.language || navigator.userLanguage];
+      }
+    }
+    for (var i = 0; i < list.length; i++) {
+      var matched = normalizeLocale(list[i]);
+      if (matched) return matched;
+    }
+    return 'en';
   }
 
   var currentLocale = detectLocale();
@@ -1253,16 +1768,60 @@
     return currentLocale;
   }
 
+  function ensureLocale(lang) {
+    var code = normalizeLocale(lang) || 'en';
+    if (DICT[code]) return Promise.resolve(code);
+    var meta = findLocaleMeta(code);
+    if (!meta || !meta.asset || typeof fetch !== 'function') {
+      return Promise.resolve('en');
+    }
+    if (pendingLoads[code]) return pendingLoads[code];
+    pendingLoads[code] = fetch(meta.asset)
+      .then(function (res) {
+        if (!res.ok) throw new Error('Failed to load locale ' + code);
+        return res.json();
+      })
+      .then(function (dict) {
+        if (dict && typeof dict === 'object') {
+          DICT[code] = dict;
+          return code;
+        }
+        return 'en';
+      })
+      .catch(function () {
+        return 'en';
+      })
+      .finally(function () {
+        delete pendingLoads[code];
+      });
+    return pendingLoads[code];
+  }
+
   function setLocale(lang) {
-    if (!DICT[lang]) return currentLocale;
-    currentLocale = lang;
+    var code = normalizeLocale(lang);
+    if (!code || !findLocaleMeta(code)) return currentLocale;
+    currentLocale = code;
     try {
-      localStorage.setItem(STORAGE_KEY, lang);
+      localStorage.setItem(STORAGE_KEY, code);
     } catch (_) {}
     if (document && document.documentElement) {
-      document.documentElement.lang = lang;
+      document.documentElement.lang = code;
+    }
+    if (typeof window !== 'undefined' && typeof CustomEvent === 'function') {
+      window.dispatchEvent(new CustomEvent('fp-lang-change', { detail: { locale: code } }));
     }
     return currentLocale;
+  }
+
+  function changeLocale(lang) {
+    var requested = normalizeLocale(lang) || 'en';
+    return ensureLocale(requested).then(function (loaded) {
+      return setLocale(loaded);
+    });
+  }
+
+  function ready() {
+    return ensureLocale(currentLocale);
   }
 
   function t(key, vars) {
@@ -1310,10 +1869,15 @@
   setLocale(currentLocale);
 
   window.FerroI18n = {
+    LOCALES: LOCALES,
     DICT: DICT,
+    normalizeLocale: normalizeLocale,
     detectLocale: detectLocale,
     getLocale: getLocale,
     setLocale: setLocale,
+    ensureLocale: ensureLocale,
+    changeLocale: changeLocale,
+    ready: ready,
     t: t,
     formatTime: formatTime,
     formatBytes: formatBytes

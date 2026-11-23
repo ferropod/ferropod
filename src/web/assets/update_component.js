@@ -565,7 +565,8 @@ class FpSystemUpdates extends HTMLElement {
       bodyHtml = `<div class="release-list">${this._releases.map((rel) => {
         const isCurrent = rel.version === curVer;
         const expanded = this._expandedTags.has(rel.tag);
-        const dateStr = rel.published_at ? new Date(rel.published_at).toLocaleString() : '-';
+        const locale = window.FerroI18n ? window.FerroI18n.getLocale() : undefined;
+        const dateStr = rel.published_at ? new Date(rel.published_at).toLocaleString(locale) : '-';
         const canInstall = info.can_self_update && rel.asset_url && info.install_mode !== 'docker';
         return `
           <div class="release-row">

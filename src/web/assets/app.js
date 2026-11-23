@@ -11,17 +11,18 @@
 
   var ROUTES = [
     'overview',
-    'routes',
     'runtime',
     'kv',
     'queues',
     'blobs',
     'dbs',
     'search',
+    'ai',
     'tokens',
     'logs',
     'ops',
-    'updates'
+    'updates',
+    'settings'
   ];
 
   var state = {
@@ -69,8 +70,7 @@
       request_id: '',
       windowSecs: '86400',
       limit: '100'
-    },
-    routeSearch: ''
+    }
   };
 
   var viewRequestSeq = 0;
@@ -197,7 +197,31 @@
     applyTheme(cur === 'dark' ? 'light' : 'dark');
   }
 
+  function populateLangSelects() {
+    var locales = I18n.LOCALES || [
+      { code: 'en', label: 'English' },
+      { code: 'zh-CN', label: '简体中文' }
+    ];
+    document.querySelectorAll('[data-action="select-lang"]').forEach(function (sel) {
+      sel.innerHTML = '';
+      locales.forEach(function (loc) {
+        var opt = document.createElement('option');
+        opt.value = loc.code;
+        opt.textContent = loc.label;
+        sel.appendChild(opt);
+      });
+    });
+  }
+
+  function applyDocumentTitle() {
+    if (typeof document === 'undefined') return;
+    var baseTitle = t('app.pageTitle');
+    var inst = state.status && state.status.instance_name ? String(state.status.instance_name).trim() : '';
+    document.title = inst ? (inst + ' · ' + baseTitle) : baseTitle;
+  }
+
   function applyStaticI18n() {
+    applyDocumentTitle();
     var nodes = document.querySelectorAll('[data-i18n]');
     nodes.forEach(function (el) {
       el.textContent = t(el.getAttribute('data-i18n'));
@@ -206,20 +230,26 @@
     phs.forEach(function (el) {
       el.setAttribute('placeholder', t(el.getAttribute('data-i18n-placeholder')));
     });
-    ['login-lang-btn', 'topbar-lang-btn'].forEach(function (id) {
-      var el = $(id);
-      if (el) el.textContent = t('lang.switch');
+    var curLocale = I18n.getLocale();
+    document.querySelectorAll('[data-action="select-lang"]').forEach(function (sel) {
+      sel.value = curLocale;
+      sel.setAttribute('aria-label', t('lang.label'));
     });
+    var tokBtn = $('toggle-token-vis');
+    var tokInp = $('token-input');
+    if (tokBtn && tokInp) {
+      tokBtn.textContent = tokInp.type === 'text' ? t('auth.hideToken') : t('auth.showToken');
+    }
     applyTheme(document.documentElement.getAttribute('data-theme') || detectTheme());
   }
 
-  function toggleLang() {
-    var next = I18n.getLocale() === 'zh-CN' ? 'en' : 'zh-CN';
-    I18n.setLocale(next);
+  async function selectLang(lang) {
+    var applied = I18n.changeLocale ? await I18n.changeLocale(lang) : I18n.setLocale(lang);
     applyStaticI18n();
     if (state.status) {
       renderCurrentRoute(false);
     }
+    return applied;
   }
 
   // --- Toast & Modal ---
@@ -412,14 +442,23 @@
     if (route === 'projects') {
       history.replaceState(null, '', '#/runtime' + (parts[1] ? '/' + parts[1] : ''));
       route = 'runtime';
+    } else if (route === 'routes') {
+      history.replaceState(null, '', '#/runtime');
+      route = 'runtime';
+      parts = ['runtime'];
     }
     if (ROUTES.indexOf(route) === -1) route = 'overview';
     if (route === 'tokens' && !isAdmin()) route = 'overview';
+    if (route === 'settings' && !isAdmin() && !isReadonly()) route = 'overview';
     state.currentRoute = route;
     var runtimeId = route === 'runtime' && parts[1] ? decodeURIComponent(parts[1]) : null;
     if (runtimeId !== state.projectId) {
       state.projectTab = 'deployments';
       state.envDeploymentId = null;
+    }
+    var hashTab = route === 'runtime' && parts[2] ? decodeURIComponent(parts[2]) : null;
+    if (['deployments', 'bindings', 'secrets', 'routes'].indexOf(hashTab) !== -1) {
+      state.projectTab = hashTab;
     }
     if (state.pendingRuntimeTab) state.projectTab = state.pendingRuntimeTab;
     state.pendingRuntimeTab = null;
@@ -446,6 +485,10 @@
     var navTok = $('nav-tokens');
     if (navTok) {
       navTok.classList.toggle('hidden', !isAdmin());
+    }
+    var navSet = $('nav-settings');
+    if (navSet) {
+      navSet.classList.toggle('hidden', !isAdmin() && !isReadonly());
     }
     document.querySelectorAll('[data-nav]').forEach(function (el) {
       el.classList.toggle('active', el.getAttribute('data-nav') === state.currentRoute);
@@ -514,6 +557,7 @@
     if ($('session-version')) {
       $('session-version').textContent = state.status.version ? 'v' + state.status.version : 'v-';
     }
+    applyDocumentTitle();
     parseHash();
     renderCurrentRoute(true);
   }
@@ -523,6 +567,7 @@
     state.token = '';
     state.status = null;
     clearStoredToken();
+    applyDocumentTitle();
     $('app-shell').classList.add('hidden');
     $('login-view').classList.remove('hidden');
     if (!keepError) hideLoginError();
@@ -582,7 +627,6 @@
   function renderCurrentRoute(fetchData) {
     updateNavActive();
     if (state.currentRoute === 'overview') return renderOverview(fetchData);
-    if (state.currentRoute === 'routes') return renderRoutes(fetchData);
     if (state.currentRoute === 'runtime') {
       return state.projectId ? renderProjectDetail(state.projectId, fetchData) : renderRuntime();
     }
@@ -591,10 +635,12 @@
     if (state.currentRoute === 'blobs') return renderBlobs(fetchData);
     if (state.currentRoute === 'dbs') return renderDbs(fetchData);
     if (state.currentRoute === 'search') return renderSearch(fetchData);
+    if (state.currentRoute === 'ai') return renderAi(fetchData);
     if (state.currentRoute === 'tokens') return renderTokens(fetchData);
     if (state.currentRoute === 'logs') return renderLogs(fetchData);
     if (state.currentRoute === 'ops') return renderOps(fetchData);
     if (state.currentRoute === 'updates') return renderUpdates(fetchData);
+    if (state.currentRoute === 'settings') return renderSettings();
   }
 
   // --- Lazy Native ESM Component Loaders ---
@@ -654,6 +700,28 @@
     return updateModulePromise;
   }
 
+  var settingsModulePromise = null;
+  function ensureSettingsComponent() {
+    if (!settingsModulePromise) {
+      settingsModulePromise = import('/_panel/assets/settings_component.js').catch(function (err) {
+        settingsModulePromise = null;
+        throw err;
+      });
+    }
+    return settingsModulePromise;
+  }
+
+  var aiModulePromise = null;
+  function ensureAiComponent() {
+    if (!aiModulePromise) {
+      aiModulePromise = import('/_panel/assets/ai_component.js').catch(function (err) {
+        aiModulePromise = null;
+        throw err;
+      });
+    }
+    return aiModulePromise;
+  }
+
   // --- 1. Overview ---
 
   async function renderOverview(fetchData) {
@@ -695,9 +763,10 @@
     }).join('');
 
     var routeRows = state.routes.slice(0, 5).map(function (r) {
+      var appHref = '#/runtime/' + enc(r.project_id);
       return '<tr>' +
-        '<td data-label="' + esc(t('routes.host')) + '" class="mono text-xs">' + esc(r.host) + '</td>' +
-        '<td data-label="' + esc(t('routes.project')) + '">' + esc(projectNameById(r.project_id)) + '</td>' +
+        '<td data-label="' + esc(t('routes.host')) + '" class="mono text-xs"><a href="' + appHref + '" data-runtime-tab="routes" class="text-strong">' + esc(r.host) + '</a></td>' +
+        '<td data-label="' + esc(t('routes.project')) + '"><a href="' + appHref + '" data-runtime-tab="routes">' + esc(projectNameById(r.project_id)) + '</a></td>' +
         '<td data-label="' + esc(t('routes.targetEnv')) + '">' + renderBadgesForEnv(r.target_env) + '</td>' +
         '</tr>';
     }).join('');
@@ -723,15 +792,31 @@
 
       '<div class="stats-grid">' +
       statCard(t('overview.projects'), st.projects, '#/runtime') +
-      statCard(t('overview.routes'), st.routes, '#/routes') +
+      statCard(t('overview.routes'), st.routes, '#/runtime') +
       statCard(t('overview.kvNamespaces'), st.kv_namespaces, '#/kv') +
       statCard(t('overview.queues'), st.queues, '#/queues') +
       statCard(t('overview.buckets'), st.buckets, '#/blobs') +
       statCard(t('overview.dbs'), st.dbs, '#/dbs') +
       statCard(t('overview.searchIndexes'), st.search_indexes || 0, '#/search') +
+      statCard(t('overview.aiProviders'), st.ai_providers || 0, '#/ai') +
       '</div>' +
 
       '<fp-perf-monitor id="overview-perf-monitor"></fp-perf-monitor>' +
+
+      '<div class="panel"><div class="panel-header"><h3 class="panel-title">' + esc(t('overview.endpointsTitle')) + '</h3><span class="badge badge-info">AI &amp; API</span></div>' +
+      '<div class="panel-body row gap-xs">' +
+      [
+        { label: 'MCP', path: '/_mcp' },
+        { label: 'AI Chat', path: '/_ai/v1/chat/completions' },
+        { label: 'AI Models', path: '/_ai/v1/models' },
+        { label: 'Realtime SSE', path: '/_realtime/{channel}/sse' },
+        { label: 'OpenAPI', path: '/_api/v1/openapi.json' },
+        { label: 'llms.txt', path: '/_api/v1/llms.txt' },
+        { label: 'Prometheus', path: '/_api/v1/metrics/prometheus' }
+      ].map(function (ep) {
+        return '<button type="button" class="btn btn-sm" data-copy-endpoint="' + esc(ep.path) + '">' + esc(ep.label) + ': <code class="mono">' + esc(ep.path) + '</code></button>';
+      }).join('') +
+      '</div></div>' +
 
       '<div class="grid-2">' +
       '<div class="panel"><div class="panel-header"><h3 class="panel-title">' + esc(t('overview.recentProjects')) + '</h3><a href="#/runtime" class="btn btn-ghost btn-sm">' + esc(t('common.view')) + '</a></div>' +
@@ -739,11 +824,18 @@
         ? '<div class="table-wrap"><table class="data-table stack-mobile"><thead><tr><th>' + esc(t('common.name')) + '</th><th>' + esc(t('projects.activeDeployment')) + '</th><th>' + esc(t('projects.previewDeployment')) + '</th></tr></thead><tbody>' + projRows + '</tbody></table></div>'
         : '<div class="empty-state">' + esc(t('common.empty')) + '</div>') +
       '</div>' +
-      '<div class="panel"><div class="panel-header"><h3 class="panel-title">' + esc(t('overview.recentRoutes')) + '</h3><a href="#/routes" class="btn btn-ghost btn-sm">' + esc(t('common.view')) + '</a></div>' +
+      '<div class="panel"><div class="panel-header"><h3 class="panel-title">' + esc(t('overview.recentRoutes')) + '</h3><a href="#/runtime" class="btn btn-ghost btn-sm">' + esc(t('common.view')) + '</a></div>' +
       (routeRows
         ? '<div class="table-wrap"><table class="data-table stack-mobile"><thead><tr><th>' + esc(t('routes.host')) + '</th><th>' + esc(t('routes.project')) + '</th><th>' + esc(t('routes.targetEnv')) + '</th></tr></thead><tbody>' + routeRows + '</tbody></table></div>'
         : '<div class="empty-state">' + esc(t('common.empty')) + '</div>') +
       '</div></div>';
+
+    root.querySelectorAll('[data-copy-endpoint]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var path = btn.getAttribute('data-copy-endpoint');
+        copyText(window.location.origin + path);
+      });
+    });
 
     if ($('overview-perf-monitor')) {
       var perfEl = $('overview-perf-monitor');
@@ -890,7 +982,10 @@
           api('/_api/v1/runtimes/' + enc(id)),
           api('/_api/v1/runtimes/' + enc(id) + '/deployments'),
           api('/_api/v1/routes'),
-          api('/_api/v1/buckets')
+          api('/_api/v1/buckets'),
+          state.projects.length
+            ? Promise.resolve(state.projects)
+            : api('/_api/v1/runtimes').catch(function () { return []; })
         ];
         var res = await Promise.all(reqs);
         if (!isCurrentDetail()) return;
@@ -905,6 +1000,7 @@
         state.detailDeployments = res[1] || [];
         state.routes = res[2] || [];
         state.buckets = res[3] || [];
+        if (Array.isArray(res[4]) && res[4].length) state.projects = res[4];
         state.detailSecrets = secrets;
       } catch (e) {
         if (isCurrentDetail()) root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
@@ -927,6 +1023,7 @@
       '<p class="page-subtitle mono">' + esc(p.id) + (p.group ? ' · ' + esc(p.group) : '') + ' · ' + esc(t('projects.healthCheckPath')) + ': ' + esc(p.health_check_path) + (p.description ? ' · ' + esc(p.description) : '') + '</p></div>' +
       (writable
         ? '<div class="row">' +
+          '<label class="checkbox-row" style="font-size:12px;"><input type="checkbox" id="pd-verify-health"> ' + esc(t('projectDetail.verifyHealth')) + '</label>' +
           (p.preview_deployment_id ? '<button type="button" class="btn" id="pd-promote-preview">' + esc(t('projectDetail.promotePreview')) + '</button>' : '') +
           (deps.length > 1 ? '<button type="button" class="btn" id="pd-rollback">' + esc(t('projectDetail.rollbackProd')) + '</button>' : '') +
           '<button type="button" class="btn" id="pd-edit-runtime">' + esc(t('common.editConfig')) + '</button>' +
@@ -1014,10 +1111,14 @@
     } else {
       var rRows = projRoutes.map(function (r) {
         return '<tr>' +
-          '<td data-label="' + esc(t('routes.host')) + '" class="mono">' + esc(r.host) + '</td>' +
+          '<td data-label="' + esc(t('routes.host')) + '" class="mono text-strong">' + esc(r.host) + '</td>' +
           '<td data-label="' + esc(t('routes.targetEnv')) + '">' + renderBadgesForEnv(r.target_env) + '</td>' +
+          '<td data-label="' + esc(t('routes.policies')) + '">' + renderRoutePolicyBadges(r) + '</td>' +
           '<td class="cell-actions-td"><div class="cell-actions">' +
-          (isAdmin() ? '<button type="button" class="btn btn-danger btn-sm" data-del-route="' + esc(r.host) + '">' + esc(t('common.delete')) + '</button>' : '') +
+          (writable
+            ? '<button type="button" class="btn btn-sm" data-edit-route="' + esc(r.host) + '">' + esc(t('common.edit')) + '</button>' +
+              '<button type="button" class="btn btn-danger btn-sm" data-del-route="' + esc(r.host) + '">' + esc(t('common.delete')) + '</button>'
+            : '') +
           '</div></td></tr>';
       }).join('');
       bodyHtml =
@@ -1025,7 +1126,7 @@
         (writable ? '<button type="button" class="btn btn-sm btn-primary" id="pd-add-route">' + esc(t('projectDetail.addRoute')) + '</button>' : '') +
         '</div>' +
         (rRows
-          ? '<div class="table-wrap"><table class="data-table stack-mobile"><thead><tr><th>' + esc(t('routes.host')) + '</th><th>' + esc(t('routes.targetEnv')) + '</th><th class="th-actions">' + esc(t('common.actions')) + '</th></tr></thead><tbody>' + rRows + '</tbody></table></div>'
+          ? '<div class="table-wrap"><table class="data-table stack-mobile"><thead><tr><th>' + esc(t('routes.host')) + '</th><th>' + esc(t('routes.targetEnv')) + '</th><th>' + esc(t('routes.policies')) + '</th><th class="th-actions">' + esc(t('common.actions')) + '</th></tr></thead><tbody>' + rRows + '</tbody></table></div>'
           : '<div class="empty-state">' + esc(t('routes.empty')) + '</div>') +
         '</div>';
     }
@@ -1083,7 +1184,11 @@
     if ($('pd-promote-preview')) {
       $('pd-promote-preview').addEventListener('click', async function () {
         try {
-          var dep = await api('/_api/v1/runtimes/' + enc(p.id) + '/promote', { method: 'POST', json: {} });
+          var verifyHealth = Boolean($('pd-verify-health') && $('pd-verify-health').checked);
+          var dep = await api('/_api/v1/runtimes/' + enc(p.id) + '/promote', {
+            method: 'POST',
+            json: { verify_health: verifyHealth }
+          });
           toast(t('projectDetail.promoteDone', { id: dep.id }), 'success');
           renderProjectDetail(p.id, true);
         } catch (e) { toast(e.message, 'error'); }
@@ -1103,9 +1208,10 @@
       btn.addEventListener('click', async function () {
         var depId = btn.getAttribute('data-promote-dep');
         try {
+          var verifyHealth = Boolean($('pd-verify-health') && $('pd-verify-health').checked);
           var dep = await api('/_api/v1/runtimes/' + enc(p.id) + '/promote', {
             method: 'POST',
-            json: { deployment_id: depId }
+            json: { deployment_id: depId, verify_health: verifyHealth }
           });
           toast(t('projectDetail.promoteDone', { id: dep.id }), 'success');
           renderProjectDetail(p.id, true);
@@ -1197,9 +1303,18 @@
 
     if ($('pd-add-route')) {
       $('pd-add-route').addEventListener('click', function () {
-        openUpsertRouteModal(p.id, function () { renderProjectDetail(p.id, true); });
+        openAppRouteModal(p, deps, null, function () { renderProjectDetail(p.id, true); });
       });
     }
+    root.querySelectorAll('[data-edit-route]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var host = btn.getAttribute('data-edit-route');
+        var routeObj = projRoutes.find(function (r) { return r.host === host; }) || null;
+        if (routeObj) {
+          openAppRouteModal(p, deps, routeObj, function () { renderProjectDetail(p.id, true); });
+        }
+      });
+    });
     root.querySelectorAll('[data-del-route]').forEach(function (btn) {
       btn.addEventListener('click', function () {
         var host = btn.getAttribute('data-del-route');
@@ -1344,127 +1459,287 @@
     });
   }
 
-  // --- 3. Routes ---
+  // --- 3. App Route Helpers & Modal ---
 
-  async function renderRoutes(fetchData) {
-    var root = $('view-root');
-    var isCurrent = beginViewRender('routes');
-    if (fetchData) {
-      root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
-      try {
-        var res = await Promise.all([api('/_api/v1/routes'), api('/_api/v1/runtimes')]);
-        if (!isCurrent()) return;
-        state.routes = res[0] || [];
-        state.projects = res[1] || [];
-      } catch (e) {
-        if (isCurrent()) root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
-        return;
-      }
+  function renderRoutePolicyBadges(r) {
+    var badges = [];
+    if (r.proxy_upstream) {
+      var pfx = r.proxy_prefix || '/api';
+      badges.push(
+        '<span class="badge badge-info mono" title="' + esc(pfx + ' -> ' + r.proxy_upstream) + '">Proxy ' + esc(pfx) + '</span>'
+      );
     }
-    if (!isCurrent()) return;
-
-    var q = state.routeSearch.trim().toLowerCase();
-    var filtered = state.routes.filter(function (r) {
-      if (!q) return true;
-      var pname = projectNameById(r.project_id).toLowerCase();
-      return r.host.toLowerCase().indexOf(q) !== -1 || pname.indexOf(q) !== -1 || r.project_id.toLowerCase().indexOf(q) !== -1;
-    });
-
-    var rows = filtered.map(function (r) {
-      var writable = canWriteProject(r.project_id);
-      return '<tr>' +
-        '<td data-label="' + esc(t('routes.host')) + '" class="mono text-strong">' + esc(r.host) + '</td>' +
-        '<td data-label="' + esc(t('routes.project')) + '"><a href="#/runtime/' + enc(r.project_id) + '">' + esc(projectNameById(r.project_id)) + '</a></td>' +
-        '<td data-label="' + esc(t('routes.targetEnv')) + '">' + renderBadgesForEnv(r.target_env) + '</td>' +
-        '<td class="cell-actions-td"><div class="cell-actions">' +
-        (writable ? '<button type="button" class="btn btn-sm" data-edit-route="' + esc(r.host) + '" data-route-proj="' + esc(r.project_id) + '" data-route-env="' + esc(r.target_env) + '">' + esc(t('common.edit')) + '</button>' : '') +
-        (writable && !isReadonly() ? '<button type="button" class="btn btn-danger btn-sm" data-del-route="' + esc(r.host) + '">' + esc(t('common.delete')) + '</button>' : '') +
-        '</div></td></tr>';
-    }).join('');
-
-    root.innerHTML =
-      '<div class="page-head"><div><h2 class="page-title">' + esc(t('routes.title')) + '</h2>' +
-      '<p class="page-subtitle">' + esc(t('routes.subtitle')) + '</p></div>' +
-      (!isReadonly() && state.projects.length ? '<button type="button" class="btn btn-primary" id="new-route-btn">' + esc(t('routes.new')) + '</button>' : '') +
-      '</div>' +
-      '<div class="panel"><div class="panel-header"><div class="toolbar">' +
-      '<div class="toolbar-filters"><input type="search" id="route-search-input" style="max-width:300px;" value="' + esc(state.routeSearch) + '" placeholder="' + esc(t('routes.searchPlaceholder')) + '"></div>' +
-      '</div></div>' +
-      (rows
-        ? '<div class="table-wrap"><table class="data-table stack-mobile"><thead><tr><th>' + esc(t('routes.host')) + '</th><th>' + esc(t('routes.project')) + '</th><th>' + esc(t('routes.targetEnv')) + '</th><th class="th-actions">' + esc(t('common.actions')) + '</th></tr></thead><tbody>' + rows + '</tbody></table></div>'
-        : '<div class="empty-state">' + esc(t('routes.empty')) + '</div>') +
-      '</div>';
-
-    if ($('route-search-input')) {
-      $('route-search-input').addEventListener('input', function (e) {
-        state.routeSearch = e.target.value;
-        renderRoutes(false);
-        var el = $('route-search-input');
-        if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
-      });
+    if (r.rate_limit_rpm) {
+      badges.push(
+        '<span class="badge badge-neutral mono">' + esc(r.rate_limit_rpm) + ' req/m</span>'
+      );
     }
-    if ($('new-route-btn')) {
-      $('new-route-btn').addEventListener('click', function () {
-        openUpsertRouteModal(null, function () { renderRoutes(true); });
-      });
+    if (r.basic_auth_enabled) {
+      badges.push(
+        '<span class="badge badge-warn"' +
+        (r.basic_auth_user ? ' title="' + esc(r.basic_auth_user) + '"' : '') +
+        '>Basic Auth</span>'
+      );
     }
-    root.querySelectorAll('[data-edit-route]').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        openUpsertRouteModal(
-          btn.getAttribute('data-route-proj'),
-          function () { renderRoutes(true); },
-          btn.getAttribute('data-edit-route'),
-          btn.getAttribute('data-route-env')
-        );
-      });
-    });
-    root.querySelectorAll('[data-del-route]').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        var host = btn.getAttribute('data-del-route');
-        confirmAction(t('routes.deleteConfirm', { host: host }), async function () {
-          try {
-            await api('/_api/v1/routes/' + enc(host), { method: 'DELETE' });
-            toast(t('routes.deleted'), 'success');
-            renderRoutes(true);
-          } catch (e) { toast(e.message, 'error'); }
-        });
-      });
-    });
+    if (r.canary_deployment_id && r.canary_weight > 0) {
+      badges.push(
+        '<span class="badge badge-accent mono" title="' + esc(r.canary_deployment_id) + '">Canary ' + esc(r.canary_weight) + '%</span>'
+      );
+    }
+    return badges.length
+      ? '<div class="route-policies">' + badges.join('') + '</div>'
+      : '<span class="muted text-xs">-</span>';
   }
 
-  function openUpsertRouteModal(presetProjectId, onDone, presetHost, presetEnv) {
+  function normalizeRouteHost(raw) {
+    var trimmed = String(raw || '').trim();
+    var withoutPort = trimmed;
+    if (trimmed.charAt(0) === '[') {
+      var closeIdx = trimmed.indexOf(']');
+      if (closeIdx !== -1) {
+        withoutPort = trimmed.slice(0, closeIdx + 1);
+      }
+    } else {
+      var colonIdx = trimmed.lastIndexOf(':');
+      if (colonIdx > 0) {
+        var host = trimmed.slice(0, colonIdx);
+        var port = trimmed.slice(colonIdx + 1);
+        if (/^\d*$/.test(port)) {
+          withoutPort = host;
+        }
+      }
+    }
+    return withoutPort.replace(/\.+$/, '').toLowerCase();
+  }
+
+  function openAppRouteModal(project, deployments, existingRoute, onDone) {
+    var isEdit = Boolean(existingRoute);
+    var depList = Array.isArray(deployments) ? deployments : [];
+    var hasAdvPolicies = isEdit && Boolean(
+      existingRoute.proxy_upstream ||
+      existingRoute.rate_limit_rpm ||
+      existingRoute.basic_auth_enabled ||
+      existingRoute.canary_deployment_id
+    );
+    var canaryId = isEdit ? (existingRoute.canary_deployment_id || '') : '';
+    var canaryOpts = '<option value="">' + esc(t('routes.canaryNone')) + '</option>' +
+      depList.map(function (d) {
+        return '<option value="' + esc(d.id) + '"' + (d.id === canaryId ? ' selected' : '') + '>' + esc(d.id + ' · ' + d.status) + '</option>';
+      }).join('');
+    if (canaryId && !depList.some(function (d) { return d.id === canaryId; })) {
+      canaryOpts += '<option value="' + esc(canaryId) + '" selected>' + esc(canaryId) + '</option>';
+    }
+    var currentEnv = isEdit ? existingRoute.target_env : 'prod';
+    var baseDomain = state.status && state.status.base_domain ? String(state.status.base_domain).trim() : '';
+    function suggestHostForEnv(env) {
+      if (!baseDomain) return '';
+      var slug = String(project.name || project.id || 'app')
+        .toLowerCase()
+        .replace(/[^a-z0-9-]+/g, '-')
+        .replace(/^-+|-+$/g, '') || 'app';
+      return (env === 'preview' ? (slug + '-preview') : slug) + '.' + baseDomain;
+    }
+
     openModal({
-      title: t('routes.new'),
+      title: isEdit ? (t('routes.edit') + ' · ' + existingRoute.host) : t('projectDetail.addRoute'),
       body:
         '<form id="route-form" class="stack gap-md">' +
-        '<div class="field"><label>' + esc(t('routes.host')) + '</label>' +
-        '<input type="text" id="rt-host" required value="' + esc(presetHost || '') + '" placeholder="' + esc(t('routes.hostPlaceholder')) + '"></div>' +
         '<div class="field"><label>' + esc(t('routes.project')) + '</label>' +
-        '<select id="rt-proj">' + renderProjectSelectOptions(presetProjectId, false) + '</select></div>' +
-        '<div class="field"><label>' + esc(t('routes.targetEnv')) + '</label>' +
-        '<select id="rt-env"><option value="prod"' + (presetEnv === 'preview' ? '' : ' selected') + '>prod</option>' +
-        '<option value="preview"' + (presetEnv === 'preview' ? ' selected' : '') + '>preview</option></select></div>' +
+        '<input type="text" disabled value="' + esc(project.name + ' (' + project.id + ')') + '"></div>' +
+        '<div class="field"><label for="rt-host">' + esc(t('routes.host')) + '</label>' +
+        '<input type="text" id="rt-host" required value="' + esc(isEdit ? existingRoute.host : '') + '"' +
+        (isEdit ? ' readonly' : ' placeholder="' + esc(t('routes.hostPlaceholder')) + '"') + '>' +
+        (!isEdit && baseDomain
+          ? '<div class="row-between text-xs muted" style="margin-top:4px;">' +
+            '<span>' + esc(t('routes.suggestedHost')) + ': <code id="rt-suggest-val">' + esc(suggestHostForEnv(currentEnv)) + '</code></span>' +
+            '<button type="button" class="btn btn-sm" id="rt-use-suggest">' + esc(t('routes.useSuggested')) + '</button>' +
+            '</div>'
+          : '') +
+        '</div>' +
+        (!isEdit
+          ? '<div id="rt-conflict-warn" class="alert alert-warn hidden">' +
+            '<div id="rt-conflict-msg"></div>' +
+            '<label class="checkbox-row" style="margin-top:8px;"><input type="checkbox" id="rt-conflict-confirm"> ' +
+            '<span>' + esc(t('routes.conflictConfirm')) + '</span></label>' +
+            '</div>'
+          : '') +
+        '<div class="field"><label for="rt-env">' + esc(t('routes.targetEnv')) + '</label>' +
+        '<select id="rt-env"><option value="prod"' + (currentEnv === 'preview' ? '' : ' selected') + '>prod</option>' +
+        '<option value="preview"' + (currentEnv === 'preview' ? ' selected' : '') + '>preview</option></select></div>' +
+        '<details class="adv-options"' + (hasAdvPolicies ? ' open' : '') + '>' +
+        '<summary>' + esc(t('common.advancedOptions')) + '</summary>' +
+        '<div class="adv-options-body stack gap-sm">' +
+        '<div class="form-grid">' +
+        '<div class="field"><label for="rt-proxy-prefix">' + esc(t('routes.proxyPrefix')) + '</label>' +
+        '<input type="text" id="rt-proxy-prefix" value="' + esc(isEdit && existingRoute.proxy_prefix ? existingRoute.proxy_prefix : '') + '" placeholder="/api"></div>' +
+        '<div class="field"><label for="rt-proxy-upstream">' + esc(t('routes.proxyUpstream')) + '</label>' +
+        '<input type="text" id="rt-proxy-upstream" value="' + esc(isEdit && existingRoute.proxy_upstream ? existingRoute.proxy_upstream : '') + '" placeholder="http://127.0.0.1:8080"></div>' +
+        '</div>' +
+        '<div class="field"><label for="rt-rate-limit">' + esc(t('routes.rateLimitRpm')) + '</label>' +
+        '<input type="number" id="rt-rate-limit" min="0" step="1" value="' + esc(isEdit && existingRoute.rate_limit_rpm ? existingRoute.rate_limit_rpm : '') + '" placeholder="' + esc(t('routes.rateLimitPlaceholder')) + '"></div>' +
+        (isEdit && existingRoute.basic_auth_enabled
+          ? '<div class="muted text-xs">' + esc(t('routes.basicAuthEnabledHint', { user: existingRoute.basic_auth_user || '-' })) + '</div>' +
+            '<label class="checkbox-row"><input type="checkbox" id="rt-clear-auth"> ' + esc(t('routes.clearBasicAuth')) + '</label>'
+          : '') +
+        '<div class="form-grid">' +
+        '<div class="field"><label for="rt-auth-user">' + esc(t('routes.basicAuthUser')) + '</label>' +
+        '<input type="text" id="rt-auth-user" autocomplete="off" value="' + esc(isEdit && existingRoute.basic_auth_user ? existingRoute.basic_auth_user : '') + '"></div>' +
+        '<div class="field"><label for="rt-auth-pass">' + esc(t('routes.basicAuthPassword')) + '</label>' +
+        '<input type="password" id="rt-auth-pass" autocomplete="new-password" placeholder="' + esc(isEdit && existingRoute.basic_auth_enabled ? t('routes.basicAuthKeepHint') : '••••••••') + '"></div>' +
+        '</div>' +
+        '<div class="form-grid">' +
+        '<div class="field"><label for="rt-canary-dep">' + esc(t('routes.canaryDeployment')) + '</label>' +
+        '<select id="rt-canary-dep">' + canaryOpts + '</select></div>' +
+        '<div class="field"><label for="rt-canary-weight">' + esc(t('routes.canaryWeight')) + '</label>' +
+        '<input type="number" id="rt-canary-weight" min="0" max="100" step="1" value="' + esc(isEdit ? (existingRoute.canary_weight || 0) : 0) + '"></div>' +
+        '</div>' +
+        '</div></details>' +
         '</form>',
       footer:
         '<button type="button" class="btn" id="rt-cancel">' + esc(t('common.cancel')) + '</button>' +
         '<button type="submit" form="route-form" class="btn btn-primary">' + esc(t('common.save')) + '</button>',
       onMount: function () {
         $('rt-cancel').addEventListener('click', closeModal);
+        var lastConflictHost = '';
+        function updateConflictWarning() {
+          if (isEdit) return null;
+          var norm = normalizeRouteHost($('rt-host').value);
+          var conflict = norm
+            ? state.routes.find(function (r) { return normalizeRouteHost(r.host) === norm; })
+            : null;
+          var warnEl = $('rt-conflict-warn');
+          var msgEl = $('rt-conflict-msg');
+          var chkEl = $('rt-conflict-confirm');
+          if (!warnEl || !msgEl || !chkEl) return conflict;
+          if (conflict) {
+            msgEl.textContent = conflict.project_id === project.id
+              ? t('routes.conflictSameApp', { host: conflict.host })
+              : t('routes.conflictOtherApp', { host: conflict.host, app: projectNameById(conflict.project_id) });
+            if (lastConflictHost !== conflict.host) {
+              chkEl.checked = false;
+              lastConflictHost = conflict.host;
+            }
+            warnEl.classList.remove('hidden');
+          } else {
+            lastConflictHost = '';
+            chkEl.checked = false;
+            warnEl.classList.add('hidden');
+          }
+          return conflict;
+        }
+        if (!isEdit && $('rt-host')) {
+          $('rt-host').addEventListener('input', updateConflictWarning);
+        }
+        if (!isEdit && baseDomain && $('rt-use-suggest') && $('rt-suggest-val')) {
+          $('rt-use-suggest').addEventListener('click', function () {
+            $('rt-host').value = $('rt-suggest-val').textContent;
+            updateConflictWarning();
+          });
+          if ($('rt-env')) {
+            $('rt-env').addEventListener('change', function () {
+              $('rt-suggest-val').textContent = suggestHostForEnv($('rt-env').value);
+            });
+          }
+        }
+        if ($('rt-clear-auth')) {
+          $('rt-clear-auth').addEventListener('change', function () {
+            var disabled = $('rt-clear-auth').checked;
+            $('rt-auth-user').disabled = disabled;
+            $('rt-auth-pass').disabled = disabled;
+          });
+        }
         $('route-form').addEventListener('submit', async function (ev) {
           ev.preventDefault();
+          var host = isEdit ? existingRoute.host : $('rt-host').value.trim();
+          if (!host) return;
+          if (!isEdit) {
+            var conflict = updateConflictWarning();
+            if (conflict && !$('rt-conflict-confirm').checked) {
+              toast(t('routes.conflictConfirmRequired'), 'error');
+              return;
+            }
+          }
+          var targetEnv = $('rt-env').value;
+          var proxyPrefix = $('rt-proxy-prefix').value.trim();
+          var proxyUpstream = $('rt-proxy-upstream').value.trim();
+          if (proxyPrefix && !proxyUpstream) {
+            toast(t('routes.proxyUpstreamRequired'), 'error');
+            return;
+          }
+          var rateRaw = $('rt-rate-limit').value.trim();
+          var rateLimitRpm = 0;
+          if (rateRaw !== '') {
+            var rateVal = Number(rateRaw);
+            if (!Number.isInteger(rateVal) || rateVal < 0) {
+              toast(t('routes.invalidRateLimit'), 'error');
+              return;
+            }
+            rateLimitRpm = rateVal;
+          }
+          var clearAuth = Boolean($('rt-clear-auth') && $('rt-clear-auth').checked);
+          var authUser = $('rt-auth-user').value.trim();
+          var authPass = $('rt-auth-pass').value;
+          if (!clearAuth) {
+            var keepingExistingAuth = isEdit &&
+              existingRoute.basic_auth_enabled &&
+              authUser === (existingRoute.basic_auth_user || '');
+            if ((authPass && !authUser) || (authUser && !authPass && !keepingExistingAuth)) {
+              toast(t('routes.basicAuthPairRequired'), 'error');
+              return;
+            }
+          }
+          var canaryDepId = $('rt-canary-dep').value;
+          var canaryWeightRaw = $('rt-canary-weight').value.trim();
+          var canaryWeight = canaryWeightRaw === '' ? 0 : Number(canaryWeightRaw);
+          if (!Number.isInteger(canaryWeight) || canaryWeight < 0 || canaryWeight > 100) {
+            toast(t('routes.canaryWeightInvalid'), 'error');
+            return;
+          }
+          if (!canaryDepId && canaryWeight > 0) {
+            toast(t('routes.canaryDepRequired'), 'error');
+            return;
+          }
+
+          var submit = document.querySelector('button[form="route-form"]');
+          submit.disabled = true;
           try {
-            await api('/_api/v1/routes', {
-              method: 'POST',
-              json: {
-                host: $('rt-host').value.trim(),
-                project: $('rt-proj').value,
-                target_env: $('rt-env').value
-              }
-            });
+            if (isEdit) {
+              await api('/_api/v1/routes/' + enc(existingRoute.host), {
+                method: 'PATCH',
+                json: {
+                  target_env: targetEnv,
+                  proxy_upstream: proxyUpstream,
+                  proxy_prefix: proxyUpstream ? (proxyPrefix || '/api') : null,
+                  rate_limit_rpm: rateLimitRpm,
+                  clear_basic_auth: clearAuth ? true : null,
+                  basic_auth_user: (!clearAuth && authUser && authPass) ? authUser : null,
+                  basic_auth_password: (!clearAuth && authUser && authPass) ? authPass : null,
+                  canary_deployment_id: canaryDepId,
+                  canary_weight: canaryDepId ? canaryWeight : 0
+                }
+              });
+            } else {
+              await api('/_api/v1/routes', {
+                method: 'POST',
+                json: {
+                  host: host,
+                  project: project.id,
+                  target_env: targetEnv,
+                  proxy_upstream: proxyUpstream || null,
+                  proxy_prefix: proxyUpstream ? (proxyPrefix || '/api') : null,
+                  rate_limit_rpm: rateLimitRpm > 0 ? rateLimitRpm : null,
+                  basic_auth_user: (authUser && authPass) ? authUser : null,
+                  basic_auth_password: (authUser && authPass) ? authPass : null,
+                  canary_deployment_id: canaryDepId || null,
+                  canary_weight: canaryDepId ? canaryWeight : 0
+                }
+              });
+            }
             closeModal();
             toast(t('routes.saved'), 'success');
             onDone();
           } catch (e) { toast(e.message, 'error'); }
+          finally { submit.disabled = false; }
         });
       }
     });
@@ -3079,7 +3354,53 @@
     });
   }
 
-  var searchState = { indexes: [], selected: '', query: '', result: null, offset: 0 };
+  var searchState = {
+    indexes: [],
+    selected: '',
+    query: '',
+    fuzzy: true,
+    sort: '',
+    vectorText: '',
+    alpha: '0.5',
+    facets: {},
+    result: null,
+    offset: 0
+  };
+
+  async function runRealSearchQuery(selectedId) {
+    var reqToken = state.token;
+    var qSeq = ++searchQuerySeq;
+    var payload = {
+      query: searchState.query,
+      fuzzy: Boolean(searchState.fuzzy),
+      facets: searchState.facets || {}
+    };
+    if (searchState.sort) payload.sort = searchState.sort;
+    var vecRaw = (searchState.vectorText || '').trim();
+    if (vecRaw) {
+      var parsedVec = JSON.parse(vecRaw);
+      if (!Array.isArray(parsedVec)) {
+        throw new Error('Vector must be a JSON array of floats');
+      }
+      payload.vector = parsedVec.map(Number);
+      var alphaNum = Number(searchState.alpha);
+      if (!Number.isNaN(alphaNum)) payload.alpha = alphaNum;
+    }
+    var result = await api('/_api/v1/search/' + enc(selectedId) + '/query', {
+      method: 'POST',
+      json: payload
+    });
+    if (
+      state.currentRoute !== 'search' ||
+      state.token !== reqToken ||
+      searchState.selected !== selectedId ||
+      searchQuerySeq !== qSeq
+    ) {
+      return;
+    }
+    searchState.result = result;
+    renderSearch();
+  }
 
   async function renderSearch() {
     var root = $('view-root');
@@ -3093,6 +3414,7 @@
       if (!searchState.indexes.some(function (item) { return item.id === searchState.selected; })) {
         searchState.selected = searchState.indexes.length ? searchState.indexes[0].id : '';
         searchState.result = null;
+        searchState.facets = {};
         searchState.offset = 0;
       }
       var selected = searchState.indexes.find(function (item) { return item.id === searchState.selected; });
@@ -3108,12 +3430,35 @@
         return '<option value="' + esc(item.id) + '"' + (item.id === searchState.selected ? ' selected' : '') +
           '>' + esc(item.name) + '</option>';
       }).join('');
+      var facetEntries = (searchState.result && searchState.result.facets) ? Object.keys(searchState.result.facets) : [];
+      var facetsHtml = facetEntries.length ? '<div class="row gap-xs">' + facetEntries.map(function (field) {
+        var vals = searchState.result.facets[field] || {};
+        return Object.keys(vals).map(function (val) {
+          var active = searchState.facets[field] === val;
+          return '<button type="button" class="btn btn-sm ' + (active ? 'btn-primary' : '') + '" data-search-facet="' + esc(field) + '" data-facet-val="' + esc(val) + '">' + esc(field + ':' + val + ' (' + vals[val] + ')') + '</button>';
+        }).join('');
+      }).join('') + '</div>' : '';
+
       root.innerHTML = '<div class="page-head"><h2 class="page-title">' + esc(t('search.title')) + '</h2>' +
         (!isReadonly() ? '<button class="btn btn-primary" id="search-create-index">' + esc(t('search.newIndex')) + '</button>' : '') + '</div>' +
         '<div class="panel"><div class="panel-body stack gap-md">' +
         '<select id="search-index-select">' + options + '</select>' +
-        (selected ? '<form id="real-search-form" class="row"><input id="real-search-query" value="' + esc(searchState.query) +
-          '" placeholder="' + esc(t('search.queryPlaceholder')) + '"><button class="btn" type="submit">' + esc(t('common.search')) + '</button></form>' +
+        (selected ? '<form id="real-search-form" class="stack gap-sm">' +
+          '<div class="row">' +
+          '<input id="real-search-query" value="' + esc(searchState.query) + '" placeholder="' + esc(t('search.queryPlaceholder')) + '" style="flex:1 1 220px;">' +
+          '<label class="checkbox-row"><input type="checkbox" id="real-search-fuzzy"' + (searchState.fuzzy ? ' checked' : '') + '> ' + esc(t('search.fuzzy')) + '</label>' +
+          '<select id="real-search-sort" style="width:auto;">' +
+          '<option value=""' + (!searchState.sort ? ' selected' : '') + '>' + esc(t('search.sortRelevance')) + '</option>' +
+          '<option value="updated_desc"' + (searchState.sort === 'updated_desc' ? ' selected' : '') + '>' + esc(t('search.sortUpdated')) + '</option>' +
+          '</select>' +
+          '<button class="btn btn-primary" type="submit">' + esc(t('common.search')) + '</button>' +
+          '</div>' +
+          '<details class="adv-options"' + (searchState.vectorText ? ' open' : '') + '><summary>' + esc(t('search.hybridVector')) + '</summary>' +
+          '<div class="adv-options-body form-grid">' +
+          '<div class="field"><label>' + esc(t('search.vectorArray')) + '</label><input type="text" id="real-search-vector" class="mono" value="' + esc(searchState.vectorText) + '" placeholder="[0.12, -0.34, 0.56]"></div>' +
+          '<div class="field"><label>' + esc(t('search.vectorAlpha')) + '</label><input type="number" id="real-search-alpha" min="0" max="1" step="0.05" value="' + esc(searchState.alpha) + '"></div>' +
+          '</div></details></form>' +
+          facetsHtml +
           (searchState.result ? '<pre class="code-block">' + esc(JSON.stringify(searchState.result, null, 2)) + '</pre>' : '') +
           (writable ? '<form id="real-search-doc-form" class="stack gap-sm"><label>' + esc(t('search.docJsonLabel')) + '</label>' +
           '<textarea id="real-search-doc" rows="5" required>{ "id": "", "title": "", "body": "" }</textarea>' +
@@ -3124,13 +3469,32 @@
           }).join('') + '</div>' +
           '<div class="row gap-xs"><button class="btn btn-sm" id="search-prev"' + (searchState.offset === 0 ? ' disabled' : '') + '>' + esc(t('search.previousPage')) + '</button>' +
           '<button class="btn btn-sm" id="search-next"' + (!hasMoreDocs ? ' disabled' : '') + '>' + esc(t('search.nextPage')) + '</button></div>' +
-          (writable ? '<div class="row gap-xs"><button class="btn" id="search-edit-index">' + esc(t('common.editConfig')) + '</button><button class="btn btn-danger" id="search-delete-index">' + esc(t('search.deleteIndex')) + '</button></div>' : '') : '') +
+          (writable ? '<div class="row gap-xs"><button class="btn" id="search-commit-index">' + esc(t('search.commitIndex')) + '</button><button class="btn" id="search-edit-index">' + esc(t('common.editConfig')) + '</button><button class="btn btn-danger" id="search-delete-index">' + esc(t('search.deleteIndex')) + '</button></div>' : '') : '') +
         '</div></div>';
       $('search-index-select').addEventListener('change', function (event) {
         searchState.selected = event.target.value;
         searchState.offset = 0;
+        searchState.facets = {};
         searchState.result = null;
         renderSearch();
+      });
+      if ($('search-commit-index') && selected) {
+        $('search-commit-index').addEventListener('click', async function () {
+          try {
+            await api('/_api/v1/search/' + enc(selected.id) + '/commit', { method: 'POST', json: {} });
+            toast(t('search.committed'), 'success');
+            renderSearch();
+          } catch (e) { toast(e.message, 'error'); }
+        });
+      }
+      root.querySelectorAll('[data-search-facet]').forEach(function (btn) {
+        btn.addEventListener('click', async function () {
+          var field = btn.getAttribute('data-search-facet');
+          var val = btn.getAttribute('data-facet-val');
+          if (searchState.facets[field] === val) delete searchState.facets[field];
+          else searchState.facets[field] = val;
+          try { await runRealSearchQuery(selected.id); } catch (e) { toast(e.message, 'error'); }
+        });
       });
       if ($('search-prev')) $('search-prev').addEventListener('click', function () {
         searchState.offset = Math.max(0, searchState.offset - 100);
@@ -3225,24 +3589,13 @@
       });
       if ($('real-search-form')) $('real-search-form').addEventListener('submit', async function (event) {
         event.preventDefault();
-        var targetIndexId = selected.id;
-        var reqToken = state.token;
-        var qSeq = ++searchQuerySeq;
         searchState.query = $('real-search-query').value;
+        searchState.fuzzy = Boolean($('real-search-fuzzy') && $('real-search-fuzzy').checked);
+        searchState.sort = $('real-search-sort') ? $('real-search-sort').value : '';
+        searchState.vectorText = $('real-search-vector') ? $('real-search-vector').value : '';
+        searchState.alpha = $('real-search-alpha') ? $('real-search-alpha').value : '0.5';
         try {
-          var result = await api('/_api/v1/search/' + enc(targetIndexId) + '/query', {
-            method: 'POST', json: { query: searchState.query }
-          });
-          if (
-            state.currentRoute !== 'search' ||
-            state.token !== reqToken ||
-            searchState.selected !== targetIndexId ||
-            searchQuerySeq !== qSeq
-          ) {
-            return;
-          }
-          searchState.result = result;
-          renderSearch();
+          await runRealSearchQuery(selected.id);
         } catch (e) { toast(e.message, 'error'); }
       });
       if ($('real-search-doc-form')) $('real-search-doc-form').addEventListener('submit', async function (event) {
@@ -3363,6 +3716,44 @@
     upd.token = state.token || readStoredToken();
     upd.scope = getScope();
     root.appendChild(upd);
+  }
+
+  async function renderAi() {
+    var root = $('view-root');
+    var isCurrent = beginViewRender('ai');
+    root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
+    try {
+      await ensureAiComponent();
+      if (!isCurrent()) return;
+    } catch (e) {
+      if (isCurrent()) root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+      return;
+    }
+    if (!isCurrent()) return;
+    root.innerHTML = '';
+    var panel = document.createElement('fp-ai-gateway');
+    panel.token = state.token || readStoredToken();
+    panel.scope = getScope();
+    root.appendChild(panel);
+  }
+
+  async function renderSettings() {
+    var root = $('view-root');
+    var isCurrent = beginViewRender('settings');
+    root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
+    try {
+      await ensureSettingsComponent();
+      if (!isCurrent()) return;
+    } catch (e) {
+      if (isCurrent()) root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+      return;
+    }
+    if (!isCurrent()) return;
+    root.innerHTML = '';
+    var panel = document.createElement('fp-platform-settings');
+    panel.token = state.token || readStoredToken();
+    panel.scope = getScope();
+    root.appendChild(panel);
   }
 
   // --- 8. Tokens (Admin Only) ---
@@ -3769,11 +4160,13 @@
 
   // --- Bootstrap & Event Wiring ---
 
-  function init() {
-    applyStaticI18n();
+  async function init() {
+    populateLangSelects();
 
-    document.querySelectorAll('[data-action="toggle-lang"]').forEach(function (btn) {
-      btn.addEventListener('click', toggleLang);
+    document.querySelectorAll('[data-action="select-lang"]').forEach(function (sel) {
+      sel.addEventListener('change', function () {
+        selectLang(sel.value);
+      });
     });
     document.querySelectorAll('[data-action="toggle-theme"]').forEach(function (btn) {
       btn.addEventListener('click', toggleTheme);
@@ -3819,10 +4212,21 @@
       }
     });
 
+    document.addEventListener('fp-settings-changed', async function () {
+      if (!state.token) return;
+      try {
+        var st = await api('/_api/v1/status', { skipAuthRedirect: true });
+        state.status = st;
+        applyDocumentTitle();
+      } catch (_) {}
+    });
+
     document.addEventListener('click', function (ev) {
       var link = ev.target && ev.target.closest ? ev.target.closest('a[href^="#/"]') : null;
       if (!link || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey || ev.button !== 0) return;
       ev.preventDefault();
+      var tab = link.getAttribute('data-runtime-tab');
+      if (tab) state.pendingRuntimeTab = tab;
       navigate(link.getAttribute('href'));
     });
 
@@ -3853,6 +4257,14 @@
       ev.preventDefault();
       connectWithToken($('token-input').value, false);
     });
+
+    if (I18n.ready) {
+      var loadedLocale = await I18n.ready();
+      if (loadedLocale && loadedLocale !== I18n.getLocale()) {
+        I18n.setLocale(loadedLocale);
+      }
+    }
+    applyStaticI18n();
 
     var savedToken = readStoredToken();
     if (savedToken) {

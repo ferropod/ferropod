@@ -137,6 +137,18 @@ perfSheet.replaceSync(`
     height: 28px;
     display: block;
   }
+  .telemetry-strip {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 10px 16px;
+    border-top: 1px solid var(--border);
+    background: var(--surface-subtle);
+    font-size: 12px;
+  }
+  .telemetry-pills { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 `);
 
 function esc(v) {
@@ -342,6 +354,20 @@ class FpPerfMonitor extends HTMLElement {
             </div>
           </div>
         </div>
+        <div class="telemetry-strip">
+          <div class="telemetry-pills">
+            <span class="muted">${esc(t('perf.httpTelemetry'))}:</span>
+            <span class="badge badge-success mono">2xx ${esc(m.http_requests_2xx || 0)}</span>
+            <span class="badge badge-neutral mono">3xx ${esc(m.http_requests_3xx || 0)}</span>
+            <span class="badge badge-warn mono">4xx ${esc(m.http_requests_4xx || 0)}</span>
+            <span class="badge ${(m.http_requests_5xx || 0) > 0 ? 'badge-warn' : 'badge-neutral'} mono">5xx ${esc(m.http_requests_5xx || 0)}</span>
+            <span class="badge badge-neutral mono">avg ${esc(m.http_avg_latency_ms || 0)} ms</span>
+            <span class="badge badge-neutral mono">inflight ${esc(m.active_http_requests || 0)}</span>
+            <span class="badge badge-neutral mono">${esc(t('perf.rateLimited'))} ${esc(m.rate_limited_total || 0)}</span>
+            <span class="badge badge-neutral mono">${esc(t('perf.workerErrors'))} ${esc(m.worker_errors_total || 0)} / OOM ${esc(m.worker_oom_total || 0)}</span>
+          </div>
+          <button type="button" class="btn mono" id="perf-copy-prom">/metrics/prometheus</button>
+        </div>
       `;
     }
 
@@ -371,6 +397,21 @@ class FpPerfMonitor extends HTMLElement {
     const refreshBtn = this.shadowRoot.getElementById('perf-refresh-btn');
     if (refreshBtn) {
       refreshBtn.addEventListener('click', () => this.refresh());
+    }
+    const copyPromBtn = this.shadowRoot.getElementById('perf-copy-prom');
+    if (copyPromBtn) {
+      copyPromBtn.addEventListener('click', () => {
+        const url = window.location.origin + '/_api/v1/metrics/prometheus';
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(url).then(() => {
+            this.dispatchEvent(new CustomEvent('fp-toast', {
+              detail: { message: getI18n().t('common.copied'), kind: 'success' },
+              bubbles: true,
+              composed: true
+            }));
+          }).catch(() => {});
+        }
+      });
     }
   }
 }

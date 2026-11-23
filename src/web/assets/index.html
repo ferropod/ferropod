@@ -25,7 +25,10 @@
           </div>
         </div>
         <div class="row gap-xs">
-          <button type="button" class="btn btn-ghost btn-sm" id="login-lang-btn" data-action="toggle-lang">EN</button>
+          <div class="lang-select-wrap">
+            <svg class="lang-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+            <select class="lang-select" id="login-lang-select" data-action="select-lang" aria-label="Language"></select>
+          </div>
           <button type="button" class="btn btn-ghost btn-sm" id="login-theme-btn" data-action="toggle-theme" aria-label="Theme"></button>
         </div>
       </div>
@@ -85,10 +88,6 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
           <span data-i18n="nav.runtime">Apps</span>
         </a>
-        <a href="#/routes" class="nav-item" data-nav="routes">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="2"/><circle cx="19" cy="5" r="2"/><circle cx="19" cy="19" r="2"/><path d="M7 12h5m0 0V5h5m-5 7v7h5"/></svg>
-          <span data-i18n="nav.routes">Routes</span>
-        </a>
         <a href="#/kv" class="nav-item" data-nav="kv">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/><circle cx="19" cy="18" r="2"/></svg>
           <span data-i18n="nav.kv">KV Store</span>
@@ -109,6 +108,10 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.35-4.35"/></svg>
           <span data-i18n="nav.search">Search</span>
         </a>
+        <a href="#/ai" class="nav-item" data-nav="ai" id="nav-ai">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.8 4.2L18 9l-4.2 1.8L12 15l-1.8-4.2L6 9l4.2-1.8L12 3z"/><path d="M19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9L19 15z"/></svg>
+          <span data-i18n="nav.ai">AI Gateway</span>
+        </a>
 
         <div class="nav-group-label" data-i18n="nav.groupSystem">Access &amp; Telemetry</div>
         <a href="#/tokens" class="nav-item" data-nav="tokens" id="nav-tokens">
@@ -126,6 +129,10 @@
         <a href="#/updates" class="nav-item" data-nav="updates">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
           <span data-i18n="nav.updates">Updates</span>
+        </a>
+        <a href="#/settings" class="nav-item" data-nav="settings" id="nav-settings">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.6.77 1 1.42 1.09H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <span data-i18n="nav.settings">Settings</span>
         </a>
       </nav>
 
@@ -169,7 +176,10 @@
             <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
             <span class="hide-xs" data-i18n="common.refresh">Refresh</span>
           </button>
-          <button type="button" class="btn btn-ghost btn-sm" id="topbar-lang-btn" data-action="toggle-lang">EN</button>
+          <div class="lang-select-wrap">
+            <svg class="lang-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+            <select class="lang-select" id="topbar-lang-select" data-action="select-lang" aria-label="Language"></select>
+          </div>
           <button type="button" class="btn btn-ghost btn-icon" id="topbar-theme-btn" data-action="toggle-theme" aria-label="Theme"></button>
         </div>
       </header>

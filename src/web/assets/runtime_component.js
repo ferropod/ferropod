@@ -26,6 +26,10 @@ runtimeSheet.replaceSync(`
   .id-sub { word-break: break-all; overflow-wrap: anywhere; }
   .route-badges { display: flex; flex-wrap: wrap; gap: 4px; }
   .route-badge { white-space: normal; word-break: break-all; overflow-wrap: anywhere; max-width: 100%; }
+  .route-badge-btn { border: 1px solid transparent; cursor: pointer; font-family: var(--font-mono); }
+  .route-badge-btn:hover { border-color: var(--info); }
+  .workloads-head-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+  .workloads-head-tools input[type="search"] { min-width: 220px; max-width: 300px; width: auto; }
   .cell-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 
   .row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
@@ -163,7 +167,7 @@ runtimeSheet.replaceSync(`
   }
   .empty-state { padding: 28px 16px; text-align: center; color: var(--muted); font-size: 13px; }
 
-  input[type="text"], select, textarea {
+  input[type="text"], input[type="search"], select, textarea {
     width: 100%;
     padding: 8px 11px;
     border-radius: var(--radius-sm);
@@ -255,7 +259,9 @@ runtimeSheet.replaceSync(`
     .stat-card { padding: 12px; }
     .stat-value { font-size: 15px; word-break: break-word; }
     .panel-header, .panel-body { padding: 12px 14px; }
-    input[type="text"], select, textarea { font-size: 16px; min-height: 42px; }
+    input[type="text"], input[type="search"], select, textarea { font-size: 16px; min-height: 42px; }
+    .workloads-head-tools { width: 100%; }
+    .workloads-head-tools input[type="search"] { width: 100%; min-width: 0; max-width: none; }
     .btn { min-height: 38px; }
     .btn-sm { min-height: 36px; }
     .invoke-bar { flex-direction: column; align-items: stretch; }
@@ -399,6 +405,7 @@ class FpRuntimePanel extends HTMLElement {
     this._routes = [];
     this._token = '';
     this._canWrite = true;
+    this._search = '';
     this._invoke = {
       projectId: '',
       method: 'GET',
@@ -495,19 +502,32 @@ class FpRuntimePanel extends HTMLElement {
     }
   }
 
-  render() {
-    const { t } = getI18n();
-    const profile = (this._status && this._status.profile) || 'Standard';
-    const isLowMem = String(profile).toLowerCase() === 'lowmem';
-    const memLimit = isLowMem ? '32 MiB / instance' : '128 MiB / instance';
-    const maxConc = isLowMem ? '16 concurrent' : '64 concurrent';
-
-    const runtimes = [...this._projects].sort((a, b) =>
+  _getFilteredProjects() {
+    const sorted = [...this._projects].sort((a, b) =>
       (a.group || '').localeCompare(b.group || '') || a.name.localeCompare(b.name)
     );
-    const hasGroups = runtimes.some((runtime) => runtime.group);
+    const q = this._search.trim().toLowerCase();
+    if (!q) return sorted;
+    return sorted.filter((p) => {
+      if (
+        p.name.toLowerCase().includes(q) ||
+        p.id.toLowerCase().includes(q) ||
+        (p.group && p.group.toLowerCase().includes(q))
+      ) {
+        return true;
+      }
+      return this._routes.some((r) => r.project_id === p.id && r.host.toLowerCase().includes(q));
+    });
+  }
+
+  _renderWorkloadsContentHtml(filtered) {
+    const { t } = getI18n();
+    if (!filtered.length) {
+      return `<div class="empty-state">${esc(this._projects.length ? t('runtime.noMatch') : t('runtime.noWorkloads'))}</div>`;
+    }
+    const hasGroups = filtered.some((runtime) => runtime.group);
     let lastGroup;
-    const workloadRows = runtimes.map((p) => {
+    const workloadRows = filtered.map((p) => {
       const pRoutes = this._routes.filter((r) => r.project_id === p.id);
       const hasActive = Boolean(p.active_deployment_id);
       const group = p.group || '';
@@ -529,7 +549,7 @@ class FpRuntimePanel extends HTMLElement {
           <td data-label="${esc(t('projects.activeDeployment'))}" class="mono text-xs break-all">${esc(p.active_deployment_id || '-')}</td>
           <td data-label="${esc(t('nav.routes'))}">
             ${pRoutes.length
-              ? `<div class="route-badges">${pRoutes.map((r) => `<span class="badge badge-info mono route-badge">${esc(r.host)}</span>`).join('')}</div>`
+              ? `<div class="route-badges">${pRoutes.map((r) => `<button type="button" class="badge badge-info mono route-badge route-badge-btn" data-go-hash="#/runtime/${encodeURIComponent(p.id)}" data-open-tab="routes">${esc(r.host)}</button>`).join('')}</div>`
               : `<span class="muted text-xs">-</span>`}
           </td>
           <td data-label="${esc(t('projects.maxConcurrency'))}" class="mono text-xs">${esc(p.max_concurrency)}</td>
@@ -542,6 +562,33 @@ class FpRuntimePanel extends HTMLElement {
         </tr>
       `;
     }).join('');
+
+    return `
+      <div class="table-wrap">
+        <table class="data-table stack-mobile">
+          <thead>
+            <tr>
+              <th>${esc(t('runtime.runtimeName'))}</th>
+              <th>${esc(t('common.status'))}</th>
+              <th>${esc(t('projects.activeDeployment'))}</th>
+              <th>${esc(t('nav.routes'))}</th>
+              <th>${esc(t('projects.maxConcurrency'))}</th>
+              <th>${esc(t('common.actions'))}</th>
+            </tr>
+          </thead>
+          <tbody>${workloadRows}</tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  render() {
+    const { t } = getI18n();
+    const profile = (this._status && this._status.profile) || 'Standard';
+    const isLowMem = String(profile).toLowerCase() === 'lowmem';
+    const memLimit = isLowMem ? '32 MiB / instance' : '128 MiB / instance';
+    const maxConc = isLowMem ? '16 concurrent' : '64 concurrent';
+    const filtered = this._getFilteredProjects();
 
     this.shadowRoot.innerHTML = `
       <div class="page-head">
@@ -589,26 +636,13 @@ class FpRuntimePanel extends HTMLElement {
 
         <div class="panel">
           <div class="panel-header">
-            <h3 class="panel-title">${esc(t('runtime.workloads'))} (${this._projects.length})</h3>
-            <span class="text-xs muted">${esc(t('runtime.workloadsHint'))}</span>
-          </div>
-          ${workloadRows ? `
-            <div class="table-wrap">
-              <table class="data-table stack-mobile">
-                <thead>
-                  <tr>
-                    <th>${esc(t('runtime.runtimeName'))}</th>
-                    <th>${esc(t('common.status'))}</th>
-                    <th>${esc(t('projects.activeDeployment'))}</th>
-                    <th>${esc(t('nav.routes'))}</th>
-                    <th>${esc(t('projects.maxConcurrency'))}</th>
-                    <th>${esc(t('common.actions'))}</th>
-                  </tr>
-                </thead>
-                <tbody>${workloadRows}</tbody>
-              </table>
+            <h3 class="panel-title">${esc(t('runtime.workloads'))} <span id="workloads-count">(${filtered.length})</span></h3>
+            <div class="workloads-head-tools">
+              <span class="text-xs muted">${esc(t('runtime.workloadsHint'))}</span>
+              <input type="search" id="runtime-search-input" value="${esc(this._search)}" placeholder="${esc(t('runtime.searchPlaceholder'))}">
             </div>
-          ` : `<div class="empty-state">${esc(t('runtime.noWorkloads'))}</div>`}
+          </div>
+          <div id="workloads-content">${this._renderWorkloadsContentHtml(filtered)}</div>
         </div>
 
         <div class="panel">
@@ -657,26 +691,47 @@ class FpRuntimePanel extends HTMLElement {
     this._bindEvents();
   }
 
-  _bindEvents() {
-    const sr = this.shadowRoot;
-    sr.querySelectorAll('[data-go-hash]').forEach((btn) => {
+  _bindWorkloadsEvents() {
+    const content = this.shadowRoot.getElementById('workloads-content');
+    if (!content) return;
+    content.querySelectorAll('[data-go-hash]').forEach((btn) => {
       btn.addEventListener('click', () => {
         const hash = btn.getAttribute('data-go-hash');
-        const openBindings = btn.getAttribute('data-open-bindings') === '1';
+        const openTab = btn.getAttribute('data-open-tab') || (btn.getAttribute('data-open-bindings') === '1' ? 'bindings' : undefined);
         this.dispatchEvent(new CustomEvent('fp-navigate', {
-          detail: { hash, projectTab: openBindings ? 'bindings' : undefined },
+          detail: { hash, projectTab: openTab },
           bubbles: true,
           composed: true
         }));
       });
     });
 
-    sr.querySelectorAll('[data-pick-invoke]').forEach((btn) => {
+    content.querySelectorAll('[data-pick-invoke]').forEach((btn) => {
       btn.addEventListener('click', () => {
         this._invoke.projectId = btn.getAttribute('data-pick-invoke');
         this.render();
       });
     });
+  }
+
+  _bindEvents() {
+    const sr = this.shadowRoot;
+    this._bindWorkloadsEvents();
+
+    const searchInput = sr.getElementById('runtime-search-input');
+    if (searchInput) {
+      searchInput.addEventListener('input', () => {
+        this._search = searchInput.value;
+        const filtered = this._getFilteredProjects();
+        const contentEl = sr.getElementById('workloads-content');
+        const countEl = sr.getElementById('workloads-count');
+        if (countEl) countEl.textContent = `(${filtered.length})`;
+        if (contentEl) {
+          contentEl.innerHTML = this._renderWorkloadsContentHtml(filtered);
+          this._bindWorkloadsEvents();
+        }
+      });
+    }
 
     const form = sr.getElementById('invoke-form');
     const methodSel = sr.getElementById('inv-method');
