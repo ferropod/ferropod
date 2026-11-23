@@ -59,26 +59,26 @@ pub fn openapi_document() -> Value {
                     "responses": { "200": { "description": "Prometheus text format" } }
                 }
             },
-            "/_api/v1/projects": {
+            "/_api/v1/apps": {
                 "get": { "summary": "List apps", "responses": { "200": { "description": "App list" } } },
                 "post": { "summary": "Create app", "responses": { "201": { "description": "Created app" } } }
             },
-            "/_api/v1/projects/{id}": {
+            "/_api/v1/apps/{id}": {
                 "get": { "summary": "Get app details", "responses": { "200": { "description": "App metadata" } } },
                 "patch": { "summary": "Update app settings", "responses": { "200": { "description": "Updated app" } } },
                 "delete": { "summary": "Delete app", "responses": { "204": { "description": "Deleted" } } }
             },
-            "/_api/v1/projects/{id}/deployments": {
+            "/_api/v1/apps/{id}/deployments": {
                 "get": { "summary": "List app deployments", "responses": { "200": { "description": "Deployment history" } } },
                 "post": { "summary": "Create immutable deployment", "responses": { "201": { "description": "Deployment created" } } }
             },
-            "/_api/v1/projects/{id}/promote": {
+            "/_api/v1/apps/{id}/promote": {
                 "post": { "summary": "Promote preview or deployment to production", "responses": { "200": { "description": "Active deployment updated" } } }
             },
-            "/_api/v1/projects/{id}/rollback": {
+            "/_api/v1/apps/{id}/rollback": {
                 "post": { "summary": "Rollback production deployment", "responses": { "200": { "description": "Rolled back" } } }
             },
-            "/_api/v1/projects/{id}/invoke": {
+            "/_api/v1/apps/{id}/invoke": {
                 "post": { "summary": "Invoke worker or static route directly", "responses": { "200": { "description": "Worker response" } } }
             },
             "/_api/v1/routes": {
@@ -263,7 +263,7 @@ Generate an admin token on the server:
 ## Core Workflows
 - Health & Status: GET /_healthz (public), GET /_api/v1/status, GET /_api/v1/metrics/prometheus
 - Platform Settings: GET/PATCH /_api/v1/settings, POST /_api/v1/settings/reset, POST /_api/v1/settings/dns-check, POST /_api/v1/settings/alerts/test
-- Apps & Deployments: POST /_api/v1/projects -> PUT /_api/v1/projects/{id}/artifacts/{file} -> POST /_api/v1/projects/{id}/deployments -> POST /_api/v1/routes
+- Apps & Deployments: POST /_api/v1/apps -> PUT /_api/v1/apps/{id}/artifacts/{file} -> POST /_api/v1/apps/{id}/deployments -> POST /_api/v1/routes (`/_api/v1/projects` and `/_api/v1/runtimes` are supported as aliases)
 - Declarative CLI:
     ferropod init --template static --name my-app
     ferropod deploy --url http://127.0.0.1:8080 --token $FERROPOD_TOKEN --env prod

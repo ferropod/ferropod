@@ -11,7 +11,7 @@
 
   var ROUTES = [
     'overview',
-    'runtime',
+    'apps',
     'kv',
     'queues',
     'blobs',
@@ -439,24 +439,25 @@
     var raw = (window.location.hash || '#/overview').replace(/^#\/?/, '');
     var parts = raw.split('/').filter(Boolean);
     var route = parts[0] || 'overview';
-    if (route === 'projects') {
-      history.replaceState(null, '', '#/runtime' + (parts[1] ? '/' + parts[1] : ''));
-      route = 'runtime';
+    if (route === 'projects' || route === 'runtime') {
+      var suffix = parts[1] ? '/' + parts[1] + (parts[2] ? '/' + parts[2] : '') : '';
+      history.replaceState(null, '', '#/apps' + suffix);
+      route = 'apps';
     } else if (route === 'routes') {
-      history.replaceState(null, '', '#/runtime');
-      route = 'runtime';
-      parts = ['runtime'];
+      history.replaceState(null, '', '#/apps');
+      route = 'apps';
+      parts = ['apps'];
     }
     if (ROUTES.indexOf(route) === -1) route = 'overview';
     if (route === 'tokens' && !isAdmin()) route = 'overview';
     if (route === 'settings' && !isAdmin() && !isReadonly()) route = 'overview';
     state.currentRoute = route;
-    var runtimeId = route === 'runtime' && parts[1] ? decodeURIComponent(parts[1]) : null;
+    var runtimeId = route === 'apps' && parts[1] ? decodeURIComponent(parts[1]) : null;
     if (runtimeId !== state.projectId) {
       state.projectTab = 'deployments';
       state.envDeploymentId = null;
     }
-    var hashTab = route === 'runtime' && parts[2] ? decodeURIComponent(parts[2]) : null;
+    var hashTab = route === 'apps' && parts[2] ? decodeURIComponent(parts[2]) : null;
     if (['deployments', 'bindings', 'secrets', 'routes'].indexOf(hashTab) !== -1) {
       state.projectTab = hashTab;
     }
@@ -627,7 +628,7 @@
   function renderCurrentRoute(fetchData) {
     updateNavActive();
     if (state.currentRoute === 'overview') return renderOverview(fetchData);
-    if (state.currentRoute === 'runtime') {
+    if (state.currentRoute === 'apps') {
       return state.projectId ? renderProjectDetail(state.projectId, fetchData) : renderRuntime();
     }
     if (state.currentRoute === 'kv') return renderKv(fetchData);
@@ -733,7 +734,7 @@
         var results = await Promise.all([
           api('/_api/v1/status'),
           api('/_healthz'),
-          api('/_api/v1/runtimes'),
+          api('/_api/v1/apps'),
           api('/_api/v1/routes')
         ]);
         if (!isCurrent()) return;
@@ -756,14 +757,14 @@
 
     var projRows = state.projects.slice(0, 5).map(function (p) {
       return '<tr>' +
-        '<td data-label="' + esc(t('common.name')) + '"><a href="#/runtime/' + enc(p.id) + '" class="text-strong">' + esc(p.name) + '</a></td>' +
+        '<td data-label="' + esc(t('common.name')) + '"><a href="#/apps/' + enc(p.id) + '" class="text-strong">' + esc(p.name) + '</a></td>' +
         '<td data-label="' + esc(t('projects.activeDeployment')) + '" class="mono text-xs">' + esc(p.active_deployment_id || '-') + '</td>' +
         '<td data-label="' + esc(t('projects.previewDeployment')) + '" class="mono text-xs">' + esc(p.preview_deployment_id || '-') + '</td>' +
         '</tr>';
     }).join('');
 
     var routeRows = state.routes.slice(0, 5).map(function (r) {
-      var appHref = '#/runtime/' + enc(r.project_id);
+      var appHref = '#/apps/' + enc(r.project_id);
       return '<tr>' +
         '<td data-label="' + esc(t('routes.host')) + '" class="mono text-xs"><a href="' + appHref + '" data-runtime-tab="routes" class="text-strong">' + esc(r.host) + '</a></td>' +
         '<td data-label="' + esc(t('routes.project')) + '"><a href="' + appHref + '" data-runtime-tab="routes">' + esc(projectNameById(r.project_id)) + '</a></td>' +
@@ -785,14 +786,14 @@
       '<div><div class="muted text-xs">' + esc(t('overview.scope')) + '</div><div><span class="badge badge-accent">' + esc(st.scope || '-') + '</span></div></div>' +
       '</div>' +
       '<div class="row">' +
-      '<a href="#/runtime" class="btn btn-sm">' + esc(t('nav.runtime')) + '</a>' +
+      '<a href="#/apps" class="btn btn-sm">' + esc(t('nav.apps')) + '</a>' +
       '<a href="#/logs" class="btn btn-sm">' + esc(t('nav.logs')) + '</a>' +
       '<a href="#/updates" class="btn btn-sm">' + esc(t('nav.updates')) + '</a>' +
       '</div></div></div>' +
 
       '<div class="stats-grid">' +
-      statCard(t('overview.projects'), st.projects, '#/runtime') +
-      statCard(t('overview.routes'), st.routes, '#/runtime') +
+      statCard(t('overview.projects'), st.projects, '#/apps') +
+      statCard(t('overview.routes'), st.routes, '#/apps') +
       statCard(t('overview.kvNamespaces'), st.kv_namespaces, '#/kv') +
       statCard(t('overview.queues'), st.queues, '#/queues') +
       statCard(t('overview.buckets'), st.buckets, '#/blobs') +
@@ -819,12 +820,12 @@
       '</div></div>' +
 
       '<div class="grid-2">' +
-      '<div class="panel"><div class="panel-header"><h3 class="panel-title">' + esc(t('overview.recentProjects')) + '</h3><a href="#/runtime" class="btn btn-ghost btn-sm">' + esc(t('common.view')) + '</a></div>' +
+      '<div class="panel"><div class="panel-header"><h3 class="panel-title">' + esc(t('overview.recentProjects')) + '</h3><a href="#/apps" class="btn btn-ghost btn-sm">' + esc(t('common.view')) + '</a></div>' +
       (projRows
         ? '<div class="table-wrap"><table class="data-table stack-mobile"><thead><tr><th>' + esc(t('common.name')) + '</th><th>' + esc(t('projects.activeDeployment')) + '</th><th>' + esc(t('projects.previewDeployment')) + '</th></tr></thead><tbody>' + projRows + '</tbody></table></div>'
         : '<div class="empty-state">' + esc(t('common.empty')) + '</div>') +
       '</div>' +
-      '<div class="panel"><div class="panel-header"><h3 class="panel-title">' + esc(t('overview.recentRoutes')) + '</h3><a href="#/runtime" class="btn btn-ghost btn-sm">' + esc(t('common.view')) + '</a></div>' +
+      '<div class="panel"><div class="panel-header"><h3 class="panel-title">' + esc(t('overview.recentRoutes')) + '</h3><a href="#/apps" class="btn btn-ghost btn-sm">' + esc(t('common.view')) + '</a></div>' +
       (routeRows
         ? '<div class="table-wrap"><table class="data-table stack-mobile"><thead><tr><th>' + esc(t('routes.host')) + '</th><th>' + esc(t('routes.project')) + '</th><th>' + esc(t('routes.targetEnv')) + '</th></tr></thead><tbody>' + routeRows + '</tbody></table></div>'
         : '<div class="empty-state">' + esc(t('common.empty')) + '</div>') +
@@ -894,7 +895,7 @@
           var timeoutRaw = $('cp-timeout').value.trim();
           var memRaw = $('cp-mem').value.trim();
           try {
-            var created = await api('/_api/v1/runtimes', {
+            var created = await api('/_api/v1/apps', {
               method: 'POST',
               json: {
                 name: name,
@@ -909,7 +910,7 @@
             });
             closeModal();
             toast(t('runtime.created'), 'success');
-            navigate('#/runtime/' + enc(created.id));
+            navigate('#/apps/' + enc(created.id));
           } catch (e) {
             toast(e.message, 'error');
           }
@@ -949,7 +950,7 @@
           var timeoutRaw = $('ep-timeout').value.trim();
           var memRaw = $('ep-mem').value.trim();
           try {
-            await api('/_api/v1/runtimes/' + enc(project.id), {
+            await api('/_api/v1/apps/' + enc(project.id), {
               method: 'PATCH',
               json: {
                 group: $('resource-group').value.trim(),
@@ -972,27 +973,27 @@
 
   async function renderProjectDetail(id, fetchData) {
     var root = $('view-root');
-    var isCurrentDetail = beginViewRender('runtime', function () {
+    var isCurrentDetail = beginViewRender('apps', function () {
       return state.projectId === id;
     });
     if (fetchData) {
       root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
       try {
         var reqs = [
-          api('/_api/v1/runtimes/' + enc(id)),
-          api('/_api/v1/runtimes/' + enc(id) + '/deployments'),
+          api('/_api/v1/apps/' + enc(id)),
+          api('/_api/v1/apps/' + enc(id) + '/deployments'),
           api('/_api/v1/routes'),
           api('/_api/v1/buckets'),
           state.projects.length
             ? Promise.resolve(state.projects)
-            : api('/_api/v1/runtimes').catch(function () { return []; })
+            : api('/_api/v1/apps').catch(function () { return []; })
         ];
         var res = await Promise.all(reqs);
         if (!isCurrentDetail()) return;
         var secrets = [];
         if (canWriteProject(res[0].id)) {
           try {
-            secrets = (await api('/_api/v1/runtimes/' + enc(id) + '/secrets')) || [];
+            secrets = (await api('/_api/v1/apps/' + enc(id) + '/secrets')) || [];
           } catch (_) {}
         }
         if (!isCurrentDetail()) return;
@@ -1018,7 +1019,7 @@
 
     var headerHtml =
       '<div class="page-head">' +
-      '<div><div class="row gap-xs" style="margin-bottom:6px;"><a href="#/runtime" class="btn btn-sm">' + esc(t('common.back')) + '</a></div>' +
+      '<div><div class="row gap-xs" style="margin-bottom:6px;"><a href="#/apps" class="btn btn-sm">' + esc(t('common.back')) + '</a></div>' +
       '<h2 class="page-title">' + esc(p.name) + '</h2>' +
       '<p class="page-subtitle mono">' + esc(p.id) + (p.group ? ' · ' + esc(p.group) : '') + ' · ' + esc(t('projects.healthCheckPath')) + ': ' + esc(p.health_check_path) + (p.description ? ' · ' + esc(p.description) : '') + '</p></div>' +
       (writable
@@ -1174,9 +1175,9 @@
       $('pd-delete-runtime').addEventListener('click', function () {
         confirmAction(t('projects.deleteConfirm', { name: p.name }), async function () {
           try {
-            await api('/_api/v1/runtimes/' + enc(p.id), { method: 'DELETE' });
+            await api('/_api/v1/apps/' + enc(p.id), { method: 'DELETE' });
             toast(t('projects.deleted'), 'success');
-            navigate('#/runtime');
+            navigate('#/apps');
           } catch (e) { toast(e.message, 'error'); }
         });
       });
@@ -1185,7 +1186,7 @@
       $('pd-promote-preview').addEventListener('click', async function () {
         try {
           var verifyHealth = Boolean($('pd-verify-health') && $('pd-verify-health').checked);
-          var dep = await api('/_api/v1/runtimes/' + enc(p.id) + '/promote', {
+          var dep = await api('/_api/v1/apps/' + enc(p.id) + '/promote', {
             method: 'POST',
             json: { verify_health: verifyHealth }
           });
@@ -1197,7 +1198,7 @@
     if ($('pd-rollback')) {
       $('pd-rollback').addEventListener('click', async function () {
         try {
-          var dep = await api('/_api/v1/runtimes/' + enc(p.id) + '/rollback', { method: 'POST', json: {} });
+          var dep = await api('/_api/v1/apps/' + enc(p.id) + '/rollback', { method: 'POST', json: {} });
           toast(t('projectDetail.rollbackDone', { id: dep.id }), 'success');
           renderProjectDetail(p.id, true);
         } catch (e) { toast(e.message, 'error'); }
@@ -1209,7 +1210,7 @@
         var depId = btn.getAttribute('data-promote-dep');
         try {
           var verifyHealth = Boolean($('pd-verify-health') && $('pd-verify-health').checked);
-          var dep = await api('/_api/v1/runtimes/' + enc(p.id) + '/promote', {
+          var dep = await api('/_api/v1/apps/' + enc(p.id) + '/promote', {
             method: 'POST',
             json: { deployment_id: depId, verify_health: verifyHealth }
           });
@@ -1222,7 +1223,7 @@
       btn.addEventListener('click', async function () {
         var depId = btn.getAttribute('data-rollback-dep');
         try {
-          var dep = await api('/_api/v1/runtimes/' + enc(p.id) + '/rollback', {
+          var dep = await api('/_api/v1/apps/' + enc(p.id) + '/rollback', {
             method: 'POST',
             json: { deployment_id: depId }
           });
@@ -1255,7 +1256,7 @@
         var submit = $('env-save');
         submit.disabled = true;
         try {
-          var saved = await api('/_api/v1/runtimes/' + enc(p.id) + '/deployments/' +
+          var saved = await api('/_api/v1/apps/' + enc(p.id) + '/deployments/' +
             enc($('env-deployment').value) + '/env', { method: 'POST', json: { env: env } });
           state.envDeploymentId = saved.id;
           toast(t('projectDetail.envSaved'), 'success');
@@ -1271,7 +1272,7 @@
         var key = $('sec-key').value.trim();
         var value = $('sec-val').value;
         try {
-          await api('/_api/v1/runtimes/' + enc(p.id) + '/secrets', {
+          await api('/_api/v1/apps/' + enc(p.id) + '/secrets', {
             method: 'POST',
             json: { key: key, value: value }
           });
@@ -1293,7 +1294,7 @@
         var key = btn.getAttribute('data-del-secret');
         confirmAction(t('projectDetail.secretDeleteConfirm', { key: key }), async function () {
           try {
-            await api('/_api/v1/runtimes/' + enc(p.id) + '/secrets/' + enc(key), { method: 'DELETE' });
+            await api('/_api/v1/apps/' + enc(p.id) + '/secrets/' + enc(key), { method: 'DELETE' });
             toast(t('projectDetail.secretDeleted'), 'success');
             renderProjectDetail(p.id, true);
           } catch (e) { toast(e.message, 'error'); }
@@ -1430,14 +1431,14 @@
               var nonce = new Uint8Array(16);
               crypto.getRandomValues(nonce);
               var filename = 'upload-' + Array.from(nonce, function (byte) { return byte.toString(16).padStart(2, '0'); }).join('') + '.wasm';
-              var uploaded = await api('/_api/v1/runtimes/' + enc(project.id) + '/artifacts/' + filename, {
+              var uploaded = await api('/_api/v1/apps/' + enc(project.id) + '/artifacts/' + filename, {
                 method: 'PUT', body: file, headers: { 'Content-Type': 'application/octet-stream' }
               });
               artifact = uploaded.artifact_path;
               $('dep-file').value = '';
               $('dep-artifact').value = artifact;
             }
-            await api('/_api/v1/runtimes/' + enc(project.id) + '/deployments', {
+            await api('/_api/v1/apps/' + enc(project.id) + '/deployments', {
               method: 'POST',
               json: {
                 artifact_path: artifact,
@@ -1753,7 +1754,7 @@
     if (fetchData) {
       root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
       try {
-        var res = await Promise.all([api('/_api/v1/kv'), api('/_api/v1/runtimes')]);
+        var res = await Promise.all([api('/_api/v1/kv'), api('/_api/v1/apps')]);
         if (!isCurrent()) return;
         state.kvNamespaces = res[0] || [];
         state.projects = res[1] || [];
@@ -2161,7 +2162,7 @@
     if (fetchData) {
       root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
       try {
-        var res = await Promise.all([api('/_api/v1/queues'), api('/_api/v1/runtimes')]);
+        var res = await Promise.all([api('/_api/v1/queues'), api('/_api/v1/apps')]);
         if (!isCurrent()) return;
         state.queues = res[0] || [];
         state.projects = res[1] || [];
@@ -2548,7 +2549,7 @@
     if (fetchData) {
       root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
       try {
-        var res = await Promise.all([api('/_api/v1/buckets'), api('/_api/v1/runtimes')]);
+        var res = await Promise.all([api('/_api/v1/buckets'), api('/_api/v1/apps')]);
         if (!isCurrent()) return;
         state.buckets = res[0] || [];
         state.projects = res[1] || [];
@@ -2938,7 +2939,7 @@
     if (fetchData) {
       root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
       try {
-        var res = await Promise.all([api('/_api/v1/dbs'), api('/_api/v1/runtimes')]);
+        var res = await Promise.all([api('/_api/v1/dbs'), api('/_api/v1/apps')]);
         if (!isCurrent()) return;
         state.dbs = res[0] || [];
         state.projects = res[1] || [];
@@ -3407,7 +3408,7 @@
     if (state.currentRoute !== 'search') return;
     var isCurrentSearch = beginViewRender('search');
     try {
-      var data = await Promise.all([api('/_api/v1/search'), api('/_api/v1/runtimes')]);
+      var data = await Promise.all([api('/_api/v1/search'), api('/_api/v1/apps')]);
       if (!isCurrentSearch()) return;
       searchState.indexes = data[0] || [];
       state.projects = data[1] || [];
@@ -3647,12 +3648,12 @@
 
   async function renderRuntime() {
     var root = $('view-root');
-    var isCurrent = beginViewRender('runtime');
+    var isCurrent = beginViewRender('apps');
     root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
     try {
       await ensureRuntimeComponent();
       if (!isCurrent()) return;
-      var res = await Promise.all([api('/_api/v1/runtimes'), api('/_api/v1/routes')]);
+      var res = await Promise.all([api('/_api/v1/apps'), api('/_api/v1/routes')]);
       if (!isCurrent()) return;
       state.projects = res[0] || [];
       state.routes = res[1] || [];
@@ -3681,7 +3682,7 @@
       if (!isCurrent()) return;
       if (fetchData && !state.projects.length) {
         try {
-          var projs = (await api('/_api/v1/runtimes')) || [];
+          var projs = (await api('/_api/v1/apps')) || [];
           if (!isCurrent()) return;
           state.projects = projs;
         } catch (_) {}
@@ -3764,7 +3765,7 @@
     if (fetchData) {
       root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
       try {
-        var res = await Promise.all([api('/_api/v1/tokens'), api('/_api/v1/runtimes')]);
+        var res = await Promise.all([api('/_api/v1/tokens'), api('/_api/v1/apps')]);
         if (!isCurrent()) return;
         state.tokens = res[0] || [];
         state.projects = res[1] || [];
@@ -4002,7 +4003,7 @@
     var isCurrent = beginViewRender('logs');
     if (fetchData && !state.projects.length) {
       try {
-        var projs = (await api('/_api/v1/runtimes')) || [];
+        var projs = (await api('/_api/v1/apps')) || [];
         if (!isCurrent()) return;
         state.projects = projs;
       } catch (_) {}

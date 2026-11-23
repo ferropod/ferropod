@@ -1,5 +1,5 @@
 // Native HTML Web Components:
-//   1. <fp-runtime-panel>    — Runtime & Workers overview, limits, workloads & invoke playground (#/runtime)
+//   1. <fp-runtime-panel>    — Apps & Workers overview, limits, workloads & invoke playground (#/apps)
 //   2. <fp-project-bindings> — Visual Resource Bindings manager (DB / KV / Queue / Bucket / Search) inside Project Detail
 
 const runtimeSheet = new CSSStyleSheet();
@@ -460,7 +460,7 @@ class FpRuntimePanel extends HTMLElement {
           body: txt
         };
       } else if (proj) {
-        const res = await fetch('/_api/v1/runtimes/' + encodeURIComponent(proj.id) + '/invoke', {
+        const res = await fetch('/_api/v1/apps/' + encodeURIComponent(proj.id) + '/invoke', {
           method: 'POST',
           headers: this._authHeaders(true),
           body: JSON.stringify({
@@ -538,7 +538,7 @@ class FpRuntimePanel extends HTMLElement {
       return `${heading}
         <tr>
           <td class="cell-primary">
-            <button type="button" class="link-pill text-strong" data-go-hash="#/runtime/${encodeURIComponent(p.id)}">${esc(p.name)}</button>
+            <button type="button" class="link-pill text-strong" data-go-hash="#/apps/${encodeURIComponent(p.id)}">${esc(p.name)}</button>
             <div class="muted mono text-xs id-sub" style="margin-top:4px;">${esc(p.id)}</div>
           </td>
           <td data-label="${esc(t('common.status'))}">
@@ -549,13 +549,13 @@ class FpRuntimePanel extends HTMLElement {
           <td data-label="${esc(t('projects.activeDeployment'))}" class="mono text-xs break-all">${esc(p.active_deployment_id || '-')}</td>
           <td data-label="${esc(t('nav.routes'))}">
             ${pRoutes.length
-              ? `<div class="route-badges">${pRoutes.map((r) => `<button type="button" class="badge badge-info mono route-badge route-badge-btn" data-go-hash="#/runtime/${encodeURIComponent(p.id)}" data-open-tab="routes">${esc(r.host)}</button>`).join('')}</div>`
+              ? `<div class="route-badges">${pRoutes.map((r) => `<button type="button" class="badge badge-info mono route-badge route-badge-btn" data-go-hash="#/apps/${encodeURIComponent(p.id)}" data-open-tab="routes">${esc(r.host)}</button>`).join('')}</div>`
               : `<span class="muted text-xs">-</span>`}
           </td>
           <td data-label="${esc(t('projects.maxConcurrency'))}" class="mono text-xs">${esc(p.max_concurrency)}</td>
           <td class="cell-actions-td">
             <div class="cell-actions">
-              <button type="button" class="btn btn-sm" data-go-hash="#/runtime/${encodeURIComponent(p.id)}" data-open-bindings="1">${esc(t('runtime.manageBindings'))}</button>
+              <button type="button" class="btn btn-sm" data-go-hash="#/apps/${encodeURIComponent(p.id)}" data-open-bindings="1">${esc(t('runtime.manageBindings'))}</button>
               <button type="button" class="btn btn-sm" data-pick-invoke="${esc(p.id)}">${esc(t('runtime.testInvoke'))}</button>
             </div>
           </td>
@@ -871,7 +871,7 @@ class FpProjectBindings extends HTMLElement {
     this._saving = true;
     this.render();
     try {
-      const res = await fetch('/_api/v1/runtimes/' + encodeURIComponent(this._project.id) + '/deployments', {
+      const res = await fetch('/_api/v1/apps/' + encodeURIComponent(this._project.id) + '/deployments', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

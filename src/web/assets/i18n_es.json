@@ -25,7 +25,7 @@
   "groups.label": "Grupo (opcional)",
   "groups.placeholder": "Elige un grupo o introduce un nombre nuevo",
   "groups.ungrouped": "Sin grupo",
-  "nav.runtime": "Aplicaciones",
+  "nav.apps": "Aplicaciones",
   "nav.kv": "Almacén KV",
   "nav.queues": "Colas",
   "nav.blobs": "Almacenamiento de objetos",

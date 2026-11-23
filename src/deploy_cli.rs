@@ -567,13 +567,13 @@ pub async fn deploy_manifest(opts: DeployOptions) -> Result<DeploySummary> {
 
     // 1. Ensure app exists
     let get_proj = client
-        .get(format!("{server}/_api/v1/projects/{}", manifest.app.name))
+        .get(format!("{server}/_api/v1/apps/{}", manifest.app.name))
         .header("Authorization", &auth_header)
         .send()
         .await?;
     let project_json = if get_proj.status() == StatusCode::NOT_FOUND {
         let resp = client
-            .post(format!("{server}/_api/v1/projects"))
+            .post(format!("{server}/_api/v1/apps"))
             .header("Authorization", &auth_header)
             .json(&serde_json::json!({
                 "name": manifest.app.name,
@@ -593,7 +593,7 @@ pub async fn deploy_manifest(opts: DeployOptions) -> Result<DeploySummary> {
             .as_str()
             .ok_or_else(|| anyhow!("missing project id in response"))?;
         let resp = client
-            .patch(format!("{server}/_api/v1/projects/{pid}"))
+            .patch(format!("{server}/_api/v1/apps/{pid}"))
             .header("Authorization", &auth_header)
             .json(&serde_json::json!({
                 "group": manifest.app.group,
@@ -971,7 +971,7 @@ pub async fn deploy_manifest(opts: DeployOptions) -> Result<DeploySummary> {
         let versioned_name = versioned_artifact_name(&local_artifact, &bytes);
         let resp = client
             .put(format!(
-                "{server}/_api/v1/projects/{project_id}/artifacts/{versioned_name}"
+                "{server}/_api/v1/apps/{project_id}/artifacts/{versioned_name}"
             ))
             .header("Authorization", &auth_header)
             .header("Content-Type", "application/octet-stream")
@@ -985,9 +985,7 @@ pub async fn deploy_manifest(opts: DeployOptions) -> Result<DeploySummary> {
     // 6. Create deployment
     let cron_names: Vec<String> = manifest.crons.iter().map(|c| c.name.clone()).collect();
     let dep_resp = client
-        .post(format!(
-            "{server}/_api/v1/projects/{project_id}/deployments"
-        ))
+        .post(format!("{server}/_api/v1/apps/{project_id}/deployments"))
         .header("Authorization", &auth_header)
         .json(&serde_json::json!({
             "artifact_path": artifact_path_out,
@@ -1013,7 +1011,7 @@ pub async fn deploy_manifest(opts: DeployOptions) -> Result<DeploySummary> {
             raw_val.clone()
         };
         let resp = client
-            .post(format!("{server}/_api/v1/projects/{project_id}/secrets"))
+            .post(format!("{server}/_api/v1/apps/{project_id}/secrets"))
             .header("Authorization", &auth_header)
             .json(&serde_json::json!({
                 "key": k,

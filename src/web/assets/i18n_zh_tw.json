@@ -25,7 +25,7 @@
   "groups.label": "群組（選填）",
   "groups.placeholder": "選擇現有群組或輸入新名稱",
   "groups.ungrouped": "未分組",
-  "nav.runtime": "應用程式",
+  "nav.apps": "應用程式",
   "nav.kv": "KV 儲存體",
   "nav.queues": "訊息佇列",
   "nav.blobs": "物件儲存體",

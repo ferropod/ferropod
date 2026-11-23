@@ -25,7 +25,7 @@
   "groups.label": "グループ（任意）",
   "groups.placeholder": "既存のグループを選択または新規入力",
   "groups.ungrouped": "未分類",
-  "nav.runtime": "アプリ",
+  "nav.apps": "アプリ",
   "nav.kv": "KV ストア",
   "nav.queues": "キュー",
   "nav.blobs": "オブジェクトストレージ",

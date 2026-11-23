@@ -368,6 +368,7 @@ pub fn router() -> Router<PlatformService> {
         .route("/crons", get(cron_list).post(cron_create))
         .route("/crons/{id}", patch(cron_update).delete(cron_delete))
         .route("/crons/{id}/run", post(cron_run))
+        .merge(runtime_routes("/apps"))
         .merge(runtime_routes("/runtimes"))
         .merge(runtime_routes("/projects"))
         .route("/routes", get(list_routes).post(upsert_route))

@@ -25,7 +25,7 @@
   "groups.label": "그룹 (선택 사항)",
   "groups.placeholder": "기존 그룹을 선택하거나 새 이름 입력",
   "groups.ungrouped": "미분류",
-  "nav.runtime": "앱",
+  "nav.apps": "앱",
   "nav.kv": "KV 스토어",
   "nav.queues": "큐",
   "nav.blobs": "오브젝트 스토리지",
