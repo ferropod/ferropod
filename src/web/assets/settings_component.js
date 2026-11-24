@@ -191,7 +191,8 @@ settingsSheet.replaceSync(`
     align-items: center;
     justify-content: center;
     gap: 6px;
-    padding: 7px 12px;
+    height: 36px;
+    padding: 0 14px;
     border-radius: var(--radius-sm);
     border: 1px solid var(--border);
     background: var(--surface);
@@ -200,6 +201,7 @@ settingsSheet.replaceSync(`
     font-weight: 500;
     cursor: pointer;
     white-space: nowrap;
+    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
   }
   .btn:hover:not(:disabled) { background: var(--surface-subtle); border-color: var(--border-strong); }
   .btn:disabled { opacity: 0.55; cursor: not-allowed; }
@@ -207,16 +209,18 @@ settingsSheet.replaceSync(`
     background: var(--accent);
     border-color: var(--accent);
     color: var(--accent-text);
+    font-weight: 600;
   }
   .btn-primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
   .btn-danger {
     color: var(--danger);
-    border-color: color-mix(in srgb, var(--danger) 35%, var(--border));
+    border-color: var(--border);
+    background: var(--surface);
   }
-  .btn-danger:hover:not(:disabled) { background: var(--danger-soft); }
+  .btn-danger:hover:not(:disabled) { background: var(--danger-soft); border-color: var(--danger); }
   .btn-ghost { border-color: transparent; background: transparent; color: var(--muted); }
   .btn-ghost:hover:not(:disabled) { background: var(--surface-subtle); color: var(--text); }
-  .btn-sm { padding: 5px 10px; font-size: 12.5px; }
+  .btn-sm { height: 30px; padding: 0 10px; font-size: 12px; }
 
   .badge {
     display: inline-flex;
@@ -330,7 +334,29 @@ settingsSheet.replaceSync(`
   @media (max-width: 639px) {
     .panel-header, .panel-body { padding: 12px 14px; }
     .info-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-    .btn { min-height: 36px; }
+    .field input[type="text"],
+    .field input[type="number"],
+    .field input[type="password"],
+    .field input[type="url"],
+    .field input[type="email"],
+    .field input:not([type]),
+    .field select,
+    .field textarea,
+    select {
+      min-height: 42px;
+      font-size: 16px;
+    }
+    .btn { min-height: 42px; height: auto; }
+    .btn-sm { min-height: 36px; height: auto; }
+    dialog {
+      margin: auto 0 0 0;
+      width: 100%;
+      max-width: 100%;
+      max-height: 92dvh;
+      border-radius: 16px 16px 0 0;
+      border-bottom: none;
+      padding-bottom: env(safe-area-inset-bottom);
+    }
   }
 `);
 
@@ -370,7 +396,6 @@ class FpPlatformSettings extends HTMLElement {
     this._aiProviders = [];
     this._aiUsage = null;
     this._loadingAi = false;
-    this._editingProvider = null;
     this._onLangChange = () => this.render();
   }
 
@@ -1041,26 +1066,8 @@ class FpPlatformSettings extends HTMLElement {
       }
     }, null, 2);
 
-    const providerRows = this._aiProviders.map((p) => `
-      <tr>
-        <td>
-          <div class="text-strong">${esc(p.name)}</div>
-          <div class="text-xs muted mono">${esc(p.base_url)}</div>
-        </td>
-        <td class="mono text-xs">${esc(p.default_model || '-')}</td>
-        <td class="text-xs">${esc(p.fallback_provider || '-')}</td>
-        <td class="text-xs mono">${p.rate_limit_rpm ? esc(p.rate_limit_rpm + ' rpm') : '-'} / ${p.monthly_token_budget ? esc(p.monthly_token_budget + ' tok') : '∞'}</td>
-        <td><span class="badge ${p.enabled ? 'badge-success' : 'badge-warn'}">${p.enabled ? esc(this.t('settings.enabled')) : esc(this.t('settings.disabled'))}</span></td>
-        <td style="text-align:right;">
-          ${admin ? `
-            <button type="button" class="btn btn-sm" data-edit-provider="${esc(p.name)}">${esc(this.t('common.edit'))}</button>
-            <button type="button" class="btn btn-sm btn-danger" data-del-provider="${esc(p.name)}">${esc(this.t('common.delete'))}</button>
-          ` : ''}
-        </td>
-      </tr>
-    `).join('');
-
     const usage = this._aiUsage;
+    const aiProxyUrl = origin + '/_ai/v1/chat/completions';
 
     return `
       <div class="panel">
@@ -1068,6 +1075,7 @@ class FpPlatformSettings extends HTMLElement {
           <h3 class="panel-title">${esc(this.t('settings.alertsTitle'))}</h3>
           <div class="row gap-xs">
             ${eff.has_alert_webhook_secret ? `<span class="badge badge-info">${esc(this.t('settings.secretConfigured'))}</span>` : ''}
+            <button type="button" class="btn btn-sm" id="btn-open-ops-alerts">${esc(this.t('ops.tabAlerts'))} &rarr;</button>
             ${admin ? `<button type="button" class="btn btn-sm" data-reset="alerts" ${dis}>${esc(this.t('settings.resetSection'))}</button>` : ''}
           </div>
         </div>
@@ -1111,11 +1119,15 @@ class FpPlatformSettings extends HTMLElement {
       <div class="panel">
         <div class="panel-header">
           <h3 class="panel-title">${esc(this.t('settings.aiGatewayTitle'))}</h3>
-          ${admin ? `<button type="button" class="btn btn-sm btn-primary" id="btn-add-provider">+ ${esc(this.t('settings.aiAddProvider'))}</button>` : ''}
+          <button type="button" class="btn btn-sm" id="btn-open-ai">${esc(this.t('nav.ai'))} &rarr;</button>
         </div>
-        <div class="panel-body stack gap-md">
-          ${usage ? `
-            <div class="info-grid">
+        <div class="panel-body">
+          <div class="info-grid">
+            <div class="info-card">
+              <div class="info-label">${esc(this.t('nav.ai'))}</div>
+              <div class="info-val mono">${esc(this._aiProviders.length)}</div>
+            </div>
+            ${usage ? `
               <div class="info-card">
                 <div class="info-label">${esc(this.t('settings.aiRequests'))}</div>
                 <div class="info-val mono">${esc(usage.total_requests)} (${esc(usage.cached_requests)} cached)</div>
@@ -1124,30 +1136,15 @@ class FpPlatformSettings extends HTMLElement {
                 <div class="info-label">${esc(this.t('settings.aiTotalTokens'))}</div>
                 <div class="info-val mono">${esc(usage.total_tokens)}</div>
               </div>
-              <div class="info-card">
-                <div class="info-label">${esc(this.t('settings.aiProxyEndpoint'))}</div>
-                <div class="info-val text-xs mono">${esc(origin + '/_ai/v1/chat/completions')}</div>
+            ` : ''}
+            <div class="info-card">
+              <div class="info-label">${esc(this.t('settings.aiProxyEndpoint'))}</div>
+              <div class="row-between" style="margin-top:4px;">
+                <span class="mono text-xs">${esc(aiProxyUrl)}</span>
+                <button type="button" class="btn btn-sm" data-copy-val="${esc(aiProxyUrl)}">${esc(this.t('common.copy'))}</button>
               </div>
             </div>
-          ` : ''}
-
-          ${this._aiProviders.length ? `
-            <div class="table-wrap">
-              <table class="data-table">
-                <thead>
-                  <tr>
-                    <th>${esc(this.t('common.name'))}</th>
-                    <th>${esc(this.t('settings.aiDefaultModel'))}</th>
-                    <th>${esc(this.t('settings.aiFallback'))}</th>
-                    <th>${esc(this.t('settings.aiQuotas'))}</th>
-                    <th>${esc(this.t('common.status'))}</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>${providerRows}</tbody>
-              </table>
-            </div>
-          ` : `<div class="empty-state">${esc(this.t('settings.aiNoProviders'))}</div>`}
+          </div>
         </div>
       </div>
 
@@ -1228,118 +1225,6 @@ class FpPlatformSettings extends HTMLElement {
     `;
   }
 
-  openProviderModal(existing) {
-    const dlg = this.shadowRoot.getElementById('ai-provider-dialog');
-    if (!dlg) return;
-    this._editingProvider = existing || null;
-    const isEdit = Boolean(existing);
-    dlg.innerHTML = `
-      <form method="dialog" id="ai-prov-form">
-        <div class="dlg-head">
-          <span>${isEdit ? esc(this.t('settings.aiEditProvider') + ' · ' + existing.name) : esc(this.t('settings.aiAddProvider'))}</span>
-          <button type="button" class="btn btn-ghost btn-sm" id="dlg-close">&times;</button>
-        </div>
-        <div class="dlg-body stack gap-sm">
-          <div class="field">
-            <label for="aip-name">${esc(this.t('common.name'))}</label>
-            <input type="text" id="aip-name" required value="${esc(isEdit ? existing.name : '')}" ${isEdit ? 'readonly' : 'placeholder="openai"'}>
-          </div>
-          <div class="field">
-            <label for="aip-url">Base URL</label>
-            <input type="url" id="aip-url" required value="${esc(isEdit ? existing.base_url : '')}" placeholder="https://api.openai.com/v1">
-          </div>
-          <div class="field">
-            <label for="aip-key">API Key</label>
-            <input type="password" id="aip-key" autocomplete="new-password" placeholder="${isEdit && existing.has_api_key ? esc(this.t('settings.secretKeepHint')) : 'sk-...'}">
-          </div>
-          <div class="form-grid">
-            <div class="field">
-              <label for="aip-model">${esc(this.t('settings.aiDefaultModel'))}</label>
-              <input type="text" id="aip-model" value="${esc(isEdit && existing.default_model ? existing.default_model : '')}" placeholder="gpt-4o-mini">
-            </div>
-            <div class="field">
-              <label for="aip-fallback">${esc(this.t('settings.aiFallback'))}</label>
-              <input type="text" id="aip-fallback" value="${esc(isEdit && existing.fallback_provider ? existing.fallback_provider : '')}" placeholder="anthropic">
-            </div>
-          </div>
-          <div class="form-grid">
-            <div class="field">
-              <label for="aip-rpm">Rate Limit (RPM)</label>
-              <input type="number" id="aip-rpm" min="0" value="${esc(isEdit && existing.rate_limit_rpm ? existing.rate_limit_rpm : '')}">
-            </div>
-            <div class="field">
-              <label for="aip-cache">Cache TTL (s)</label>
-              <input type="number" id="aip-cache" min="0" value="${esc(isEdit ? (existing.cache_ttl_secs || 0) : 0)}">
-            </div>
-            <div class="field">
-              <label for="aip-budget">${esc(this.t('settings.aiMonthlyBudget'))}</label>
-              <input type="number" id="aip-budget" min="0" value="${esc(isEdit && existing.monthly_token_budget ? existing.monthly_token_budget : '')}">
-            </div>
-          </div>
-          <label class="checkbox-row">
-            <input type="checkbox" id="aip-enabled" ${(!isEdit || existing.enabled) ? 'checked' : ''}>
-            <span>${esc(this.t('settings.enabled'))}</span>
-          </label>
-        </div>
-        <div class="dlg-foot">
-          <button type="button" class="btn" id="dlg-cancel">${esc(this.t('common.cancel'))}</button>
-          <button type="submit" class="btn btn-primary">${esc(this.t('common.save'))}</button>
-        </div>
-      </form>
-    `;
-    dlg.querySelector('#dlg-close').onclick = () => dlg.close();
-    dlg.querySelector('#dlg-cancel').onclick = () => dlg.close();
-    dlg.onclick = (ev) => {
-      if (ev.target === dlg) dlg.close();
-    };
-    dlg.querySelector('#ai-prov-form').onsubmit = async (ev) => {
-      ev.preventDefault();
-      const sr = this.shadowRoot;
-      const name = sr.getElementById('aip-name').value.trim();
-      const base_url = sr.getElementById('aip-url').value.trim();
-      const api_key = sr.getElementById('aip-key').value.trim();
-      const default_model = sr.getElementById('aip-model').value.trim();
-      const fallback_provider = sr.getElementById('aip-fallback').value.trim();
-      const rpmVal = sr.getElementById('aip-rpm').value.trim();
-      const cacheVal = sr.getElementById('aip-cache').value.trim();
-      const budgetVal = sr.getElementById('aip-budget').value.trim();
-      const enabled = sr.getElementById('aip-enabled').checked;
-
-      const payload = {
-        base_url,
-        default_model: default_model || null,
-        fallback_provider: fallback_provider || null,
-        rate_limit_rpm: rpmVal ? Number(rpmVal) : null,
-        cache_ttl_secs: cacheVal ? Number(cacheVal) : 0,
-        monthly_token_budget: budgetVal ? Number(budgetVal) : null,
-        enabled
-      };
-      if (api_key) payload.api_key = api_key;
-
-      try {
-        if (isEdit) {
-          await this.api('/_api/v1/ai/providers/' + encodeURIComponent(existing.name), {
-            method: 'PATCH',
-            json: payload
-          });
-        } else {
-          payload.name = name;
-          await this.api('/_api/v1/ai/providers', {
-            method: 'POST',
-            json: payload
-          });
-        }
-        dlg.close();
-        this.toast(this.t('common.updated'), 'success');
-        await this.loadAiData();
-        this.render();
-      } catch (e) {
-        this.toast(e.message, 'error');
-      }
-    };
-    dlg.showModal();
-  }
-
   bindEvents() {
     const sr = this.shadowRoot;
     sr.querySelectorAll('[data-tab]').forEach((btn) => {
@@ -1399,33 +1284,6 @@ class FpPlatformSettings extends HTMLElement {
     const testAlertBtn = sr.getElementById('btn-test-alert');
     if (testAlertBtn) testAlertBtn.addEventListener('click', () => this.testAlertWebhook());
 
-    const addProvBtn = sr.getElementById('btn-add-provider');
-    if (addProvBtn) addProvBtn.addEventListener('click', () => this.openProviderModal(null));
-
-    sr.querySelectorAll('[data-edit-provider]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const name = btn.getAttribute('data-edit-provider');
-        const found = this._aiProviders.find((p) => p.name === name);
-        if (found) this.openProviderModal(found);
-      });
-    });
-
-    sr.querySelectorAll('[data-del-provider]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const name = btn.getAttribute('data-del-provider');
-        this.requestConfirm(this.t('settings.aiDeleteConfirm', { name }), async () => {
-          try {
-            await this.api('/_api/v1/ai/providers/' + encodeURIComponent(name), { method: 'DELETE' });
-            this.toast(this.t('common.updated'), 'success');
-            await this.loadAiData();
-            this.render();
-          } catch (e) {
-            this.toast(e.message, 'error');
-          }
-        });
-      });
-    });
-
     sr.querySelectorAll('[data-copy-val]').forEach((btn) => {
       btn.addEventListener('click', () => this.copyText(btn.getAttribute('data-copy-val')));
     });
@@ -1436,16 +1294,22 @@ class FpPlatformSettings extends HTMLElement {
       copyMcpBtn.addEventListener('click', () => this.copyText(mcpPre.textContent || ''));
     }
 
-    const updBtn = sr.getElementById('btn-open-updates');
-    if (updBtn) {
-      updBtn.addEventListener('click', () => {
-        this.dispatchEvent(new CustomEvent('fp-navigate', {
-          bubbles: true,
-          composed: true,
-          detail: { hash: '#/updates' }
-        }));
-      });
-    }
+    [
+      ['btn-open-updates', '#/updates'],
+      ['btn-open-ai', '#/ai'],
+      ['btn-open-ops-alerts', '#/ops']
+    ].forEach(([id, hash]) => {
+      const btn = sr.getElementById(id);
+      if (btn) {
+        btn.addEventListener('click', () => {
+          this.dispatchEvent(new CustomEvent('fp-navigate', {
+            bubbles: true,
+            composed: true,
+            detail: { hash }
+          }));
+        });
+      }
+    });
   }
 
   render() {
@@ -1486,7 +1350,6 @@ class FpPlatformSettings extends HTMLElement {
         </div>
       </div>
       ${bodyHtml}
-      <dialog id="ai-provider-dialog"></dialog>
     `;
     this.bindEvents();
   }
