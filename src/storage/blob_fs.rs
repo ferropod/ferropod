@@ -217,16 +217,11 @@ impl ObjectStore for FsBlobStore {
         self.meta.get_object_meta(bucket, &key_norm).await
     }
 
-    async fn get_stream(
+    async fn open_stream_for_meta(
         &self,
-        bucket: &str,
-        key: &str,
+        meta: ObjectMeta,
         range: Option<ByteRange>,
-    ) -> Result<Option<(ObjectMeta, ByteStream, u64, Option<(u64, u64)>)>> {
-        let key_norm = Self::normalize_key(key)?;
-        let Some(meta) = self.meta.get_object_meta(bucket, &key_norm).await? else {
-            return Ok(None);
-        };
+    ) -> Result<(ObjectMeta, ByteStream, u64, Option<(u64, u64)>)> {
         let path = self.disk_path(&meta.blob_path);
         let mut file = tokio::fs::File::open(&path)
             .await
@@ -250,12 +245,25 @@ impl ObjectStore for FsBlobStore {
                 .map_err(|e| FerroError::Internal(anyhow!("seek blob: {e}")))?;
             let limited = file.take(len);
             let stream: ByteStream = Box::pin(ReaderStream::with_capacity(limited, CHUNK_SIZE));
-            Ok(Some((meta, stream, len, Some((r.start, end)))))
+            Ok((meta, stream, len, Some((r.start, end))))
         } else {
             let size = meta.size;
             let stream: ByteStream = Box::pin(ReaderStream::with_capacity(file, CHUNK_SIZE));
-            Ok(Some((meta, stream, size, None)))
+            Ok((meta, stream, size, None))
         }
+    }
+
+    async fn get_stream(
+        &self,
+        bucket: &str,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<(ObjectMeta, ByteStream, u64, Option<(u64, u64)>)>> {
+        let key_norm = Self::normalize_key(key)?;
+        let Some(meta) = self.meta.get_object_meta(bucket, &key_norm).await? else {
+            return Ok(None);
+        };
+        Ok(Some(self.open_stream_for_meta(meta, range).await?))
     }
 
     async fn delete(&self, bucket: &str, key: &str) -> Result<bool> {

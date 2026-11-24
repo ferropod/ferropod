@@ -495,6 +495,10 @@
       history.replaceState(null, '', '#/apps');
       route = 'apps';
       parts = ['apps'];
+    } else if (route === 'data') {
+      history.replaceState(null, '', '#/dbs');
+      route = 'dbs';
+      parts = ['dbs'];
     }
     if (ROUTES.indexOf(route) === -1) route = 'overview';
     if (route === 'tokens' && !isAdmin()) route = 'overview';
@@ -530,20 +534,59 @@
     }
   }
 
+  function navSectionForRoute(route) {
+    if (['dbs', 'kv', 'blobs', 'queues', 'search'].indexOf(route) !== -1) return 'data';
+    if (['logs', 'ops'].indexOf(route) !== -1) return 'ops';
+    if (['settings', 'tokens', 'updates'].indexOf(route) !== -1) return 'settings';
+    return route;
+  }
+
   function updateNavActive() {
-    var navTok = $('nav-tokens');
-    if (navTok) {
-      navTok.classList.toggle('hidden', !isAdmin());
-    }
     var navSet = $('nav-settings');
     if (navSet) {
       navSet.classList.toggle('hidden', !isAdmin() && !isReadonly());
     }
+    var activeSection = navSectionForRoute(state.currentRoute);
     document.querySelectorAll('[data-nav]').forEach(function (el) {
-      el.classList.toggle('active', el.getAttribute('data-nav') === state.currentRoute);
+      var target = el.getAttribute('data-nav');
+      el.classList.toggle('active', target === activeSection || target === state.currentRoute);
     });
     var titleKey = 'nav.' + state.currentRoute;
     $('topbar-title').textContent = t(titleKey);
+  }
+
+  function renderSectionTabs(section, actionsHtml) {
+    var items = [];
+    if (section === 'data') {
+      items = [
+        { route: 'dbs', href: '#/dbs', label: t('nav.dbs') },
+        { route: 'kv', href: '#/kv', label: t('nav.kv') },
+        { route: 'blobs', href: '#/blobs', label: t('nav.blobs') },
+        { route: 'queues', href: '#/queues', label: t('nav.queues') },
+        { route: 'search', href: '#/search', label: t('nav.search') }
+      ];
+    } else if (section === 'ops') {
+      items = [
+        { route: 'logs', href: '#/logs', label: t('nav.logs') },
+        { route: 'ops', href: '#/ops', label: t('nav.ops') }
+      ];
+    } else if (section === 'settings') {
+      items = [
+        { route: 'settings', href: '#/settings', label: t('nav.settings') }
+      ];
+      if (isAdmin()) {
+        items.push({ route: 'tokens', href: '#/tokens', label: t('nav.tokens') });
+      }
+      items.push({ route: 'updates', href: '#/updates', label: t('nav.updates') });
+    }
+    var tabs = items.map(function (it) {
+      var active = state.currentRoute === it.route;
+      return '<a href="' + it.href + '" class="subnav-tab' + (active ? ' active' : '') + '" role="tab" aria-selected="' + (active ? 'true' : 'false') + '">' + esc(it.label) + '</a>';
+    }).join('');
+    return '<div class="section-bar">' +
+      '<div class="subnav-tabs" role="tablist">' + tabs + '</div>' +
+      (actionsHtml ? '<div class="section-actions">' + actionsHtml + '</div>' : '') +
+      '</div>';
   }
 
   // --- Session & Auth ---
@@ -820,40 +863,48 @@
         '</tr>';
     }).join('');
 
+    var dataTotal = (st.dbs || 0) + (st.kv_namespaces || 0) + (st.buckets || 0) + (st.queues || 0) + (st.search_indexes || 0);
+    var hasAppsOrRoutes = state.projects.length > 0 || state.routes.length > 0;
+    var appsSectionHtml = hasAppsOrRoutes
+      ? '<div class="grid-2">' +
+        '<div class="panel"><div class="panel-header"><h3 class="panel-title">' + esc(t('overview.recentProjects')) + '</h3><a href="#/apps" class="btn btn-ghost btn-sm">' + esc(t('common.view')) + '</a></div>' +
+        (projRows
+          ? '<div class="table-wrap"><table class="data-table stack-mobile"><thead><tr><th>' + esc(t('common.name')) + '</th><th>' + esc(t('projects.activeDeployment')) + '</th><th>' + esc(t('projects.previewDeployment')) + '</th></tr></thead><tbody>' + projRows + '</tbody></table></div>'
+          : '<div class="empty-state">' + esc(t('common.empty')) + '</div>') +
+        '</div>' +
+        '<div class="panel"><div class="panel-header"><h3 class="panel-title">' + esc(t('overview.recentRoutes')) + '</h3><a href="#/apps" class="btn btn-ghost btn-sm">' + esc(t('common.view')) + '</a></div>' +
+        (routeRows
+          ? '<div class="table-wrap"><table class="data-table stack-mobile"><thead><tr><th>' + esc(t('routes.host')) + '</th><th>' + esc(t('routes.project')) + '</th><th>' + esc(t('routes.targetEnv')) + '</th></tr></thead><tbody>' + routeRows + '</tbody></table></div>'
+          : '<div class="empty-state">' + esc(t('common.empty')) + '</div>') +
+        '</div></div>'
+      : '<div class="panel"><div class="empty-state stack gap-sm" style="align-items:center;">' +
+        '<div class="muted">' + esc(t('common.empty')) + '</div>' +
+        (isAdmin() ? '<button type="button" class="btn btn-primary btn-sm" id="overview-empty-new-app-btn">+ ' + esc(t('runtime.newRuntime')) + '</button>' : '') +
+        '</div></div>';
+
     root.innerHTML =
-      '<div class="page-head">' +
-      '<div><h2 class="page-title">' + esc(t('overview.title')) + '</h2>' +
-      '<p class="page-subtitle">' + esc(t('overview.subtitle')) + '</p></div>' +
-      '<div class="row">' + healthBadge + '</div></div>' +
-
-      '<div class="panel"><div class="panel-body row-between">' +
-      '<div class="row gap-lg">' +
-      '<div><div class="muted text-xs">' + esc(t('updates.currentVersion')) + '</div><div class="text-strong mono"><a href="#/updates">v' + esc(st.version || '-') + '</a></div></div>' +
-      '<div><div class="muted text-xs">' + esc(t('overview.profile')) + '</div><div class="text-strong">' + esc(st.profile || '-') + '</div></div>' +
-      '<div><div class="muted text-xs">' + esc(t('overview.actor')) + '</div><div class="text-strong">' + esc(st.actor || '-') + '</div></div>' +
-      '<div><div class="muted text-xs">' + esc(t('overview.scope')) + '</div><div><span class="badge badge-accent">' + esc(st.scope || '-') + '</span></div></div>' +
+      '<div class="overview-bar">' +
+      '<div class="row gap-xs">' +
+      healthBadge +
+      '<span class="badge badge-neutral">' + esc(st.profile || '-') + '</span>' +
       '</div>' +
-      '<div class="row">' +
-      '<a href="#/apps" class="btn btn-sm">' + esc(t('nav.apps')) + '</a>' +
-      '<a href="#/logs" class="btn btn-sm">' + esc(t('nav.logs')) + '</a>' +
-      '<a href="#/updates" class="btn btn-sm">' + esc(t('nav.updates')) + '</a>' +
-      '</div></div></div>' +
+      (isAdmin() ? '<button type="button" class="btn btn-primary btn-sm" id="overview-new-app-btn">+ ' + esc(t('runtime.newRuntime')) + '</button>' : '') +
+      '</div>' +
 
-      '<div class="stats-grid">' +
+      '<div class="stats-grid stats-grid-4">' +
       statCard(t('overview.projects'), st.projects, '#/apps') +
       statCard(t('overview.routes'), st.routes, '#/apps') +
-      statCard(t('overview.kvNamespaces'), st.kv_namespaces, '#/kv') +
-      statCard(t('overview.queues'), st.queues, '#/queues') +
-      statCard(t('overview.buckets'), st.buckets, '#/blobs') +
-      statCard(t('overview.dbs'), st.dbs, '#/dbs') +
-      statCard(t('overview.searchIndexes'), st.search_indexes || 0, '#/search') +
+      statCard(t('nav.data'), dataTotal, '#/dbs') +
       statCard(t('overview.aiProviders'), st.ai_providers || 0, '#/ai') +
       '</div>' +
 
       '<fp-perf-monitor id="overview-perf-monitor"></fp-perf-monitor>' +
 
-      '<div class="panel"><div class="panel-header"><h3 class="panel-title">' + esc(t('overview.endpointsTitle')) + '</h3><span class="badge badge-info">AI &amp; API</span></div>' +
-      '<div class="panel-body row gap-xs">' +
+      appsSectionHtml +
+
+      '<details class="minimal-details">' +
+      '<summary>' + esc(t('overview.endpointsTitle')) + '</summary>' +
+      '<div class="minimal-details-body row gap-xs">' +
       [
         { label: 'MCP', path: '/_mcp' },
         { label: 'AI Chat', path: '/_ai/v1/chat/completions' },
@@ -865,19 +916,10 @@
       ].map(function (ep) {
         return '<button type="button" class="btn btn-sm" data-copy-endpoint="' + esc(ep.path) + '">' + esc(ep.label) + ': <code class="mono">' + esc(ep.path) + '</code></button>';
       }).join('') +
-      '</div></div>' +
+      '</div></details>';
 
-      '<div class="grid-2">' +
-      '<div class="panel"><div class="panel-header"><h3 class="panel-title">' + esc(t('overview.recentProjects')) + '</h3><a href="#/apps" class="btn btn-ghost btn-sm">' + esc(t('common.view')) + '</a></div>' +
-      (projRows
-        ? '<div class="table-wrap"><table class="data-table stack-mobile"><thead><tr><th>' + esc(t('common.name')) + '</th><th>' + esc(t('projects.activeDeployment')) + '</th><th>' + esc(t('projects.previewDeployment')) + '</th></tr></thead><tbody>' + projRows + '</tbody></table></div>'
-        : '<div class="empty-state">' + esc(t('common.empty')) + '</div>') +
-      '</div>' +
-      '<div class="panel"><div class="panel-header"><h3 class="panel-title">' + esc(t('overview.recentRoutes')) + '</h3><a href="#/apps" class="btn btn-ghost btn-sm">' + esc(t('common.view')) + '</a></div>' +
-      (routeRows
-        ? '<div class="table-wrap"><table class="data-table stack-mobile"><thead><tr><th>' + esc(t('routes.host')) + '</th><th>' + esc(t('routes.project')) + '</th><th>' + esc(t('routes.targetEnv')) + '</th></tr></thead><tbody>' + routeRows + '</tbody></table></div>'
-        : '<div class="empty-state">' + esc(t('common.empty')) + '</div>') +
-      '</div></div>';
+    if ($('overview-new-app-btn')) $('overview-new-app-btn').addEventListener('click', openCreateRuntimeModal);
+    if ($('overview-empty-new-app-btn')) $('overview-empty-new-app-btn').addEventListener('click', openCreateRuntimeModal);
 
     root.querySelectorAll('[data-copy-endpoint]').forEach(function (btn) {
       btn.addEventListener('click', function () {
@@ -1876,10 +1918,10 @@
         '</div>';
 
     root.innerHTML =
-      '<div class="page-head"><div><h2 class="page-title">' + esc(t('kv.title')) + '</h2>' +
-      '<p class="page-subtitle">' + esc(t('kv.subtitle')) + '</p></div>' +
-      (isAdmin() ? '<button type="button" class="btn btn-primary" id="new-kv-ns-btn">' + esc(t('kv.newNamespace')) + '</button>' : '') +
-      '</div>' +
+      renderSectionTabs(
+        'data',
+        isAdmin() ? '<button type="button" class="btn btn-primary btn-sm" id="new-kv-ns-btn">+ ' + esc(t('kv.newNamespace')) + '</button>' : ''
+      ) +
       '<div class="split-layout">' +
       '<div class="panel"><div class="panel-header"><h3 class="panel-title">' + esc(t('kv.namespaces')) + '</h3></div>' +
       '<div class="panel-body" style="padding:10px 10px 4px;"><form id="kv-manual-form" class="input-group">' +
@@ -2311,10 +2353,10 @@
     }
 
     root.innerHTML =
-      '<div class="page-head"><div><h2 class="page-title">' + esc(t('queues.title')) + '</h2>' +
-      '<p class="page-subtitle">' + esc(t('queues.subtitle')) + '</p></div>' +
-      (isAdmin() ? '<button type="button" class="btn btn-primary" id="new-queue-btn">' + esc(t('queues.new')) + '</button>' : '') +
-      '</div>' +
+      renderSectionTabs(
+        'data',
+        isAdmin() ? '<button type="button" class="btn btn-primary btn-sm" id="new-queue-btn">+ ' + esc(t('queues.new')) + '</button>' : ''
+      ) +
       '<div class="split-layout">' +
       '<div class="panel"><div class="panel-header"><h3 class="panel-title">' + esc(t('nav.queues')) + '</h3></div><div class="list-menu">' + qMenu + '</div></div>' +
       detailHtml + '</div>';
@@ -2686,10 +2728,10 @@
     }
 
     root.innerHTML =
-      '<div class="page-head"><div><h2 class="page-title">' + esc(t('blobs.title')) + '</h2>' +
-      '<p class="page-subtitle">' + esc(t('blobs.subtitle')) + '</p></div>' +
-      (isAdmin() ? '<button type="button" class="btn btn-primary" id="new-bucket-btn">' + esc(t('blobs.newBucket')) + '</button>' : '') +
-      '</div>' +
+      renderSectionTabs(
+        'data',
+        isAdmin() ? '<button type="button" class="btn btn-primary btn-sm" id="new-bucket-btn">+ ' + esc(t('blobs.newBucket')) + '</button>' : ''
+      ) +
       '<div class="split-layout">' +
       '<div class="panel"><div class="panel-header"><h3 class="panel-title">' + esc(t('blobs.buckets')) + '</h3></div><div class="list-menu">' + bMenu + '</div></div>' +
       rightHtml + '</div>';
@@ -3109,10 +3151,10 @@
     }
 
     root.innerHTML =
-      '<div class="page-head"><div><h2 class="page-title">' + esc(t('dbs.title')) + '</h2>' +
-      '<p class="page-subtitle">' + esc(t('dbs.subtitle')) + '</p></div>' +
-      (isAdmin() ? '<button type="button" class="btn btn-primary" id="new-db-btn">' + esc(t('dbs.newDb')) + '</button>' : '') +
-      '</div>' +
+      renderSectionTabs(
+        'data',
+        isAdmin() ? '<button type="button" class="btn btn-primary btn-sm" id="new-db-btn">+ ' + esc(t('dbs.newDb')) + '</button>' : ''
+      ) +
       '<div class="split-layout">' +
       '<div class="panel"><div class="panel-header"><h3 class="panel-title">' + esc(t('dbs.list')) + '</h3></div><div class="list-menu">' + dbMenu + '</div></div>' +
       rightHtml + '</div>';
@@ -3637,10 +3679,10 @@
           '</div></div>';
 
       root.innerHTML =
-        '<div class="page-head"><div><h2 class="page-title">' + esc(t('search.title')) + '</h2>' +
-        '<p class="page-subtitle">' + esc(t('search.subtitle')) + '</p></div>' +
-        (!isReadonly() ? '<button type="button" class="btn btn-primary" id="search-create-index">' + esc(t('search.newIndex')) + '</button>' : '') +
-        '</div>' +
+        renderSectionTabs(
+          'data',
+          !isReadonly() ? '<button type="button" class="btn btn-primary btn-sm" id="search-create-index">+ ' + esc(t('search.newIndex')) + '</button>' : ''
+        ) +
         '<div class="split-layout">' +
         '<div class="panel"><div class="panel-header"><h3 class="panel-title">' + esc(t('search.indexes')) + '</h3></div>' +
         '<div class="list-menu">' + idxMenu + '</div></div>' +
@@ -3895,12 +3937,12 @@
       return;
     }
     if (!isCurrent()) return;
-    root.innerHTML = '';
+    root.innerHTML = renderSectionTabs('ops') + '<div class="subnav-content"></div>';
     var ops = document.createElement('fp-ops-center');
     ops.token = state.token || readStoredToken();
     ops.scope = getScope();
     ops.projects = state.projects;
-    root.appendChild(ops);
+    root.querySelector('.subnav-content').appendChild(ops);
   }
 
   async function renderUpdates() {
@@ -3915,11 +3957,11 @@
       return;
     }
     if (!isCurrent()) return;
-    root.innerHTML = '';
+    root.innerHTML = renderSectionTabs('settings') + '<div class="subnav-content"></div>';
     var upd = document.createElement('fp-system-updates');
     upd.token = state.token || readStoredToken();
     upd.scope = getScope();
-    root.appendChild(upd);
+    root.querySelector('.subnav-content').appendChild(upd);
   }
 
   async function renderAi() {
@@ -3953,11 +3995,11 @@
       return;
     }
     if (!isCurrent()) return;
-    root.innerHTML = '';
+    root.innerHTML = renderSectionTabs('settings') + '<div class="subnav-content"></div>';
     var panel = document.createElement('fp-platform-settings');
     panel.token = state.token || readStoredToken();
     panel.scope = getScope();
-    root.appendChild(panel);
+    root.querySelector('.subnav-content').appendChild(panel);
   }
 
   // --- 8. Tokens (Admin Only) ---
@@ -3995,9 +4037,10 @@
     }).join('');
 
     root.innerHTML =
-      '<div class="page-head"><div><h2 class="page-title">' + esc(t('tokens.title')) + '</h2>' +
-      '<p class="page-subtitle">' + esc(t('tokens.subtitle')) + '</p></div>' +
-      '<button type="button" class="btn btn-primary" id="new-token-btn">' + esc(t('tokens.new')) + '</button></div>' +
+      renderSectionTabs(
+        'settings',
+        '<button type="button" class="btn btn-primary btn-sm" id="new-token-btn">+ ' + esc(t('tokens.new')) + '</button>'
+      ) +
       '<div class="panel">' +
       (rows
         ? '<div class="table-wrap"><table class="data-table stack-mobile"><thead><tr><th>' + esc(t('common.name')) + '</th><th>' + esc(t('tokens.scope')) + '</th><th>' + esc(t('common.expiresAt')) + '</th><th>' + esc(t('tokens.lastUsed')) + '</th><th>' + esc(t('common.createdAt')) + '</th><th class="th-actions">' + esc(t('common.actions')) + '</th></tr></thead><tbody>' + rows + '</tbody></table></div>'
@@ -4259,8 +4302,7 @@
     }
 
     root.innerHTML =
-      '<div class="page-head"><div><h2 class="page-title">' + esc(t('logs.title')) + '</h2>' +
-      '<p class="page-subtitle">' + esc(t('logs.subtitle')) + '</p></div></div>' +
+      renderSectionTabs('ops') +
       tabsHtml + bodyHtml;
 
     updateSseBadge();

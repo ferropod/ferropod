@@ -431,6 +431,18 @@ fn build_asset_key(prefix: Option<&str>, req_path: &str) -> String {
     }
 }
 
+fn attach_cache_control(
+    mut builder: axum::http::response::Builder,
+    cache_control: Option<&str>,
+) -> axum::http::response::Builder {
+    if let Some(cc) = cache_control {
+        if let Ok(hv) = HeaderValue::from_str(cc) {
+            builder = builder.header(header::CACHE_CONTROL, hv);
+        }
+    }
+    builder
+}
+
 async fn try_serve_static(
     svc: &PlatformService,
     bucket: &str,
@@ -446,7 +458,6 @@ async fn try_serve_static(
         .await
         .ok()
         .flatten();
-    let mut resolved_key = primary_key;
 
     if found.is_none() && spa_fallback && !req_path.contains('.') {
         let fallback_key = build_asset_key(prefix, "/index.html");
@@ -455,37 +466,37 @@ async fn try_serve_static(
             .await
             .ok()
             .flatten();
-        resolved_key = fallback_key;
     }
 
     let meta = found?;
+    let cache_control = svc.static_bucket_cache_control(bucket).await;
     let etag = format!("\"{}\"", meta.sha256);
     if let Some(inm) = headers
         .get(header::IF_NONE_MATCH)
         .and_then(|v| v.to_str().ok())
     {
         if etag_matches(inm, &etag) {
-            return Some(
+            let builder = attach_cache_control(
                 Response::builder()
                     .status(StatusCode::NOT_MODIFIED)
-                    .header(header::ETAG, etag)
-                    .body(Body::empty())
-                    .unwrap(),
+                    .header(header::ETAG, etag),
+                cache_control.as_deref(),
             );
+            return Some(builder.body(Body::empty()).unwrap());
         }
     }
 
     if is_head {
-        return Some(
+        let builder = attach_cache_control(
             Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, meta.content_type)
                 .header(header::CONTENT_LENGTH, meta.size.to_string())
                 .header(header::ETAG, etag)
-                .header(header::ACCEPT_RANGES, "bytes")
-                .body(Body::empty())
-                .unwrap(),
+                .header(header::ACCEPT_RANGES, "bytes"),
+            cache_control.as_deref(),
         );
+        return Some(builder.body(Body::empty()).unwrap());
     }
 
     let range = match headers.get(header::RANGE).and_then(|v| v.to_str().ok()) {
@@ -504,23 +515,23 @@ async fn try_serve_static(
         None => None,
     };
 
-    let Ok(Some((meta, stream, len, span))) = svc
-        .static_get_object_stream(bucket, &resolved_key, range)
-        .await
-    else {
+    let Ok((meta, stream, len, span)) = svc.static_open_stream_for_meta(meta, range).await else {
         return None;
     };
 
-    let mut builder = Response::builder()
-        .status(if span.is_some() {
-            StatusCode::PARTIAL_CONTENT
-        } else {
-            StatusCode::OK
-        })
-        .header(header::CONTENT_TYPE, meta.content_type)
-        .header(header::CONTENT_LENGTH, len.to_string())
-        .header(header::ETAG, etag)
-        .header(header::ACCEPT_RANGES, "bytes");
+    let mut builder = attach_cache_control(
+        Response::builder()
+            .status(if span.is_some() {
+                StatusCode::PARTIAL_CONTENT
+            } else {
+                StatusCode::OK
+            })
+            .header(header::CONTENT_TYPE, meta.content_type)
+            .header(header::CONTENT_LENGTH, len.to_string())
+            .header(header::ETAG, etag)
+            .header(header::ACCEPT_RANGES, "bytes"),
+        cache_control.as_deref(),
+    );
 
     if let Some((start, end)) = span {
         builder = builder.header(

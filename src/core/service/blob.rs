@@ -258,6 +258,7 @@ impl PlatformService {
             };
         }
         self.objects.update_bucket(&meta).await?;
+        self.invalidate_bucket_cache_control(&meta.name);
         self.audit(
             meta.project_id.as_deref(),
             &caller.actor,
@@ -312,6 +313,7 @@ impl PlatformService {
             &format!("bucket '{name}'"),
         )?;
         self.objects.delete_bucket(name).await?;
+        self.invalidate_bucket_cache_control(name);
         self.audit(
             meta.project_id.as_deref(),
             &caller.actor,
@@ -453,9 +455,55 @@ impl PlatformService {
         self.objects.list_page(bucket, prefix, cursor, limit).await
     }
 
+    fn invalidate_bucket_cache_control(&self, bucket: &str) {
+        let mut cache = self
+            .bucket_cache_control
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        cache.remove(bucket);
+    }
+
+    /// Resolve a bucket's optional `Cache-Control` header with a lightweight in-memory cache.
+    pub async fn static_bucket_cache_control(&self, bucket: &str) -> Option<String> {
+        {
+            let cache = self
+                .bucket_cache_control
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(cached) = cache.get(bucket) {
+                return cached.clone();
+            }
+        }
+        let cc = self
+            .objects
+            .get_bucket(bucket)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|b| b.cache_control);
+        let mut cache = self
+            .bucket_cache_control
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        if cache.len() >= 2048 {
+            cache.clear();
+        }
+        cache.insert(bucket.to_string(), cc.clone());
+        cc
+    }
+
     /// Internal static-site asset HEAD bypasses bucket auth because the deployment explicitly bound `assets_bucket`.
     pub async fn static_head_object(&self, bucket: &str, key: &str) -> Result<Option<ObjectMeta>> {
         self.objects.head(bucket, key).await
+    }
+
+    /// Open a static-site asset stream directly from resolved [`ObjectMeta`], avoiding a second DB lookup.
+    pub async fn static_open_stream_for_meta(
+        &self,
+        meta: ObjectMeta,
+        range: Option<ByteRange>,
+    ) -> Result<(ObjectMeta, ByteStream, u64, Option<(u64, u64)>)> {
+        self.objects.open_stream_for_meta(meta, range).await
     }
 
     /// Internal static-site asset GET bypasses bucket auth because the deployment explicitly bound `assets_bucket`.

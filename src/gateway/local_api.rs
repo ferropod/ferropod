@@ -186,7 +186,7 @@ fn dynamic_proxy_client() -> &'static reqwest::Client {
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(30))
+            .read_timeout(Duration::from_secs(60))
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("valid reqwest dynamic proxy client")
@@ -199,7 +199,7 @@ pub(super) async fn forward_dynamic_upstream(
     max_body_bytes: usize,
     req: Request<Body>,
 ) -> Response {
-    use http_body_util::BodyExt as _;
+    use axum::body::HttpBody as _;
 
     if req.method() == Method::CONNECT || req.headers().contains_key(header::UPGRADE) {
         return (
@@ -232,7 +232,8 @@ pub(super) async fn forward_dynamic_upstream(
         return (StatusCode::BAD_REQUEST, "unsupported HTTP method").into_response();
     };
 
-    let mut req_headers = req.headers().clone();
+    let (parts, body) = req.into_parts();
+    let mut req_headers = parts.headers;
     strip_hop_headers(&mut req_headers);
     for name in [
         "host",
@@ -247,22 +248,11 @@ pub(super) async fn forward_dynamic_upstream(
         req_headers.remove(name);
     }
 
-    let collected = match Limited::new(req.into_body(), max_body_bytes)
-        .collect()
-        .await
-    {
-        Ok(c) => c.to_bytes(),
-        Err(err) => {
-            if err.is::<LengthLimitError>() {
-                return (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response();
-            }
-            return (StatusCode::BAD_REQUEST, "failed to read request body").into_response();
-        }
-    };
-
-    let mut builder = dynamic_proxy_client()
-        .request(parsed_method, target_url)
-        .body(collected);
+    let mut builder = dynamic_proxy_client().request(parsed_method, target_url);
+    if body.size_hint().exact() != Some(0) {
+        let limited_stream = Body::new(Limited::new(body, max_body_bytes)).into_data_stream();
+        builder = builder.body(reqwest::Body::wrap_stream(limited_stream));
+    }
     for (name, val) in &req_headers {
         if let Ok(v) = reqwest::header::HeaderValue::from_bytes(val.as_bytes()) {
             builder = builder.header(name.as_str(), v);
@@ -284,18 +274,29 @@ pub(super) async fn forward_dynamic_upstream(
             }
             strip_hop_headers(&mut out_headers);
             out_headers.remove(header::CONTENT_LENGTH);
-            let bytes = up_resp.bytes().await.unwrap_or_default();
             let mut resp = Response::builder().status(status);
             if let Some(h) = resp.headers_mut() {
                 *h = out_headers;
             }
-            resp.body(Body::from(bytes)).unwrap_or_else(|_| {
-                (StatusCode::BAD_GATEWAY, "invalid upstream response").into_response()
-            })
+            resp.body(Body::from_stream(up_resp.bytes_stream()))
+                .unwrap_or_else(|_| {
+                    (StatusCode::BAD_GATEWAY, "invalid upstream response").into_response()
+                })
         }
-        Err(err) if err.is_timeout() => {
-            (StatusCode::GATEWAY_TIMEOUT, "upstream proxy timed out").into_response()
+        Err(err) => {
+            let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(&err);
+            while let Some(source) = cur {
+                if source.is::<LengthLimitError>() {
+                    return (StatusCode::PAYLOAD_TOO_LARGE, "request body too large")
+                        .into_response();
+                }
+                cur = source.source();
+            }
+            if err.is_timeout() {
+                (StatusCode::GATEWAY_TIMEOUT, "upstream proxy timed out").into_response()
+            } else {
+                (StatusCode::BAD_GATEWAY, "upstream proxy unavailable").into_response()
+            }
         }
-        Err(_) => (StatusCode::BAD_GATEWAY, "upstream proxy unavailable").into_response(),
     }
 }

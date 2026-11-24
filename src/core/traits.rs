@@ -417,6 +417,11 @@ pub trait ObjectStore: Send + Sync {
         custom_meta: Option<String>,
     ) -> Result<ObjectMeta>;
     async fn head(&self, bucket: &str, key: &str) -> Result<Option<ObjectMeta>>;
+    async fn open_stream_for_meta(
+        &self,
+        meta: ObjectMeta,
+        range: Option<ByteRange>,
+    ) -> Result<(ObjectMeta, ByteStream, u64, Option<(u64, u64)>)>;
     async fn get_stream(
         &self,
         bucket: &str,

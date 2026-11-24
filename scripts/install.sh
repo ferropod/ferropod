@@ -264,22 +264,23 @@ ${cap_lines}
 WantedBy=multi-user.target
 EOF
 
+  local token_out=""
+  # Mint initial admin token on fresh install before starting the daemon so core.db is unlocked
+  if [[ "$fresh_env" == "true" ]]; then
+    local master_key_val
+    master_key_val="$(grep '^FERROPOD_MASTER_KEY=' "$ENV_FILE" | cut -d'=' -f2-)"
+    token_out="$(FERROPOD_DATA_DIR="$DATA_DIR" FERROPOD_MASTER_KEY="$master_key_val" "${BIN_DIR}/ferropod" token create --name admin --scope admin 2>/dev/null || true)"
+  fi
+
   systemctl daemon-reload
   systemctl enable ferropod >/dev/null 2>&1 || true
   systemctl restart ferropod
   ok "systemd service ferropod started."
 
-  # Mint initial admin token on fresh install
-  if [[ "$fresh_env" == "true" ]]; then
-    sleep 1
-    local master_key_val
-    master_key_val="$(grep '^FERROPOD_MASTER_KEY=' "$ENV_FILE" | cut -d'=' -f2-)"
-    local token_out
-    if token_out="$(FERROPOD_DATA_DIR="$DATA_DIR" FERROPOD_MASTER_KEY="$master_key_val" "${BIN_DIR}/ferropod" token create --name admin --scope admin 2>/dev/null)"; then
-      echo ""
-      ok "Initial Admin Token created (save this securely):"
-      printf '%s\n' "$token_out"
-    fi
+  if [[ -n "$token_out" ]]; then
+    echo ""
+    ok "Initial Admin Token created (save this securely):"
+    printf '%s\n' "$token_out"
   fi
 }
 

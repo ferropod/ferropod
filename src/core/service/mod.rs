@@ -188,6 +188,7 @@ pub struct PlatformService {
     tls_runtime: Arc<std::sync::RwLock<TlsRuntimeState>>,
     tls_reload_tx: watch::Sender<u64>,
     realtime: Arc<RealtimeHub>,
+    bucket_cache_control: Arc<std::sync::RwLock<HashMap<String, Option<String>>>>,
 }
 
 impl PlatformService {
@@ -268,6 +269,7 @@ impl PlatformService {
             tls_runtime: Arc::new(std::sync::RwLock::new(initial_tls_state)),
             tls_reload_tx,
             realtime,
+            bucket_cache_control: Arc::new(std::sync::RwLock::new(HashMap::new())),
         };
         wasmtime_rt.bind_service(svc.clone());
         svc.refresh_routes().await?;

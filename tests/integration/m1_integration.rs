@@ -4536,3 +4536,216 @@ async fn dynamic_route_proxy_basic_auth_rate_limit_canary_health_and_rollback() 
     ha.abort();
     hb.abort();
 }
+
+#[tokio::test]
+async fn static_site_cache_control_and_streaming_dynamic_proxy() {
+    let h = setup_harness().await;
+    let app = build_router(h.svc.clone());
+    let tok = Some(h.admin_token.as_str());
+
+    // 1. Create project & bucket with Cache-Control
+    let proj = h
+        .svc
+        .create_project(&h.admin, "cached-site-app", None)
+        .await
+        .unwrap();
+    let (st_bkt, _) = json_req(
+        &app,
+        Method::POST,
+        "/_api/v1/buckets",
+        tok,
+        Some(serde_json::json!({
+            "name": "cached-site",
+            "project_id": proj.id,
+            "cache_control": "public, max-age=3600"
+        })),
+    )
+    .await;
+    assert_eq!(st_bkt, StatusCode::CREATED);
+
+    let put_stream: ferropod::core::model::ByteStream =
+        Box::pin(futures_util::stream::once(async {
+            Ok::<_, std::io::Error>(Bytes::from_static(b"<html>hello cached</html>"))
+        }));
+    h.svc
+        .put_object_stream(
+            &BlobAuth::Caller(&h.admin),
+            "cached-site",
+            "index.html",
+            put_stream,
+            "text/html",
+            None,
+        )
+        .await
+        .unwrap();
+
+    h.svc
+        .create_deployment(
+            &h.admin,
+            &proj.id,
+            CreateDeploymentInput {
+                assets_bucket: Some("cached-site".into()),
+                target_env: Some(TargetEnv::Prod),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    // Upstream server streaming multi-chunk request/response
+    let upstream_router = Router::new().route(
+        "/stream/echo",
+        any(|req: AxumRequest| async move {
+            let body_bytes = req.into_body().collect().await.unwrap().to_bytes();
+            let chunks = vec![
+                Ok::<_, std::io::Error>(Bytes::from_static(b"head:")),
+                Ok::<_, std::io::Error>(body_bytes),
+                Ok::<_, std::io::Error>(Bytes::from_static(b":tail")),
+            ];
+            axum::response::Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "text/plain")
+                .body(Body::from_stream(futures_util::stream::iter(chunks)))
+                .unwrap()
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = listener.local_addr().unwrap();
+    let upstream_task = tokio::spawn(async move {
+        axum::serve(listener, upstream_router).await.unwrap();
+    });
+
+    let (st_rt, _) = json_req(
+        &app,
+        Method::POST,
+        "/_api/v1/routes",
+        tok,
+        Some(serde_json::json!({
+            "host": "cached.edge.test",
+            "project": proj.id,
+            "target_env": "prod",
+            "proxy_prefix": "/stream",
+            "proxy_upstream": format!("http://{upstream_addr}")
+        })),
+    )
+    .await;
+    assert_eq!(st_rt, StatusCode::OK);
+
+    // Static GET emits bucket Cache-Control and ETag
+    let r_get = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/index.html")
+                .header(header::HOST, "cached.edge.test")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r_get.status(), StatusCode::OK);
+    assert_eq!(
+        r_get.headers().get(header::CACHE_CONTROL).unwrap(),
+        "public, max-age=3600"
+    );
+    let etag = r_get
+        .headers()
+        .get(header::ETAG)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let get_bytes = r_get.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&get_bytes[..], b"<html>hello cached</html>");
+
+    // Static HEAD & 304 also emit Cache-Control
+    let r_head = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::HEAD)
+                .uri("/index.html")
+                .header(header::HOST, "cached.edge.test")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r_head.status(), StatusCode::OK);
+    assert_eq!(
+        r_head.headers().get(header::CACHE_CONTROL).unwrap(),
+        "public, max-age=3600"
+    );
+
+    let r_304 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/index.html")
+                .header(header::HOST, "cached.edge.test")
+                .header(header::IF_NONE_MATCH, &etag)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r_304.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(
+        r_304.headers().get(header::CACHE_CONTROL).unwrap(),
+        "public, max-age=3600"
+    );
+
+    // Bucket update invalidates cached Cache-Control
+    let (st_patch, _) = json_req(
+        &app,
+        Method::PATCH,
+        "/_api/v1/buckets/cached-site",
+        tok,
+        Some(serde_json::json!({ "cache_control": "no-store" })),
+    )
+    .await;
+    assert_eq!(st_patch, StatusCode::OK);
+
+    let r_after = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/index.html")
+                .header(header::HOST, "cached.edge.test")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r_after.status(), StatusCode::OK);
+    assert_eq!(
+        r_after.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-store"
+    );
+
+    // Dynamic reverse proxy streams multi-chunk request & response bodies
+    let req_chunks = vec![
+        Ok::<_, std::io::Error>(Bytes::from_static(b"part1+")),
+        Ok::<_, std::io::Error>(Bytes::from_static(b"part2")),
+    ];
+    let r_stream = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/stream/echo")
+                .header(header::HOST, "cached.edge.test")
+                .body(Body::from_stream(futures_util::stream::iter(req_chunks)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r_stream.status(), StatusCode::OK);
+    let stream_bytes = r_stream.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&stream_bytes[..], b"head:part1+part2:tail");
+
+    upstream_task.abort();
+}

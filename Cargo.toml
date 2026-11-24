@@ -39,7 +39,7 @@ mime_guess = "2"
 axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-acme = { version = "0.15", default-features = false, features = ["ring", "tls12", "webpki-roots", "axum"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "json", "stream"] }
 flate2 = "1"
 tar = "0.4"
 wasmtime = { version = "51", default-features = false, features = ["std", "runtime", "cranelift", "component-model", "async", "parallel-compilation", "wat"] }

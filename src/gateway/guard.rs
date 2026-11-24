@@ -1,4 +1,6 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -17,47 +19,84 @@ use uuid::Uuid;
 use crate::core::model::{Caller, FerroError, LogEntry};
 use crate::core::service::{GatewayMetrics, PlatformService};
 
-/// Bounded sliding-window per-key rate limiter (60-second window).
-#[derive(Debug, Default)]
+const RATE_LIMITER_SHARDS: usize = 16;
+const MAX_KEYS_PER_SHARD: usize = 1024;
+const RATE_WINDOW: Duration = Duration::from_secs(60);
+
+#[derive(Debug, Clone, Copy)]
+struct WindowSlot {
+    window_start: Instant,
+    prev_count: u32,
+    curr_count: u32,
+}
+
+/// Sharded O(1)-memory sliding-window per-key rate limiter (60-second window).
+#[derive(Debug)]
 pub struct SlidingWindowRateLimiter {
-    windows: Mutex<HashMap<String, VecDeque<Instant>>>,
+    shards: [Mutex<HashMap<String, WindowSlot>>; RATE_LIMITER_SHARDS],
+}
+
+impl Default for SlidingWindowRateLimiter {
+    fn default() -> Self {
+        Self {
+            shards: std::array::from_fn(|_| Mutex::new(HashMap::new())),
+        }
+    }
 }
 
 impl SlidingWindowRateLimiter {
+    fn shard_index(key: &str) -> usize {
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        (hasher.finish() as usize) % RATE_LIMITER_SHARDS
+    }
+
     pub fn check_and_record(&self, key: &str, max_per_min: u32) -> (bool, u32, u64) {
         if max_per_min == 0 {
             return (true, 0, 0);
         }
         let now = Instant::now();
-        let cutoff = now - Duration::from_secs(60);
-        let mut map = self.windows.lock().unwrap_or_else(|e| e.into_inner());
-        if map.len() > 10_000 && !map.contains_key(key) {
-            map.retain(|_, q| q.back().is_some_and(|ts| *ts > cutoff));
-            if map.len() > 10_000 {
+        let shard = &self.shards[Self::shard_index(key)];
+        let mut map = shard.lock().unwrap_or_else(|e| e.into_inner());
+        if map.len() >= MAX_KEYS_PER_SHARD && !map.contains_key(key) {
+            let expiry = RATE_WINDOW * 2;
+            map.retain(|_, slot| now.saturating_duration_since(slot.window_start) < expiry);
+            if map.len() >= MAX_KEYS_PER_SHARD {
                 if let Some(first_key) = map.keys().next().cloned() {
                     map.remove(&first_key);
                 }
             }
         }
-        let q = map.entry(key.to_string()).or_default();
-        while q.front().is_some_and(|ts| *ts <= cutoff) {
-            q.pop_front();
+        let slot = map.entry(key.to_string()).or_insert(WindowSlot {
+            window_start: now,
+            prev_count: 0,
+            curr_count: 0,
+        });
+        let elapsed = now.saturating_duration_since(slot.window_start);
+        if elapsed >= RATE_WINDOW * 2 {
+            slot.prev_count = 0;
+            slot.curr_count = 0;
+            slot.window_start = now;
+        } else if elapsed >= RATE_WINDOW {
+            slot.prev_count = slot.curr_count;
+            slot.curr_count = 0;
+            slot.window_start += RATE_WINDOW;
         }
-        let limit = max_per_min as usize;
-        if q.len() >= limit {
-            let reset_secs = q
-                .front()
-                .map(|oldest| {
-                    (Duration::from_secs(60) - now.saturating_duration_since(*oldest))
-                        .as_secs()
-                        .max(1)
-                })
-                .unwrap_or(60);
-            return (false, 0, reset_secs);
+
+        let elapsed_secs = now
+            .saturating_duration_since(slot.window_start)
+            .as_secs()
+            .min(60);
+        let remaining_secs = 60 - elapsed_secs;
+        let weighted_prev = ((u64::from(slot.prev_count) * remaining_secs) / 60) as u32;
+        let effective = slot.curr_count.saturating_add(weighted_prev);
+        if effective >= max_per_min {
+            return (false, 0, remaining_secs.max(1));
         }
-        q.push_back(now);
-        let remaining = limit.saturating_sub(q.len()) as u32;
-        (true, remaining, 60)
+
+        slot.curr_count = slot.curr_count.saturating_add(1);
+        let remaining = max_per_min.saturating_sub(effective + 1);
+        (true, remaining, remaining_secs.max(1))
     }
 }
 
@@ -299,4 +338,34 @@ pub async fn access_log_middleware(
     }
 
     res
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SlidingWindowRateLimiter;
+
+    #[test]
+    fn rate_limiter_enforces_limit_and_isolates_keys() {
+        let rl = SlidingWindowRateLimiter::default();
+
+        // max_per_min == 0 disables rate limiting.
+        assert_eq!(rl.check_and_record("route:unlimited:1.2.3.4", 0), (true, 0, 0));
+
+        // Allows up to max_per_min for key A and rejects the next request.
+        assert_eq!(rl.check_and_record("route:a:1.1.1.1", 3), (true, 2, 60));
+        assert_eq!(rl.check_and_record("route:a:1.1.1.1", 3), (true, 1, 60));
+        assert_eq!(rl.check_and_record("route:a:1.1.1.1", 3), (true, 0, 60));
+        let (allowed, remaining, reset_secs) = rl.check_and_record("route:a:1.1.1.1", 3);
+        assert!(!allowed);
+        assert_eq!(remaining, 0);
+        assert!((1..=60).contains(&reset_secs));
+
+        // Independent keys (across shards) remain unaffected.
+        for i in 0..32 {
+            let key = format!("route:b:10.0.0.{i}");
+            let (ok, rem, _) = rl.check_and_record(&key, 2);
+            assert!(ok);
+            assert_eq!(rem, 1);
+        }
+    }
 }
