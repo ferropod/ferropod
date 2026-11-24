@@ -291,6 +291,49 @@
     document.body.removeChild(ta);
   }
 
+  function focusModalFirstField(root) {
+    var body = $('modal-body-slot');
+    if (!body || root.contains(document.activeElement)) return;
+    var candidates = body.querySelectorAll('input:not([type="hidden"]):not([type="checkbox"]):not([type="file"]):not([disabled]):not([readonly]), textarea:not([disabled]):not([readonly]), select:not([disabled])');
+    for (var i = 0; i < candidates.length; i += 1) {
+      var el = candidates[i];
+      if (!el.closest('.hidden') && !el.closest('details:not([open])') && el.offsetParent !== null) {
+        el.focus();
+        if (el.tagName === 'INPUT' && el.value && (el.type === 'text' || el.type === 'search' || el.type === 'url')) {
+          try { el.setSelectionRange(el.value.length, el.value.length); } catch (_) {}
+        }
+        return;
+      }
+    }
+  }
+
+  function withSubmitLock(formSelectorOrEl, asyncFn) {
+    var form = typeof formSelectorOrEl === 'string' ? $(formSelectorOrEl) : formSelectorOrEl;
+    if (!form) return;
+    var inFlight = false;
+    form.addEventListener('submit', async function (ev) {
+      ev.preventDefault();
+      if (inFlight) return;
+      inFlight = true;
+      var buttons = [];
+      form.querySelectorAll('button[type="submit"], input[type="submit"]').forEach(function (b) { buttons.push(b); });
+      if (form.id) {
+        document.querySelectorAll('button[type="submit"][form="' + form.id + '"]').forEach(function (b) {
+          if (buttons.indexOf(b) === -1) buttons.push(b);
+        });
+      }
+      buttons.forEach(function (b) { b.disabled = true; });
+      try {
+        await asyncFn(ev);
+      } finally {
+        inFlight = false;
+        buttons.forEach(function (b) {
+          if (b.isConnected) b.disabled = false;
+        });
+      }
+    });
+  }
+
   function openModal(opts) {
     var root = $('modal-root');
     root.innerHTML =
@@ -313,6 +356,7 @@
     if (opts.onMount) {
       opts.onMount(root);
     }
+    focusModalFirstField(root);
   }
 
   function closeModal() {
@@ -890,8 +934,7 @@
       onMount: function () {
         loadResourceGroupOptions();
         $('cp-cancel').addEventListener('click', closeModal);
-        $('create-proj-form').addEventListener('submit', async function (ev) {
-          ev.preventDefault();
+        withSubmitLock('create-proj-form', async function () {
           var name = $('cp-name').value.trim();
           var hc = $('cp-hc').value.trim();
           var desc = $('cp-desc').value.trim();
@@ -949,8 +992,7 @@
       onMount: function () {
         loadResourceGroupOptions();
         $('ep-cancel').addEventListener('click', closeModal);
-        $('edit-proj-form').addEventListener('submit', async function (ev) {
-          ev.preventDefault();
+        withSubmitLock('edit-proj-form', async function () {
           var timeoutRaw = $('ep-timeout').value.trim();
           var memRaw = $('ep-mem').value.trim();
           try {
@@ -1083,7 +1125,10 @@
         '<div class="panel">' +
         (depRows
           ? '<div class="table-wrap"><table class="data-table stack-mobile"><thead><tr><th>' + esc(t('projectDetail.deployId')) + '</th><th>' + esc(t('common.status')) + '</th><th>' + esc(t('projectDetail.source')) + '</th><th>' + esc(t('projectDetail.spaFallback')) + '</th><th>' + esc(t('common.createdAt')) + '</th><th class="th-actions">' + esc(t('common.actions')) + '</th></tr></thead><tbody>' + depRows + '</tbody></table></div>'
-          : '<div class="empty-state">' + esc(t('projectDetail.noDeployments')) + '</div>') +
+          : '<div class="empty-state stack gap-sm" style="align-items:center;">' +
+            '<span>' + esc(t('projectDetail.noDeployments')) + '</span>' +
+            (writable ? '<button type="button" class="btn btn-primary" id="pd-empty-new-dep">+ ' + esc(t('projectDetail.newDeployment')) + '</button>' : '') +
+            '</div>') +
         '</div>';
     } else if (state.projectTab === 'secrets') {
       var envHtml = renderDeploymentEnv(p, deps, writable);
@@ -1174,6 +1219,7 @@
     }
 
     if ($('pd-new-dep')) $('pd-new-dep').addEventListener('click', function () { openNewDeploymentModal(p); });
+    if ($('pd-empty-new-dep')) $('pd-empty-new-dep').addEventListener('click', function () { openNewDeploymentModal(p); });
     if ($('pd-edit-runtime')) $('pd-edit-runtime').addEventListener('click', function () { openEditRuntimeModal(p); });
     if ($('pd-delete-runtime')) {
       $('pd-delete-runtime').addEventListener('click', function () {
@@ -1374,21 +1420,35 @@
       bktOpts += '<option value="' + esc(base.assets_bucket) + '" selected>' + esc(base.assets_bucket) + '</option>';
     }
 
+    var hasAdv = Boolean(base && (
+      base.assets_prefix ||
+      base.artifact_path ||
+      !base.spa_fallback ||
+      (base.crons && base.crons.length) ||
+      (base.bindings && Object.keys(base.bindings).length)
+    ));
+
     openModal({
       title: t('projectDetail.newDeployment'),
       body:
-        '<form id="new-dep-form" class="form-grid">' +
-        '<div class="field span-2"><label>' + esc(t('projectDetail.targetEnv')) + '</label>' +
+        '<form id="new-dep-form" class="stack gap-md">' +
+        '<div class="form-grid">' +
+        '<div class="field"><label>' + esc(t('projectDetail.targetEnv')) + '</label>' +
         '<select id="dep-env"><option value="prod">' + esc(t('projectDetail.envProd')) + '</option>' +
         '<option value="preview">' + esc(t('projectDetail.envPreview')) + '</option>' +
         '<option value="">' + esc(t('projectDetail.envReady')) + '</option></select></div>' +
         '<div class="field"><label>' + esc(t('projectDetail.assetsBucket')) + '</label><select id="dep-bucket">' + bktOpts + '</select></div>' +
+        '</div>' +
+        '<div class="field"><label for="dep-file">' + esc(t('projectDetail.artifactFile')) + '</label><input type="file" id="dep-file" accept=".wasm,.wat"><span class="muted text-xs">' + esc(t('projectDetail.artifactFileHint')) + '</span></div>' +
+        '<details class="adv-options"' + (hasAdv ? ' open' : '') + '>' +
+        '<summary>' + esc(t('common.advancedOptions')) + '</summary>' +
+        '<div class="adv-options-body form-grid">' +
         '<div class="field"><label>' + esc(t('projectDetail.assetsPrefix')) + '</label><input type="text" id="dep-prefix" placeholder="dist"></div>' +
-        '<div class="field span-2"><label for="dep-file">' + esc(t('projectDetail.artifactFile')) + '</label><input type="file" id="dep-file" accept=".wasm,.wat"><span class="muted text-xs">' + esc(t('projectDetail.artifactFileHint')) + '</span></div>' +
-        '<div class="field span-2"><label>' + esc(t('projectDetail.artifactPath')) + ' (' + esc(t('common.optional')) + ')</label><input type="text" id="dep-artifact" placeholder="worker.wasm"></div>' +
+        '<div class="field"><label>' + esc(t('projectDetail.artifactPath')) + ' (' + esc(t('common.optional')) + ')</label><input type="text" id="dep-artifact" placeholder="worker.wasm"></div>' +
         '<div class="span-2"><label class="checkbox-row"><input type="checkbox" id="dep-spa" checked> ' + esc(t('projectDetail.spaFallback')) + '</label></div>' +
         '<div class="field span-2"><label>' + esc(t('projectDetail.crons')) + '</label><textarea id="dep-crons" placeholder="' + esc(t('projectDetail.cronsPlaceholder')) + '"></textarea></div>' +
         '<div class="field span-2"><label>' + esc(t('projectDetail.bindings')) + '</label><textarea id="dep-bindings" class="mono" placeholder="' + esc(t('projectDetail.bindingsPlaceholder')) + '"></textarea></div>' +
+        '</div></details>' +
         '</form>',
       footer:
         '<button type="button" class="btn" id="dep-cancel">' + esc(t('common.cancel')) + '</button>' +
@@ -1402,8 +1462,7 @@
           $('dep-bindings').value = JSON.stringify(base.bindings || {}, null, 2);
         }
         $('dep-cancel').addEventListener('click', closeModal);
-        $('new-dep-form').addEventListener('submit', async function (ev) {
-          ev.preventDefault();
+        withSubmitLock('new-dep-form', async function () {
           var bindings = {};
           var rawBind = $('dep-bindings').value.trim();
           if (rawBind) {
@@ -1427,8 +1486,6 @@
             toast(t('projectDetail.invalidArtifactFile'), 'error');
             return;
           }
-          var submit = document.querySelector('button[form="new-dep-form"]');
-          submit.disabled = true;
 
           try {
             if (file) {
@@ -1458,7 +1515,6 @@
             toast(t('projectDetail.deployCreated'), 'success');
             renderProjectDetail(project.id, true);
           } catch (e) { toast(e.message, 'error'); }
-          finally { submit.disabled = false; }
         });
       }
     });
@@ -1653,8 +1709,7 @@
             $('rt-auth-pass').disabled = disabled;
           });
         }
-        $('route-form').addEventListener('submit', async function (ev) {
-          ev.preventDefault();
+        withSubmitLock('route-form', async function () {
           var host = isEdit ? existingRoute.host : $('rt-host').value.trim();
           if (!host) return;
           if (!isEdit) {
@@ -1705,8 +1760,6 @@
             return;
           }
 
-          var submit = document.querySelector('button[form="route-form"]');
-          submit.disabled = true;
           try {
             if (isEdit) {
               await api('/_api/v1/routes/' + enc(existingRoute.host), {
@@ -1744,7 +1797,6 @@
             toast(t('routes.saved'), 'success');
             onDone();
           } catch (e) { toast(e.message, 'error'); }
-          finally { submit.disabled = false; }
         });
       }
     });
@@ -1971,8 +2023,7 @@
             $('kns-ttl').value = chip.getAttribute('data-kv-ttl');
           });
         });
-        $('kv-ns-form').addEventListener('submit', async function (ev) {
-          ev.preventDefault();
+        withSubmitLock('kv-ns-form', async function () {
           var name = $('kns-name').value.trim();
           var pid = $('kns-proj').value || null;
           var ttl = Number($('kns-ttl').value || 604800);
@@ -2035,8 +2086,7 @@
             $('ekns-ttl').value = chip.getAttribute('data-ekv-ttl');
           });
         });
-        $('edit-kv-ns-form').addEventListener('submit', async function (ev) {
-          ev.preventDefault();
+        withSubmitLock('edit-kv-ns-form', async function () {
           var maxValRaw = $('ekns-max-val').value.trim();
           var maxKeysRaw = $('ekns-max-keys').value.trim();
           try {
@@ -2106,8 +2156,7 @@
         '<button type="submit" form="kv-put-form" class="btn btn-primary">' + esc(t('common.save')) + '</button>',
       onMount: function () {
         $('kvp-cancel').addEventListener('click', closeModal);
-        $('kv-put-form').addEventListener('submit', async function (ev) {
-          ev.preventDefault();
+        withSubmitLock('kv-put-form', async function () {
           var key = $('kvp-key').value.trim();
           var ttlRaw = $('kvp-ttl').value.trim();
           var metaRaw = $('kvp-meta').value.trim();
@@ -2146,8 +2195,7 @@
         '<button type="submit" form="kv-incr-form" class="btn btn-primary">' + esc(t('common.save')) + '</button>',
       onMount: function () {
         $('kvi-cancel').addEventListener('click', closeModal);
-        $('kv-incr-form').addEventListener('submit', async function (ev) {
-          ev.preventDefault();
+        withSubmitLock('kv-incr-form', async function () {
           var ttlRaw = $('kvi-ttl').value.trim();
           try {
             var res = await api('/_api/v1/kv/' + enc(state.selectedKvNs) + '/' + enc(key) + '/incr', {
@@ -2377,8 +2425,7 @@
       onMount: function () {
         loadResourceGroupOptions();
         $('eq-cancel').addEventListener('click', closeModal);
-        $('edit-queue-form').addEventListener('submit', async function (ev) {
-          ev.preventDefault();
+        withSubmitLock('edit-queue-form', async function () {
           var rateRaw = $('eq-rate').value.trim();
           var dlqRaw = $('eq-dlq').value.trim();
           var maxPendRaw = $('eq-max-pend').value.trim();
@@ -2468,8 +2515,7 @@
       onMount: function () {
         loadResourceGroupOptions();
         $('cq-cancel').addEventListener('click', closeModal);
-        $('create-q-form').addEventListener('submit', async function (ev) {
-          ev.preventDefault();
+        withSubmitLock('create-q-form', async function () {
           var name = $('cq-name').value.trim();
           var rateRaw = $('cq-rate').value.trim();
           var dlqRaw = $('cq-dlq').value.trim();
@@ -2521,8 +2567,7 @@
         '<button type="submit" form="enqueue-form" class="btn btn-primary">' + esc(t('queues.enqueue')) + '</button>',
       onMount: function () {
         $('enq-cancel').addEventListener('click', closeModal);
-        $('enqueue-form').addEventListener('submit', async function (ev) {
-          ev.preventDefault();
+        withSubmitLock('enqueue-form', async function () {
           var payload;
           try {
             payload = JSON.parse($('enq-payload').value);
@@ -2833,8 +2878,7 @@
       onMount: function () {
         loadResourceGroupOptions();
         $('cb-cancel').addEventListener('click', closeModal);
-        $('create-bkt-form').addEventListener('submit', async function (ev) {
-          ev.preventDefault();
+        withSubmitLock('create-bkt-form', async function () {
           var name = $('cb-name').value.trim();
           var maxObjRaw = $('cb-max-obj').value.trim();
           var quotaRaw = $('cb-quota').value.trim();
@@ -2888,8 +2932,7 @@
       onMount: function () {
         loadResourceGroupOptions();
         $('eb-cancel').addEventListener('click', closeModal);
-        $('edit-bkt-form').addEventListener('submit', async function (ev) {
-          ev.preventDefault();
+        withSubmitLock('edit-bkt-form', async function () {
           var maxObjRaw = $('eb-max-obj').value.trim();
           var quotaRaw = $('eb-quota').value.trim();
           var body = {
@@ -2934,8 +2977,7 @@
         '<button type="submit" form="presign-form" class="btn btn-primary">' + esc(t('blobs.presignGenerate')) + '</button>',
       onMount: function () {
         $('ps-cancel').addEventListener('click', closeModal);
-        $('presign-form').addEventListener('submit', async function (ev) {
-          ev.preventDefault();
+        withSubmitLock('presign-form', async function () {
           try {
             var res = await api('/_api/v1/buckets/' + enc(bucket) + '/presign', {
               method: 'POST',
@@ -3316,8 +3358,7 @@
       onMount: function () {
         loadResourceGroupOptions();
         $('cdb-cancel').addEventListener('click', closeModal);
-        $('create-db-form').addEventListener('submit', async function (ev) {
-          ev.preventDefault();
+        withSubmitLock('create-db-form', async function () {
           var maxRowsRaw = $('cdb-max-rows').value.trim();
           var maxSizeRaw = $('cdb-max-size').value.trim();
           var initSqlRaw = $('cdb-init-sql').value.trim();
@@ -3366,8 +3407,7 @@
       onMount: function () {
         loadResourceGroupOptions();
         $('edb-cancel').addEventListener('click', closeModal);
-        $('edit-db-form').addEventListener('submit', async function (ev) {
-          ev.preventDefault();
+        withSubmitLock('edit-db-form', async function () {
           var maxRowsRaw = $('edb-max-rows').value.trim();
           var maxSizeRaw = $('edb-max-size').value.trim();
           try {
@@ -3394,6 +3434,7 @@
   var searchState = {
     indexes: [],
     selected: '',
+    tab: 'playground',
     query: '',
     fuzzy: true,
     sort: '',
@@ -3439,6 +3480,40 @@
     renderSearch(false);
   }
 
+  function openUpsertSearchDocModal(selectedIndex, initialDoc) {
+    var jsonVal = initialDoc
+      ? JSON.stringify(initialDoc, null, 2)
+      : '{\n  "id": "",\n  "title": "",\n  "body": ""\n}';
+    openModal({
+      title: t('search.upsertDoc') + ' · ' + selectedIndex.name,
+      body:
+        '<form id="upsert-search-doc-form" class="stack gap-md">' +
+        '<div class="field"><label for="real-search-doc">' + esc(t('search.docJsonLabel')) + '</label>' +
+        '<textarea id="real-search-doc" class="mono" rows="8" required>' + esc(jsonVal) + '</textarea></div>' +
+        '</form>',
+      footer:
+        '<button type="button" class="btn" id="usd-cancel">' + esc(t('common.cancel')) + '</button>' +
+        '<button type="submit" form="upsert-search-doc-form" class="btn btn-primary">' + esc(t('common.save')) + '</button>',
+      onMount: function () {
+        $('usd-cancel').addEventListener('click', closeModal);
+        withSubmitLock('upsert-search-doc-form', async function () {
+          var targetIndexId = selectedIndex.id;
+          var reqToken = state.token;
+          try {
+            var doc = JSON.parse($('real-search-doc').value);
+            await api('/_api/v1/search/' + enc(targetIndexId) + '/docs', { method: 'POST', json: doc });
+            closeModal();
+            if (state.currentRoute !== 'search' || state.token !== reqToken || searchState.selected !== targetIndexId) return;
+            searchState.result = null;
+            searchState.offset = 0;
+            toast(t('common.updated'), 'success');
+            renderSearch();
+          } catch (e) { toast(e.message, 'error'); }
+        });
+      }
+    });
+  }
+
   async function renderSearch(fetchData) {
     var root = $('view-root');
     if (state.currentRoute !== 'search') return;
@@ -3461,15 +3536,13 @@
       if (selected && searchState.offset >= selected.doc_count) {
         searchState.offset = Math.max(0, Math.ceil(selected.doc_count / 100) * 100 - 100);
       }
-      var docs = selected ? await api('/_api/v1/search/' + enc(selected.id) + '/docs?limit=101&offset=' + searchState.offset) : [];
+      var docs = (selected && searchState.tab === 'docs')
+        ? await api('/_api/v1/search/' + enc(selected.id) + '/docs?limit=101&offset=' + searchState.offset)
+        : [];
       if (!isCurrentSearch()) return;
       var hasMoreDocs = docs.length > 100;
       docs = docs.slice(0, 100);
       var writable = selected && canWriteResource(selected.project_id);
-      var options = searchState.indexes.map(function (item) {
-        return '<option value="' + esc(item.id) + '"' + (item.id === searchState.selected ? ' selected' : '') +
-          '>' + esc(item.name) + '</option>';
-      }).join('');
       var idxMenu = searchState.indexes.length
         ? groupedMenu(searchState.indexes, function (item) {
             return '<button type="button" class="list-menu-item' + (item.id === searchState.selected ? ' active' : '') + '" data-select-search-idx="' + esc(item.id) + '">' +
@@ -3490,6 +3563,54 @@
         }).join('');
       }).join('') + '</div>' : '';
 
+      var tabBodyHtml = '';
+      if (selected) {
+        if (searchState.tab === 'docs') {
+          tabBodyHtml =
+            '<div class="row-between">' +
+            '<div class="row gap-xs">' +
+            '<button type="button" class="btn btn-sm" id="search-prev"' + (searchState.offset === 0 ? ' disabled' : '') + '>' + esc(t('search.previousPage')) + '</button>' +
+            '<button type="button" class="btn btn-sm" id="search-next"' + (!hasMoreDocs ? ' disabled' : '') + '>' + esc(t('search.nextPage')) + '</button>' +
+            '</div>' +
+            (writable ? '<button type="button" class="btn btn-primary btn-sm" id="search-upsert-doc-btn">+ ' + esc(t('search.upsertDoc')) + '</button>' : '') +
+            '</div>' +
+            (docs.length
+              ? '<div class="stack gap-sm">' + docs.map(function (doc) {
+                  return '<div class="panel"><div class="panel-header"><span class="mono text-xs text-strong">' + esc(doc.id || '-') + '</span>' +
+                    (writable && doc.id
+                      ? '<div class="row gap-xs">' +
+                        '<button type="button" class="btn btn-sm" data-search-doc-edit="' + esc(doc.id) + '">' + esc(t('common.edit')) + '</button>' +
+                        '<button type="button" class="btn btn-danger btn-sm" data-search-doc-delete="' + esc(doc.id) + '">' + esc(t('common.delete')) + '</button>' +
+                        '</div>'
+                      : '') +
+                    '</div><div class="panel-body" style="padding:12px;"><pre class="code-block" style="margin:0;">' + esc(JSON.stringify(doc, null, 2)) + '</pre></div></div>';
+                }).join('') + '</div>'
+              : '<div class="empty-state stack gap-sm" style="align-items:center;">' +
+                '<span>' + esc(t('common.empty')) + '</span>' +
+                (writable ? '<button type="button" class="btn btn-primary" id="search-empty-upsert-doc">+ ' + esc(t('search.upsertDoc')) + '</button>' : '') +
+                '</div>');
+        } else {
+          tabBodyHtml =
+            '<form id="real-search-form" class="stack gap-sm">' +
+            '<div class="row">' +
+            '<input type="search" id="real-search-query" value="' + esc(searchState.query) + '" placeholder="' + esc(t('search.queryPlaceholder')) + '" style="flex:1 1 220px;">' +
+            '<label class="checkbox-row"><input type="checkbox" id="real-search-fuzzy"' + (searchState.fuzzy ? ' checked' : '') + '> ' + esc(t('search.fuzzy')) + '</label>' +
+            '<select id="real-search-sort" style="width:auto;">' +
+            '<option value=""' + (!searchState.sort ? ' selected' : '') + '>' + esc(t('search.sortRelevance')) + '</option>' +
+            '<option value="updated_desc"' + (searchState.sort === 'updated_desc' ? ' selected' : '') + '>' + esc(t('search.sortUpdated')) + '</option>' +
+            '</select>' +
+            '<button class="btn btn-primary" type="submit">' + esc(t('common.search')) + '</button>' +
+            '</div>' +
+            '<details class="adv-options"' + (searchState.vectorText ? ' open' : '') + '><summary>' + esc(t('search.hybridVector')) + '</summary>' +
+            '<div class="adv-options-body form-grid">' +
+            '<div class="field"><label for="real-search-vector">' + esc(t('search.vectorArray')) + '</label><input type="text" id="real-search-vector" class="mono" value="' + esc(searchState.vectorText) + '" placeholder="[0.12, -0.34, 0.56]"></div>' +
+            '<div class="field"><label for="real-search-alpha">' + esc(t('search.vectorAlpha')) + '</label><input type="number" id="real-search-alpha" min="0" max="1" step="0.05" value="' + esc(searchState.alpha) + '"></div>' +
+            '</div></details></form>' +
+            facetsHtml +
+            (searchState.result ? '<pre class="code-block">' + esc(JSON.stringify(searchState.result, null, 2)) + '</pre>' : '');
+        }
+      }
+
       var detailHtml = !selected
         ? '<div class="panel"><div class="empty-state">' + esc(t('search.selectIndex')) + '</div></div>'
         : '<div class="panel"><div class="panel-header"><div class="toolbar">' +
@@ -3508,38 +3629,11 @@
             : '') +
           '</div></div>' +
           '<div class="panel-body stack gap-md">' +
-          '<select id="search-index-select" class="hidden">' + options + '</select>' +
-          '<form id="real-search-form" class="stack gap-sm">' +
-          '<div class="row">' +
-          '<input type="search" id="real-search-query" value="' + esc(searchState.query) + '" placeholder="' + esc(t('search.queryPlaceholder')) + '" style="flex:1 1 220px;">' +
-          '<label class="checkbox-row"><input type="checkbox" id="real-search-fuzzy"' + (searchState.fuzzy ? ' checked' : '') + '> ' + esc(t('search.fuzzy')) + '</label>' +
-          '<select id="real-search-sort" style="width:auto;">' +
-          '<option value=""' + (!searchState.sort ? ' selected' : '') + '>' + esc(t('search.sortRelevance')) + '</option>' +
-          '<option value="updated_desc"' + (searchState.sort === 'updated_desc' ? ' selected' : '') + '>' + esc(t('search.sortUpdated')) + '</option>' +
-          '</select>' +
-          '<button class="btn btn-primary" type="submit">' + esc(t('common.search')) + '</button>' +
+          '<div class="tabs" role="tablist">' +
+          '<button type="button" class="tab-btn' + (searchState.tab === 'playground' ? ' active' : '') + '" data-search-tab="playground">' + esc(t('search.tabPlayground')) + '</button>' +
+          '<button type="button" class="tab-btn' + (searchState.tab === 'docs' ? ' active' : '') + '" data-search-tab="docs">' + esc(t('search.tabDocs')) + ' (' + esc(selected.doc_count || 0) + ')</button>' +
           '</div>' +
-          '<details class="adv-options"' + (searchState.vectorText ? ' open' : '') + '><summary>' + esc(t('search.hybridVector')) + '</summary>' +
-          '<div class="adv-options-body form-grid">' +
-          '<div class="field"><label for="real-search-vector">' + esc(t('search.vectorArray')) + '</label><input type="text" id="real-search-vector" class="mono" value="' + esc(searchState.vectorText) + '" placeholder="[0.12, -0.34, 0.56]"></div>' +
-          '<div class="field"><label for="real-search-alpha">' + esc(t('search.vectorAlpha')) + '</label><input type="number" id="real-search-alpha" min="0" max="1" step="0.05" value="' + esc(searchState.alpha) + '"></div>' +
-          '</div></details></form>' +
-          facetsHtml +
-          (searchState.result ? '<pre class="code-block">' + esc(JSON.stringify(searchState.result, null, 2)) + '</pre>' : '') +
-          (writable
-            ? '<form id="real-search-doc-form" class="stack gap-sm"><div class="field"><label for="real-search-doc">' + esc(t('search.docJsonLabel')) + '</label>' +
-              '<textarea id="real-search-doc" class="mono" rows="5" required>{ "id": "", "title": "", "body": "" }</textarea></div>' +
-              '<div class="row"><button class="btn btn-primary" type="submit">' + esc(t('common.save')) + '</button></div></form>'
-            : '') +
-          (docs.length
-            ? '<div class="stack gap-sm">' + docs.map(function (doc) {
-                return '<div class="panel"><div class="panel-header"><span class="mono text-xs text-strong">' + esc(doc.id || '-') + '</span>' +
-                  (writable && doc.id ? '<button type="button" class="btn btn-danger btn-sm" data-search-doc-delete="' + esc(doc.id) + '">' + esc(t('common.delete')) + '</button>' : '') +
-                  '</div><div class="panel-body" style="padding:12px;"><pre class="code-block" style="margin:0;">' + esc(JSON.stringify(doc, null, 2)) + '</pre></div></div>';
-              }).join('') + '</div>'
-            : '<div class="empty-state">' + esc(t('common.empty')) + '</div>') +
-          '<div class="row gap-xs"><button type="button" class="btn btn-sm" id="search-prev"' + (searchState.offset === 0 ? ' disabled' : '') + '>' + esc(t('search.previousPage')) + '</button>' +
-          '<button type="button" class="btn btn-sm" id="search-next"' + (!hasMoreDocs ? ' disabled' : '') + '>' + esc(t('search.nextPage')) + '</button></div>' +
+          tabBodyHtml +
           '</div></div>';
 
       root.innerHTML =
@@ -3561,15 +3655,29 @@
           renderSearch(false);
         });
       });
-      if ($('search-index-select')) {
-        $('search-index-select').addEventListener('change', function (event) {
-          searchState.selected = event.target.value;
-          searchState.offset = 0;
-          searchState.facets = {};
-          searchState.result = null;
+      root.querySelectorAll('[data-search-tab]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          searchState.tab = btn.getAttribute('data-search-tab') || 'playground';
           renderSearch(false);
         });
+      });
+      if ($('search-upsert-doc-btn') && selected) {
+        $('search-upsert-doc-btn').addEventListener('click', function () {
+          openUpsertSearchDocModal(selected, null);
+        });
       }
+      if ($('search-empty-upsert-doc') && selected) {
+        $('search-empty-upsert-doc').addEventListener('click', function () {
+          openUpsertSearchDocModal(selected, null);
+        });
+      }
+      root.querySelectorAll('[data-search-doc-edit]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var docId = btn.getAttribute('data-search-doc-edit');
+          var found = docs.find(function (d) { return String(d.id) === String(docId); }) || null;
+          if (selected) openUpsertSearchDocModal(selected, found);
+        });
+      });
       if ($('search-commit-index') && selected) {
         $('search-commit-index').addEventListener('click', async function () {
           try {
@@ -3611,8 +3719,7 @@
           onMount: function () {
             loadResourceGroupOptions();
             $('esi-cancel').addEventListener('click', closeModal);
-            $('edit-search-index-form').addEventListener('submit', async function (event) {
-              event.preventDefault();
+            withSubmitLock('edit-search-index-form', async function () {
               try {
                 await api('/_api/v1/search/' + enc(selected.id), {
                   method: 'PATCH',
@@ -3658,8 +3765,7 @@
           onMount: function () {
             loadResourceGroupOptions();
             $('si-cancel').addEventListener('click', closeModal);
-            $('search-index-form').addEventListener('submit', async function (event) {
-              event.preventDefault();
+            withSubmitLock('search-index-form', async function () {
               var facetsRaw = $('search-index-facets').value.trim();
               var facets = facetsRaw ? facetsRaw.split(',').map(function (s) { return s.trim(); }).filter(Boolean) : null;
               var budgetRaw = $('search-index-budget').value.trim();
@@ -3698,7 +3804,7 @@
         try { await runRealSearchQuery(selected.id); } catch (e) { toast(e.message, 'error'); }
       });
     }
-    if ($('real-search-form')) $('real-search-form').addEventListener('submit', async function (event) {
+      if ($('real-search-form')) $('real-search-form').addEventListener('submit', async function (event) {
         event.preventDefault();
         searchState.query = $('real-search-query').value;
         searchState.fuzzy = Boolean($('real-search-fuzzy') && $('real-search-fuzzy').checked);
@@ -3707,19 +3813,6 @@
         searchState.alpha = $('real-search-alpha') ? $('real-search-alpha').value : '0.5';
         try {
           await runRealSearchQuery(selected.id);
-        } catch (e) { toast(e.message, 'error'); }
-      });
-      if ($('real-search-doc-form')) $('real-search-doc-form').addEventListener('submit', async function (event) {
-        event.preventDefault();
-        var targetIndexId = selected.id;
-        var reqToken = state.token;
-        try {
-          var doc = JSON.parse($('real-search-doc').value);
-          await api('/_api/v1/search/' + enc(targetIndexId) + '/docs', { method: 'POST', json: doc });
-          if (state.currentRoute !== 'search' || state.token !== reqToken || searchState.selected !== targetIndexId) return;
-          searchState.result = null;
-          searchState.offset = 0;
-          renderSearch();
         } catch (e) { toast(e.message, 'error'); }
       });
       root.querySelectorAll('[data-search-doc-delete]').forEach(function (button) {
@@ -3949,8 +4042,7 @@
         $('ct-scope').addEventListener('change', function (e) {
           $('ct-proj-wrap').classList.toggle('hidden', e.target.value !== 'project');
         });
-        $('create-tok-form').addEventListener('submit', async function (ev) {
-          ev.preventDefault();
+        withSubmitLock('create-tok-form', async function () {
           var sType = $('ct-scope').value;
           var scope = sType === 'project' ? 'project:' + $('ct-proj').value : sType;
           var expRaw = $('ct-exp').value.trim();
