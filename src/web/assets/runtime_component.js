@@ -101,7 +101,8 @@ runtimeSheet.replaceSync(`
     align-items: center;
     justify-content: center;
     gap: 6px;
-    padding: 7px 12px;
+    height: 36px;
+    padding: 0 14px;
     border-radius: var(--radius-sm);
     border: 1px solid var(--border);
     background: var(--surface);
@@ -109,15 +110,18 @@ runtimeSheet.replaceSync(`
     font-size: 13px;
     font-weight: 500;
     cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
   }
-  .btn:hover { background: var(--surface-subtle); border-color: var(--border-strong); }
+  .btn:hover:not(:disabled) { background: var(--surface-subtle); border-color: var(--border-strong); }
   .btn:disabled { opacity: 0.55; cursor: not-allowed; }
-  .btn-sm { padding: 5px 10px; font-size: 12px; }
-  .btn-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
-  .btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
-  .btn-danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 35%, var(--border)); background: var(--danger-soft); }
+  .btn-sm { height: 30px; padding: 0 10px; font-size: 12px; }
+  .btn-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+  .btn-primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+  .btn-danger { color: var(--danger); border-color: var(--border); background: var(--surface); }
+  .btn-danger:hover:not(:disabled) { background: var(--danger-soft); border-color: var(--danger); }
   .btn-ghost { background: transparent; border-color: transparent; color: var(--text-secondary); }
-  .btn-ghost:hover { background: var(--surface-subtle); }
+  .btn-ghost:hover:not(:disabled) { background: var(--surface-subtle); }
 
   .badge {
     display: inline-flex;
@@ -228,6 +232,22 @@ runtimeSheet.replaceSync(`
   }
   .invoke-bar select { width: auto; }
   .invoke-bar input[type="text"] { flex: 1 1 220px; }
+  .panel-header select,
+  .invoke-bar select {
+    min-height: 30px;
+    height: 30px;
+    padding: 0 28px 0 10px;
+    font-size: 12px;
+    background-position: right 8px center;
+  }
+  .panel-header input[type="search"],
+  .panel-header input[type="text"],
+  .invoke-bar input[type="text"] {
+    min-height: 30px;
+    height: 30px;
+    padding: 0 10px;
+    font-size: 12px;
+  }
 
   .link-pill {
     display: inline-flex;
@@ -282,14 +302,33 @@ runtimeSheet.replaceSync(`
     .stat-card { padding: 12px; }
     .stat-value { font-size: 15px; word-break: break-word; }
     .panel-header, .panel-body { padding: 12px 14px; }
-    input[type="text"], input[type="search"], select, textarea { font-size: 16px; min-height: 42px; }
+    input[type="text"], input[type="search"], input[type="number"], input:not([type]), select, textarea,
+    .panel-header select, .panel-header input[type="search"], .panel-header input[type="text"],
+    .invoke-bar select, .invoke-bar input[type="text"] {
+      height: auto;
+      font-size: 16px;
+      min-height: 42px;
+      padding: 7px 11px;
+    }
+    select, .panel-header select, .invoke-bar select {
+      padding-right: 32px;
+      background-position: right 10px center;
+    }
     .workloads-head-tools { width: 100%; }
     .workloads-head-tools input[type="search"] { width: 100%; min-width: 0; max-width: none; }
-    .btn { min-height: 38px; }
-    .btn-sm { min-height: 36px; }
+    .btn { min-height: 42px; height: auto; }
+    .btn-sm { min-height: 36px; height: auto; }
     .invoke-bar { flex-direction: column; align-items: stretch; }
     .invoke-bar select, .invoke-bar input[type="text"], .invoke-bar .btn { width: 100%; flex: 0 0 auto; }
-    dialog.fp-dialog { width: calc(100vw - 16px); max-height: 90dvh; }
+    dialog.fp-dialog {
+      margin: auto 0 0 0;
+      width: 100%;
+      max-width: 100%;
+      max-height: 92dvh;
+      border-radius: 16px 16px 0 0;
+      border-bottom: none;
+      padding-bottom: env(safe-area-inset-bottom);
+    }
 
     .data-table.stack-mobile thead { display: none; }
     .data-table.stack-mobile,
@@ -629,7 +668,7 @@ class FpRuntimePanel extends HTMLElement {
           <p class="page-subtitle">${esc(t('runtime.subtitle'))}</p>
         </div>
         <div class="row gap-xs">
-          ${this._canWrite ? `<button type="button" class="btn btn-primary btn-sm" id="new-runtime-btn">+ ${esc(t('runtime.newRuntime'))}</button>` : ''}
+          ${this._canWrite ? `<button type="button" class="btn btn-primary" id="new-runtime-btn">+ ${esc(t('runtime.newRuntime'))}</button>` : ''}
         </div>
       </div>
 

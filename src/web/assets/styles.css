@@ -904,6 +904,34 @@ textarea {
   flex: 1;
   min-width: 0;
 }
+.panel-header select:not(.lang-select),
+.toolbar select:not(.lang-select),
+.toolbar-filters select:not(.lang-select),
+.input-group:has(.btn-sm) select:not(.lang-select) {
+  min-height: 30px;
+  height: 30px;
+  padding: 0 28px 0 10px;
+  font-size: 12px;
+  background-position: right 8px center;
+}
+.panel-header input[type="search"],
+.panel-header input[type="text"],
+.toolbar input[type="search"],
+.toolbar input[type="text"],
+.toolbar-filters input[type="search"],
+.toolbar-filters input[type="text"],
+.input-group:has(.btn-sm) input[type="text"],
+.input-group:has(.btn-sm) input[type="search"] {
+  min-height: 30px;
+  height: 30px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+#real-search-form input[type="search"],
+#real-search-form select:not(.lang-select) {
+  min-height: 36px;
+  height: 36px;
+}
 .empty-state {
   padding: 40px 20px;
   text-align: center;
@@ -1141,11 +1169,38 @@ textarea {
   }
   .toolbar input[type="search"],
   .toolbar input[type="text"],
-  .toolbar select {
+  .toolbar select,
+  .panel-header input[type="search"],
+  .panel-header input[type="text"],
+  .panel-header select:not(.lang-select),
+  .toolbar-filters input[type="search"],
+  .toolbar-filters input[type="text"],
+  .toolbar-filters select:not(.lang-select),
+  .input-group:has(.btn-sm) input[type="text"],
+  .input-group:has(.btn-sm) input[type="search"],
+  .input-group:has(.btn-sm) select:not(.lang-select),
+  #real-search-form input[type="search"],
+  #real-search-form select:not(.lang-select) {
     width: 100% !important;
     max-width: none !important;
     min-width: 0 !important;
+    height: auto;
+    min-height: 42px;
+    padding: 7px 11px;
+    font-size: 16px;
     flex: 1 1 140px;
+  }
+  .toolbar select,
+  .panel-header select:not(.lang-select),
+  .toolbar-filters select:not(.lang-select),
+  .input-group:has(.btn-sm) select:not(.lang-select),
+  #real-search-form select:not(.lang-select) {
+    padding-right: 32px;
+    background-position: right 10px center;
+  }
+  .input-group:has(.btn-sm) input[type="text"],
+  .input-group:has(.btn-sm) input[type="search"] {
+    width: auto !important;
   }
   .hide-xs {
     display: none;

@@ -44,8 +44,10 @@ perfSheet.replaceSync(`
   .btn {
     display: inline-flex;
     align-items: center;
+    justify-content: center;
     gap: 5px;
-    padding: 4px 10px;
+    height: 30px;
+    padding: 0 10px;
     border-radius: var(--radius-sm);
     border: 1px solid var(--border);
     background: var(--surface);
@@ -54,8 +56,10 @@ perfSheet.replaceSync(`
     font-size: 12px;
     font-weight: 500;
     cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.15s ease, border-color 0.15s ease;
   }
-  .btn:hover { background: var(--surface-subtle); }
+  .btn:hover { background: var(--surface-subtle); border-color: var(--border-strong); }
   .badge {
     display: inline-flex;
     align-items: center;

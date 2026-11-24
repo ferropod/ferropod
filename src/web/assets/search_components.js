@@ -129,7 +129,8 @@ sharedSheet.replaceSync(`
     align-items: center;
     justify-content: center;
     gap: 6px;
-    padding: 7px 12px;
+    height: 36px;
+    padding: 0 14px;
     border-radius: var(--radius-sm);
     border: 1px solid var(--border);
     background: var(--surface);
@@ -137,24 +138,27 @@ sharedSheet.replaceSync(`
     font-size: 13px;
     font-weight: 500;
     cursor: pointer;
-    transition: background 0.14s ease, border-color 0.14s ease;
+    white-space: nowrap;
+    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
   }
-  .btn:hover { background: var(--surface-subtle); border-color: var(--border-strong); }
-  .btn-sm { padding: 5px 10px; font-size: 12px; }
+  .btn:hover:not(:disabled) { background: var(--surface-subtle); border-color: var(--border-strong); }
+  .btn:disabled { opacity: 0.55; cursor: not-allowed; }
+  .btn-sm { height: 30px; padding: 0 10px; font-size: 12px; }
   .btn-primary {
     background: var(--accent);
     border-color: var(--accent);
     color: var(--accent-text);
+    font-weight: 600;
   }
-  .btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+  .btn-primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
   .btn-danger {
     color: var(--danger);
-    border-color: color-mix(in srgb, var(--danger) 35%, var(--border));
-    background: var(--danger-soft);
+    border-color: var(--border);
+    background: var(--surface);
   }
-  .btn-danger:hover { border-color: var(--danger); }
+  .btn-danger:hover:not(:disabled) { background: var(--danger-soft); border-color: var(--danger); }
   .btn-ghost { background: transparent; border-color: transparent; color: var(--text-secondary); }
-  .btn-ghost:hover { background: var(--surface-subtle); color: var(--text); }
+  .btn-ghost:hover:not(:disabled) { background: var(--surface-subtle); color: var(--text); }
 
   .badge {
     display: inline-flex;
@@ -226,6 +230,20 @@ sharedSheet.replaceSync(`
     flex: 1 1 240px;
   }
   .search-bar select { width: auto; }
+  .panel-header select {
+    min-height: 30px;
+    height: 30px;
+    padding: 0 28px 0 10px;
+    font-size: 12px;
+    background-position: right 8px center;
+  }
+  .panel-header input[type="search"],
+  .panel-header input[type="text"] {
+    min-height: 30px;
+    height: 30px;
+    padding: 0 10px;
+    font-size: 12px;
+  }
 
   .checkbox-pill {
     display: inline-flex;
@@ -394,8 +412,16 @@ sharedSheet.replaceSync(`
   }
   @media (max-width: 639px) {
     .panel-header, .panel-body { padding: 12px 14px; }
-    input[type="text"], input[type="search"], select, textarea { font-size: 16px; min-height: 42px; }
-    .btn { min-height: 40px; }
+    input[type="text"], input[type="search"], input[type="number"], input:not([type]), select, textarea,
+    .panel-header select, .panel-header input[type="search"], .panel-header input[type="text"] {
+      height: auto;
+      font-size: 16px;
+      min-height: 42px;
+      padding: 7px 11px;
+    }
+    select, .panel-header select { padding-right: 32px; background-position: right 10px center; }
+    .btn { min-height: 42px; height: auto; }
+    .btn-sm { min-height: 36px; height: auto; }
     .search-bar { flex-direction: column; align-items: stretch; }
     .search-bar input[type="search"], .search-bar input[type="text"], .search-bar .btn { width: 100%; flex: 0 0 auto; }
     .row select, .row input[type="text"] {
@@ -403,6 +429,15 @@ sharedSheet.replaceSync(`
       width: auto !important;
       max-width: none !important;
       min-width: 0;
+    }
+    dialog.fp-dialog {
+      margin: auto 0 0 0;
+      width: 100%;
+      max-width: 100%;
+      max-height: 92dvh;
+      border-radius: 16px 16px 0 0;
+      border-bottom: none;
+      padding-bottom: env(safe-area-inset-bottom);
     }
   }
 `);

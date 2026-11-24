@@ -87,7 +87,8 @@ opsSheet.replaceSync(`
     align-items: center;
     justify-content: center;
     gap: 6px;
-    padding: 7px 12px;
+    height: 36px;
+    padding: 0 14px;
     border-radius: var(--radius-sm);
     border: 1px solid var(--border);
     background: var(--surface);
@@ -95,15 +96,18 @@ opsSheet.replaceSync(`
     font-size: 13px;
     font-weight: 500;
     cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
   }
-  .btn:hover { background: var(--surface-subtle); border-color: var(--border-strong); }
+  .btn:hover:not(:disabled) { background: var(--surface-subtle); border-color: var(--border-strong); }
   .btn:disabled { opacity: 0.55; cursor: not-allowed; }
-  .btn-sm { padding: 5px 10px; font-size: 12px; }
-  .btn-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
-  .btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
-  .btn-danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 35%, var(--border)); background: var(--danger-soft); }
+  .btn-sm { height: 30px; padding: 0 10px; font-size: 12px; }
+  .btn-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+  .btn-primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+  .btn-danger { color: var(--danger); border-color: var(--border); background: var(--surface); }
+  .btn-danger:hover:not(:disabled) { background: var(--danger-soft); border-color: var(--danger); }
   .btn-ghost { background: transparent; border-color: transparent; color: var(--text-secondary); }
-  .btn-ghost:hover { background: var(--surface-subtle); }
+  .btn-ghost:hover:not(:disabled) { background: var(--surface-subtle); }
 
   .badge {
     display: inline-flex;
@@ -234,13 +238,35 @@ opsSheet.replaceSync(`
     gap: 8px;
     background: var(--surface-subtle);
   }
+  #auto-backup-form input[type="number"],
+  #rt-sub-ch {
+    min-height: 30px;
+    height: 30px;
+    padding: 0 10px;
+    font-size: 12px;
+  }
   @media (max-width: 767px) {
     .form-grid { grid-template-columns: 1fr; }
     .panel-header, .panel-body { padding: 12px 14px; }
-    input[type="text"], input[type="number"], input[type="url"], input[type="password"], select, textarea { font-size: 16px; min-height: 42px; }
-    .btn { min-height: 38px; }
-    .btn-sm { min-height: 36px; }
-    dialog.fp-dialog { width: calc(100vw - 16px); max-height: 90dvh; }
+    input[type="text"], input[type="number"], input[type="url"], input[type="password"], input:not([type]), select, textarea,
+    #auto-backup-form input[type="number"], #rt-sub-ch {
+      height: auto;
+      font-size: 16px;
+      min-height: 42px;
+      padding: 7px 11px;
+    }
+    select { padding-right: 32px; background-position: right 10px center; }
+    .btn { min-height: 42px; height: auto; }
+    .btn-sm { min-height: 36px; height: auto; }
+    dialog.fp-dialog {
+      margin: auto 0 0 0;
+      width: 100%;
+      max-width: 100%;
+      max-height: 92dvh;
+      border-radius: 16px 16px 0 0;
+      border-bottom: none;
+      padding-bottom: env(safe-area-inset-bottom);
+    }
 
     .data-table.stack-mobile thead { display: none; }
     .data-table.stack-mobile,
