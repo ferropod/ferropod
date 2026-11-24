@@ -14,7 +14,7 @@ categories = ["web-programming::http-server", "command-line-utilities"]
 tokio = { version = "1", features = ["full"] }
 axum = "0.8"
 tower = "0.5"
-tower-http = { version = "0.6", features = ["trace", "cors", "limit", "compression-gzip"] }
+tower-http = { version = "0.7", features = ["trace", "cors", "limit", "compression-gzip"] }
 turso = { version = "0.8", default-features = false, features = ["mimalloc"] }
 clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
