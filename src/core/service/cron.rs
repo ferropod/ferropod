@@ -234,20 +234,9 @@ impl PlatformService {
             ));
         }
         validate_cron_schedule(schedule)?;
-        let resolved_pid = match (&caller.scope, opts.project_id.as_deref()) {
-            (TokenScope::Admin, pid) => self.resolve_optional_project_id(pid).await?,
-            (TokenScope::Project(_), Some(req_pid)) => {
-                let proj = self.get_project_internal(req_pid).await?;
-                Self::require_project_write(caller, &proj.id)?;
-                Some(proj.id)
-            }
-            (TokenScope::Project(scope_pid), None) => Some(scope_pid.clone()),
-            (TokenScope::Readonly, _) => {
-                return Err(FerroError::Forbidden(
-                    "readonly token cannot create cron jobs".into(),
-                ));
-            }
-        };
+        let resolved_pid = self
+            .resolve_resource_owner(caller, opts.project_id.as_deref(), "cron jobs")
+            .await?;
 
         let now = Utc::now().timestamp_millis();
         let description = opts
@@ -524,6 +513,7 @@ impl PlatformService {
         )?;
         {
             let mut guard = self
+                .limits
                 .in_flight_crons
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
@@ -535,7 +525,7 @@ impl PlatformService {
             }
         }
         let _guard = CronInFlightGuard {
-            set: self.in_flight_crons.clone(),
+            set: self.limits.in_flight_crons.clone(),
             job_id: job.id.clone(),
         };
         self.execute_cron_job_internal(job, &caller.actor, true)
@@ -568,6 +558,7 @@ impl PlatformService {
             if due {
                 let inserted = {
                     let mut guard = self
+                        .limits
                         .in_flight_crons
                         .lock()
                         .unwrap_or_else(|e| e.into_inner());
@@ -575,7 +566,7 @@ impl PlatformService {
                 };
                 if inserted {
                     let guard = CronInFlightGuard {
-                        set: self.in_flight_crons.clone(),
+                        set: self.limits.in_flight_crons.clone(),
                         job_id: job.id.clone(),
                     };
                     due_jobs.push((job, guard));

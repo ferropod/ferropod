@@ -1029,6 +1029,7 @@ impl PlatformService {
         let cooldown = std::time::Duration::from_secs(super::ALERT_COOLDOWN_SECS);
         {
             let mut cds = self
+                .limits
                 .alert_cooldowns
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
@@ -1040,7 +1041,7 @@ impl PlatformService {
             }
             cds.insert(cd_key, std::time::Instant::now());
         }
-        let Ok(permit) = self.alert_concurrency.clone().try_acquire_owned() else {
+        let Ok(permit) = self.limits.alert_concurrency.clone().try_acquire_owned() else {
             warn!(
                 event = %event,
                 "alert webhook concurrency limit reached, dropping alert"

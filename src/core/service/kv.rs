@@ -77,20 +77,9 @@ impl PlatformService {
                 "kv namespace default_ttl_secs must be greater than 0 (KV entries must have an expiration time)".into(),
             ));
         }
-        let resolved_pid = match (&caller.scope, opts.project_id.as_deref()) {
-            (TokenScope::Admin, pid) => self.resolve_optional_project_id(pid).await?,
-            (TokenScope::Project(_), Some(req_pid)) => {
-                let proj = self.get_project_internal(req_pid).await?;
-                Self::require_project_write(caller, &proj.id)?;
-                Some(proj.id)
-            }
-            (TokenScope::Project(scope_pid), None) => Some(scope_pid.clone()),
-            (TokenScope::Readonly, _) => {
-                return Err(FerroError::Forbidden(
-                    "readonly token cannot create kv namespaces".into(),
-                ));
-            }
-        };
+        let resolved_pid = self
+            .resolve_resource_owner(caller, opts.project_id.as_deref(), "kv namespaces")
+            .await?;
         opts.project_id = resolved_pid.clone();
         opts.default_ttl_secs = Some(opts.default_ttl_secs.unwrap_or(DEFAULT_KV_TTL_SECS).max(1));
 

@@ -214,20 +214,9 @@ impl PlatformService {
                 "invalid bucket name '{name}'"
             )));
         }
-        let resolved_pid = match (&caller.scope, opts.project_id.as_deref()) {
-            (TokenScope::Admin, pid) => self.resolve_optional_project_id(pid).await?,
-            (TokenScope::Project(_), Some(req_pid)) => {
-                let proj = self.get_project_internal(req_pid).await?;
-                Self::require_project_write(caller, &proj.id)?;
-                Some(proj.id)
-            }
-            (TokenScope::Project(scope_pid), None) => Some(scope_pid.clone()),
-            (TokenScope::Readonly, _) => {
-                return Err(FerroError::Forbidden(
-                    "readonly token cannot create buckets".into(),
-                ));
-            }
-        };
+        let resolved_pid = self
+            .resolve_resource_owner(caller, opts.project_id.as_deref(), "buckets")
+            .await?;
         opts.project_id = resolved_pid.clone();
         opts.rate_limit_rpm = opts.rate_limit_rpm.filter(|v| *v > 0);
 
@@ -659,6 +648,7 @@ impl PlatformService {
 
     fn invalidate_bucket_cache_control(&self, bucket: &str) {
         let mut cache = self
+            .caches
             .bucket_cache_control
             .write()
             .unwrap_or_else(|e| e.into_inner());
@@ -669,6 +659,7 @@ impl PlatformService {
     pub async fn static_bucket_cache_control(&self, bucket: &str) -> Option<String> {
         {
             let cache = self
+                .caches
                 .bucket_cache_control
                 .read()
                 .unwrap_or_else(|e| e.into_inner());
@@ -684,6 +675,7 @@ impl PlatformService {
             .flatten()
             .and_then(|b| b.cache_control);
         let mut cache = self
+            .caches
             .bucket_cache_control
             .write()
             .unwrap_or_else(|e| e.into_inner());

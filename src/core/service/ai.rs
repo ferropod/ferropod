@@ -349,7 +349,7 @@ impl PlatformService {
 
     pub async fn clear_ai_cache(&self, caller: &Caller) -> Result<usize> {
         Self::require_admin(caller)?;
-        let mut guard = self.ai_cache.write().await;
+        let mut guard = self.caches.ai_cache.write().await;
         let count = guard.len();
         guard.clear();
         drop(guard);
@@ -521,7 +521,7 @@ impl PlatformService {
         self.enforce_ai_limits(&primary).await?;
         let _ai_permit = self
             .acquire_timed_permit(
-                self.ai_concurrency.clone(),
+                self.limits.ai_concurrency.clone(),
                 format!(
                     "AI gateway is busy (max concurrency {} reached)",
                     super::DEFAULT_AI_MAX_CONCURRENCY
@@ -545,7 +545,7 @@ impl PlatformService {
         let now_ms = Utc::now().timestamp_millis();
 
         if cache_enabled {
-            let cache = self.ai_cache.read().await;
+            let cache = self.caches.ai_cache.read().await;
             if let Some((exp_ms, cached_val)) = cache.get(&ckey) {
                 if now_ms < *exp_ms {
                     let model = cached_val
@@ -668,7 +668,7 @@ impl PlatformService {
             .await;
 
         if cache_enabled && status == 200 {
-            let mut cache = self.ai_cache.write().await;
+            let mut cache = self.caches.ai_cache.write().await;
             if cache.len() >= 512 {
                 let cutoff = Utc::now().timestamp_millis();
                 cache.retain(|_, (exp, _)| *exp > cutoff);

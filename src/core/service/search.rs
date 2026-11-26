@@ -70,20 +70,9 @@ impl PlatformService {
                 "search index name cannot be empty".into(),
             ));
         }
-        let resolved_pid = match (&caller.scope, opts.project_id.as_deref()) {
-            (TokenScope::Admin, pid) => self.resolve_optional_project_id(pid).await?,
-            (TokenScope::Project(_), Some(req_pid)) => {
-                let proj = self.get_project_internal(req_pid).await?;
-                Self::require_project_write(caller, &proj.id)?;
-                Some(proj.id)
-            }
-            (TokenScope::Project(scope_pid), None) => Some(scope_pid.clone()),
-            (TokenScope::Readonly, _) => {
-                return Err(FerroError::Forbidden(
-                    "readonly token cannot create search indexes".into(),
-                ));
-            }
-        };
+        let resolved_pid = self
+            .resolve_resource_owner(caller, opts.project_id.as_deref(), "search indexes")
+            .await?;
         opts.project_id = resolved_pid.clone();
 
         let meta = self.search.create_index_with_opts(name, opts).await?;

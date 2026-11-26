@@ -25,26 +25,16 @@ fn starts_with_sql_keyword(sql: &str, kw: &str) -> bool {
 
 impl PlatformService {
     async fn resolve_user_db(&self, id_or_name: &str) -> Result<UserDbMeta> {
-        {
-            let cache = self.db_meta_cache.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some((ts, meta)) = cache.get(id_or_name) {
-                if ts.elapsed() < Duration::from_secs(5) {
-                    return Ok(meta.clone());
-                }
-            }
+        if let Some(meta) = self.caches.db_meta.get(id_or_name) {
+            return Ok(meta);
         }
         let meta = self
             .registry
             .get_user_db(id_or_name)
             .await?
             .ok_or_else(|| FerroError::NotFound(format!("user db '{id_or_name}'")))?;
-        let mut cache = self.db_meta_cache.lock().unwrap_or_else(|e| e.into_inner());
-        if cache.len() >= 1024 {
-            cache.clear();
-        }
-        let now = Instant::now();
-        cache.insert(meta.id.clone(), (now, meta.clone()));
-        cache.insert(meta.name.clone(), (now, meta.clone()));
+        self.caches.db_meta.insert(meta.id.clone(), meta.clone());
+        self.caches.db_meta.insert(meta.name.clone(), meta.clone());
         Ok(meta)
     }
 
@@ -131,20 +121,9 @@ impl PlatformService {
                 "database name cannot be empty".into(),
             ));
         }
-        let resolved_pid = match (&caller.scope, opts.project_id.as_deref()) {
-            (TokenScope::Admin, pid) => self.resolve_optional_project_id(pid).await?,
-            (TokenScope::Project(_), Some(req_pid)) => {
-                let proj = self.get_project_internal(req_pid).await?;
-                Self::require_project_write(caller, &proj.id)?;
-                Some(proj.id)
-            }
-            (TokenScope::Project(scope_pid), None) => Some(scope_pid.clone()),
-            (TokenScope::Readonly, _) => {
-                return Err(FerroError::Forbidden(
-                    "readonly token cannot create databases".into(),
-                ));
-            }
-        };
+        let resolved_pid = self
+            .resolve_resource_owner(caller, opts.project_id.as_deref(), "databases")
+            .await?;
         opts.project_id = resolved_pid.clone();
         let init_sql = opts
             .init_sql
@@ -372,7 +351,8 @@ impl PlatformService {
             if insert_count > 0 {
                 let fresh_cached = {
                     let cache = self
-                        .db_row_count_cache
+                        .caches
+                        .db_row_counts
                         .lock()
                         .unwrap_or_else(|e| e.into_inner());
                     cache.get(&meta.id).and_then(|(ts, cnt)| {
@@ -391,7 +371,8 @@ impl PlatformService {
                         )));
                     }
                     let mut cache = self
-                        .db_row_count_cache
+                        .caches
+                        .db_row_counts
                         .lock()
                         .unwrap_or_else(|e| e.into_inner());
                     if let Some((_, cnt)) = cache.get_mut(&meta.id) {
@@ -411,7 +392,8 @@ impl PlatformService {
                     })??;
                     if total_rows >= max_r {
                         let mut cache = self
-                            .db_row_count_cache
+                            .caches
+                            .db_row_counts
                             .lock()
                             .unwrap_or_else(|e| e.into_inner());
                         cache.insert(meta.id.clone(), (Instant::now(), total_rows));
@@ -421,7 +403,8 @@ impl PlatformService {
                         )));
                     }
                     let mut cache = self
-                        .db_row_count_cache
+                        .caches
+                        .db_row_counts
                         .lock()
                         .unwrap_or_else(|e| e.into_inner());
                     cache.insert(

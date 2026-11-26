@@ -51,20 +51,9 @@ impl PlatformService {
                 "queue name cannot be empty".into(),
             ));
         }
-        let resolved_pid = match (&caller.scope, cfg.project_id.as_deref()) {
-            (TokenScope::Admin, pid) => self.resolve_optional_project_id(pid).await?,
-            (TokenScope::Project(_), Some(req_pid)) => {
-                let proj = self.get_project_internal(req_pid).await?;
-                Self::require_project_write(caller, &proj.id)?;
-                Some(proj.id)
-            }
-            (TokenScope::Project(scope_pid), None) => Some(scope_pid.clone()),
-            (TokenScope::Readonly, _) => {
-                return Err(FerroError::Forbidden(
-                    "readonly token cannot create queues".into(),
-                ));
-            }
-        };
+        let resolved_pid = self
+            .resolve_resource_owner(caller, cfg.project_id.as_deref(), "queues")
+            .await?;
         cfg.project_id = resolved_pid.clone();
         cfg.consumer_project_id = self
             .resolve_optional_project_id(cfg.consumer_project_id.as_deref())
@@ -308,7 +297,7 @@ impl PlatformService {
                 continue;
             }
             let max_conc = cfg.max_concurrency.clamp(1, 32) as usize;
-            let q_sem = Self::get_or_init_semaphore(&self.queue_concurrency, &cfg.name, max_conc);
+            let q_sem = self.limits.queue_concurrency.get_or_init(&cfg.name, max_conc);
             let Ok(q_permit) = q_sem.try_acquire_owned() else {
                 continue;
             };

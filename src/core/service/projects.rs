@@ -53,7 +53,7 @@ impl PlatformService {
         for entry in entries {
             map.insert(normalize_host(&entry.host), entry);
         }
-        let mut guard = self.routes.write().await;
+        let mut guard = self.caches.routes.write().await;
         *guard = map;
         Ok(())
     }
@@ -64,7 +64,7 @@ impl PlatformService {
         if key.is_empty() {
             return None;
         }
-        self.routes.read().await.get(&key).cloned()
+        self.caches.routes.read().await.get(&key).cloned()
     }
 
     /// Check whether a domain is present in the active routing table.
@@ -73,12 +73,12 @@ impl PlatformService {
         if key.is_empty() {
             return false;
         }
-        self.routes.read().await.contains_key(&key)
+        self.caches.routes.read().await.contains_key(&key)
     }
 
     /// Return all normalized domains currently bound in the active routing table.
     pub async fn allowed_domains(&self) -> Vec<String> {
-        let mut domains: Vec<String> = self.routes.read().await.keys().cloned().collect();
+        let mut domains: Vec<String> = self.caches.routes.read().await.keys().cloned().collect();
         domains.sort();
         domains
     }

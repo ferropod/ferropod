@@ -5,6 +5,7 @@ mod cron;
 mod db;
 mod kv;
 mod logs;
+mod primitives;
 mod projects;
 mod queue;
 mod realtime;
@@ -21,11 +22,12 @@ pub use projects::CreateDeploymentInput;
 pub use realtime::RealtimeHub;
 pub use settings::is_loopback_host;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::ops::Deref;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use chrono::Utc;
 use tokio::sync::{watch, Mutex, OwnedSemaphorePermit, RwLock, Semaphore};
@@ -35,8 +37,15 @@ use crate::config::{Config, Profile};
 use crate::core::crypto::Crypto;
 use crate::core::model::{
     AutoBackupConfig, Caller, FerroError, LogEntry, PlatformSettingsOverrides, Project, Result,
-    RouteEntry, TlsRuntimeState, UserDbMeta,
+    TlsRuntimeState, TokenScope,
 };
+use crate::core::traits::{
+    DbManager, KvStore, LogStore, ObjectStore, ProjectStore, QueueStore, RegistryStore,
+    SearchStore, SecretStore, TokenStore, WorkerRuntime,
+};
+use crate::runtime::WasmtimeRuntime;
+use crate::storage::search_store::TursoSearchStore;
+use primitives::{KeyedSemaphores, PlatformCaches, PlatformLimits, TtlCache};
 
 pub const DEFAULT_SERVICE_RATE_LIMIT_RPM: u32 = 1_200;
 pub const DEFAULT_KV_RATE_LIMIT_RPM: u32 = 2_400;
@@ -53,12 +62,6 @@ pub const DEFAULT_SEARCH_MAX_CONCURRENCY: usize = 8;
 pub const DEFAULT_AI_RATE_LIMIT_RPM: u32 = 120;
 pub const DEFAULT_AI_MAX_CONCURRENCY: usize = 16;
 pub const ALERT_COOLDOWN_SECS: u64 = 60;
-use crate::core::traits::{
-    DbManager, KvStore, LogStore, ObjectStore, ProjectStore, QueueStore, RegistryStore,
-    SearchStore, SecretStore, TokenStore, WorkerRuntime,
-};
-use crate::runtime::WasmtimeRuntime;
-use crate::storage::search_store::TursoSearchStore;
 
 /// Domain store dependencies required to build a [`PlatformService`].
 pub struct PlatformDeps {
@@ -177,46 +180,43 @@ impl DeploymentHealthTracker {
 
 /// Unified business orchestration layer shared by REST/Admin, MCP (M3), and Runtime (M2).
 #[derive(Clone)]
-pub struct PlatformService {
-    config: Config,
-    crypto: Crypto,
-    projects: Arc<dyn ProjectStore>,
-    secrets: Arc<dyn SecretStore>,
-    tokens: Arc<dyn TokenStore>,
-    registry: Arc<dyn RegistryStore>,
-    kv: Arc<dyn KvStore>,
-    queue: Arc<dyn QueueStore>,
-    objects: Arc<dyn ObjectStore>,
-    db: Arc<dyn DbManager>,
-    logs: Arc<dyn LogStore>,
-    search: Arc<dyn SearchStore>,
-    runtime: Arc<dyn WorkerRuntime>,
-    metrics: Arc<GatewayMetrics>,
-    pub(crate) rate_limiter: Arc<crate::gateway::guard::SlidingWindowRateLimiter>,
-    health_tracker: Arc<DeploymentHealthTracker>,
-    canary_counter: Arc<AtomicU64>,
-    ai_cache: Arc<RwLock<HashMap<String, (i64, serde_json::Value)>>>,
-    routes: Arc<RwLock<HashMap<String, RouteEntry>>>,
-    http_concurrency: Arc<Semaphore>,
-    route_refresh_lock: Arc<Mutex<()>>,
-    settings: Arc<std::sync::RwLock<PlatformSettingsOverrides>>,
-    has_alert_webhook_secret: Arc<AtomicBool>,
-    tls_runtime: Arc<std::sync::RwLock<TlsRuntimeState>>,
-    tls_reload_tx: watch::Sender<u64>,
-    realtime: Arc<RealtimeHub>,
-    bucket_cache_control: Arc<std::sync::RwLock<HashMap<String, Option<String>>>>,
-    db_concurrency: Arc<std::sync::Mutex<HashMap<String, Arc<Semaphore>>>>,
-    db_row_count_cache: Arc<std::sync::Mutex<HashMap<String, (Instant, usize)>>>,
-    admin_concurrency: Arc<Semaphore>,
-    app_concurrency: Arc<std::sync::Mutex<HashMap<String, Arc<Semaphore>>>>,
-    db_meta_cache: Arc<std::sync::Mutex<HashMap<String, (Instant, UserDbMeta)>>>,
-    search_concurrency: Arc<std::sync::Mutex<HashMap<String, Arc<Semaphore>>>>,
-    ai_http_client: reqwest::Client,
-    ai_concurrency: Arc<Semaphore>,
-    alert_cooldowns: Arc<std::sync::Mutex<HashMap<String, Instant>>>,
-    alert_concurrency: Arc<Semaphore>,
-    in_flight_crons: Arc<std::sync::Mutex<HashSet<String>>>,
-    queue_concurrency: Arc<std::sync::Mutex<HashMap<String, Arc<Semaphore>>>>,
+pub struct PlatformService(Arc<PlatformServiceInner>);
+
+impl Deref for PlatformService {
+    type Target = PlatformServiceInner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// Shared inner state backing [`PlatformService`].
+pub struct PlatformServiceInner {
+    pub(crate) config: Config,
+    pub(crate) crypto: Crypto,
+    pub(crate) projects: Arc<dyn ProjectStore>,
+    pub(crate) secrets: Arc<dyn SecretStore>,
+    pub(crate) tokens: Arc<dyn TokenStore>,
+    pub(crate) registry: Arc<dyn RegistryStore>,
+    pub(crate) kv: Arc<dyn KvStore>,
+    pub(crate) queue: Arc<dyn QueueStore>,
+    pub(crate) objects: Arc<dyn ObjectStore>,
+    pub(crate) db: Arc<dyn DbManager>,
+    pub(crate) logs: Arc<dyn LogStore>,
+    pub(crate) search: Arc<dyn SearchStore>,
+    pub(crate) runtime: Arc<dyn WorkerRuntime>,
+    pub(crate) metrics: Arc<GatewayMetrics>,
+    pub(crate) health_tracker: Arc<DeploymentHealthTracker>,
+    pub(crate) canary_counter: Arc<AtomicU64>,
+    pub(crate) route_refresh_lock: Arc<Mutex<()>>,
+    pub(crate) settings: Arc<std::sync::RwLock<PlatformSettingsOverrides>>,
+    pub(crate) has_alert_webhook_secret: Arc<AtomicBool>,
+    pub(crate) tls_runtime: Arc<std::sync::RwLock<TlsRuntimeState>>,
+    pub(crate) tls_reload_tx: watch::Sender<u64>,
+    pub(crate) realtime: Arc<RealtimeHub>,
+    pub(crate) ai_http_client: reqwest::Client,
+    pub(crate) limits: PlatformLimits,
+    pub(crate) caches: PlatformCaches,
 }
 
 impl PlatformService {
@@ -276,7 +276,7 @@ impl PlatformService {
         };
         let realtime = Arc::new(RealtimeHub::new(max_rt_channels));
 
-        let svc = Self {
+        let inner = PlatformServiceInner {
             config,
             crypto,
             projects: deps.projects,
@@ -291,32 +291,37 @@ impl PlatformService {
             search,
             runtime,
             metrics: Arc::new(GatewayMetrics::default()),
-            rate_limiter: Arc::new(crate::gateway::guard::SlidingWindowRateLimiter::default()),
             health_tracker: Arc::new(DeploymentHealthTracker::default()),
             canary_counter: Arc::new(AtomicU64::new(0)),
-            ai_cache: Arc::new(RwLock::new(HashMap::new())),
-            routes: Arc::new(RwLock::new(HashMap::new())),
-            http_concurrency,
             route_refresh_lock: Arc::new(Mutex::new(())),
             settings: Arc::new(std::sync::RwLock::new(initial_overrides)),
             has_alert_webhook_secret: Arc::new(AtomicBool::new(has_webhook_secret)),
             tls_runtime: Arc::new(std::sync::RwLock::new(initial_tls_state)),
             tls_reload_tx,
             realtime,
-            bucket_cache_control: Arc::new(std::sync::RwLock::new(HashMap::new())),
-            db_concurrency: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            db_row_count_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            admin_concurrency,
-            app_concurrency: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            db_meta_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            search_concurrency: Arc::new(std::sync::Mutex::new(HashMap::new())),
             ai_http_client,
-            ai_concurrency: Arc::new(Semaphore::new(DEFAULT_AI_MAX_CONCURRENCY)),
-            alert_cooldowns: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            alert_concurrency: Arc::new(Semaphore::new(8)),
-            in_flight_crons: Arc::new(std::sync::Mutex::new(HashSet::new())),
-            queue_concurrency: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            limits: PlatformLimits {
+                http_concurrency,
+                admin_concurrency,
+                app_concurrency: KeyedSemaphores::new(),
+                db_concurrency: KeyedSemaphores::new(),
+                search_concurrency: KeyedSemaphores::new(),
+                queue_concurrency: KeyedSemaphores::new(),
+                ai_concurrency: Arc::new(Semaphore::new(DEFAULT_AI_MAX_CONCURRENCY)),
+                alert_concurrency: Arc::new(Semaphore::new(8)),
+                alert_cooldowns: std::sync::Mutex::new(std::collections::HashMap::new()),
+                in_flight_crons: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+                rate_limiter: Arc::new(crate::gateway::guard::SlidingWindowRateLimiter::default()),
+            },
+            caches: PlatformCaches {
+                routes: RwLock::new(std::collections::HashMap::new()),
+                ai_cache: RwLock::new(std::collections::HashMap::new()),
+                bucket_cache_control: std::sync::RwLock::new(std::collections::HashMap::new()),
+                db_meta: TtlCache::new(Duration::from_secs(5), 1024),
+                db_row_counts: std::sync::Mutex::new(std::collections::HashMap::new()),
+            },
         };
+        let svc = Self(Arc::new(inner));
         wasmtime_rt.bind_service(svc.clone());
         svc.refresh_routes().await?;
         Ok(svc)
@@ -327,7 +332,7 @@ impl PlatformService {
     }
 
     pub fn rate_limiter(&self) -> &Arc<crate::gateway::guard::SlidingWindowRateLimiter> {
-        &self.rate_limiter
+        &self.limits.rate_limiter
     }
 
     pub(crate) fn enforce_service_rate_limit(
@@ -341,7 +346,7 @@ impl PlatformService {
         if effective_rpm == 0 {
             return Ok(());
         }
-        let (allowed, _, reset_secs) = self.rate_limiter.check_and_record(rl_key, effective_rpm);
+        let (allowed, _, reset_secs) = self.limits.rate_limiter.check_and_record(rl_key, effective_rpm);
         if !allowed {
             self.metrics
                 .rate_limited_total
@@ -351,18 +356,6 @@ impl PlatformService {
             )));
         }
         Ok(())
-    }
-
-    fn get_or_init_semaphore(
-        map: &std::sync::Mutex<HashMap<String, Arc<Semaphore>>>,
-        key: &str,
-        cap: usize,
-    ) -> Arc<Semaphore> {
-        let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
-        guard
-            .entry(key.to_string())
-            .or_insert_with(|| Arc::new(Semaphore::new(cap.max(1))))
-            .clone()
     }
 
     pub(crate) async fn acquire_timed_permit(
@@ -386,8 +379,10 @@ impl PlatformService {
         db_id: &str,
         db_name: &str,
     ) -> Result<OwnedSemaphorePermit> {
-        let sem =
-            Self::get_or_init_semaphore(&self.db_concurrency, db_id, DEFAULT_DB_MAX_CONCURRENCY);
+        let sem = self
+            .limits
+            .db_concurrency
+            .get_or_init(db_id, DEFAULT_DB_MAX_CONCURRENCY);
         self.acquire_timed_permit(
             sem,
             format!("database '{db_name}' is busy (max concurrency {DEFAULT_DB_MAX_CONCURRENCY} reached)"),
@@ -397,29 +392,28 @@ impl PlatformService {
 
     pub(crate) fn invalidate_db_caches(&self, db_id: &str) {
         let mut cache = self
-            .db_row_count_cache
+            .caches
+            .db_row_counts
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         cache.remove(db_id);
     }
 
     pub(crate) fn remove_db_concurrency(&self, db_id: &str) {
-        let mut guard = self.db_concurrency.lock().unwrap_or_else(|e| e.into_inner());
-        guard.remove(db_id);
+        self.limits.db_concurrency.remove(db_id);
     }
 
     pub(crate) fn invalidate_db_meta_cache(&self) {
-        let mut guard = self.db_meta_cache.lock().unwrap_or_else(|e| e.into_inner());
-        guard.clear();
+        self.caches.db_meta.clear();
     }
 
     pub fn try_acquire_admin_permit(&self) -> Option<OwnedSemaphorePermit> {
-        self.admin_concurrency.clone().try_acquire_owned().ok()
+        self.limits.admin_concurrency.clone().try_acquire_owned().ok()
     }
 
     pub(crate) fn try_acquire_app_permit(&self, project_id: &str) -> Option<OwnedSemaphorePermit> {
         let cap = (self.config.max_concurrency / 2).max(4);
-        let sem = Self::get_or_init_semaphore(&self.app_concurrency, project_id, cap);
+        let sem = self.limits.app_concurrency.get_or_init(project_id, cap);
         sem.try_acquire_owned().ok()
     }
 
@@ -428,11 +422,10 @@ impl PlatformService {
         index_id: &str,
         index_name: &str,
     ) -> Result<OwnedSemaphorePermit> {
-        let sem = Self::get_or_init_semaphore(
-            &self.search_concurrency,
-            index_id,
-            DEFAULT_SEARCH_MAX_CONCURRENCY,
-        );
+        let sem = self
+            .limits
+            .search_concurrency
+            .get_or_init(index_id, DEFAULT_SEARCH_MAX_CONCURRENCY);
         self.acquire_timed_permit(
             sem,
             format!(
@@ -443,11 +436,7 @@ impl PlatformService {
     }
 
     pub(crate) fn remove_search_concurrency(&self, index_id: &str) {
-        let mut guard = self
-            .search_concurrency
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        guard.remove(index_id);
+        self.limits.search_concurrency.remove(index_id);
     }
 
     pub fn health_tracker(&self) -> &Arc<DeploymentHealthTracker> {
@@ -467,7 +456,7 @@ impl PlatformService {
     }
 
     pub fn try_acquire_http_permit(&self) -> Option<OwnedSemaphorePermit> {
-        self.http_concurrency.clone().try_acquire_owned().ok()
+        self.limits.http_concurrency.clone().try_acquire_owned().ok()
     }
 
     pub fn emit_log(&self, entry: LogEntry) {
@@ -842,6 +831,26 @@ impl PlatformService {
                 Ok(Some(proj.id))
             }
             None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn resolve_resource_owner(
+        &self,
+        caller: &Caller,
+        requested_project_id: Option<&str>,
+        resource_plural: &str,
+    ) -> Result<Option<String>> {
+        match (&caller.scope, requested_project_id) {
+            (TokenScope::Admin, pid) => self.resolve_optional_project_id(pid).await,
+            (TokenScope::Project(_), Some(req_pid)) => {
+                let proj = self.get_project_internal(req_pid).await?;
+                Self::require_project_write(caller, &proj.id)?;
+                Ok(Some(proj.id))
+            }
+            (TokenScope::Project(scope_pid), None) => Ok(Some(scope_pid.clone())),
+            (TokenScope::Readonly, _) => Err(FerroError::Forbidden(format!(
+                "readonly token cannot create {resource_plural}"
+            ))),
         }
     }
 }
