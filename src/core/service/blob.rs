@@ -69,6 +69,22 @@ impl PlatformService {
             .ok_or_else(|| FerroError::NotFound(format!("bucket '{name}'")))
     }
 
+    fn enforce_bucket_caller_rate_limit(
+        &self,
+        meta: &BucketMeta,
+        auth: &BlobAuth<'_>,
+    ) -> Result<()> {
+        if let BlobAuth::Caller(caller) = auth {
+            self.enforce_service_rate_limit(
+                &format!("blob-actor:{}:{}", meta.name, caller.actor),
+                meta.rate_limit_rpm,
+                super::DEFAULT_BLOB_RATE_LIMIT_RPM,
+                &format!("bucket '{}'", meta.name),
+            )?;
+        }
+        Ok(())
+    }
+
     async fn authorize_blob_read(
         &self,
         auth: &BlobAuth<'_>,
@@ -78,15 +94,13 @@ impl PlatformService {
         let meta = self.get_bucket_or_err(bucket).await?;
         match auth {
             BlobAuth::Caller(caller) => {
-                if meta.public_read && key.is_some() {
-                    return Ok(meta);
+                if !(meta.public_read && key.is_some()) {
+                    Self::require_resource_read(
+                        caller,
+                        meta.project_id.as_deref(),
+                        &format!("bucket '{bucket}'"),
+                    )?;
                 }
-                Self::require_resource_read(
-                    caller,
-                    meta.project_id.as_deref(),
-                    &format!("bucket '{bucket}'"),
-                )?;
-                Ok(meta)
             }
             BlobAuth::Presigned { op, exp, sig } => {
                 if *op != "get" {
@@ -101,18 +115,17 @@ impl PlatformService {
                 })?;
                 self.crypto
                     .verify_blob_op("get", bucket, k, *exp, sig, Utc::now().timestamp())?;
-                Ok(meta)
             }
             BlobAuth::Anonymous => {
-                if meta.public_read && key.is_some() {
-                    Ok(meta)
-                } else {
-                    Err(FerroError::Unauthorized(format!(
+                if !(meta.public_read && key.is_some()) {
+                    return Err(FerroError::Unauthorized(format!(
                         "authentication required for bucket '{bucket}'"
-                    )))
+                    )));
                 }
             }
         }
+        self.enforce_bucket_caller_rate_limit(&meta, auth)?;
+        Ok(meta)
     }
 
     async fn authorize_blob_write(
@@ -130,7 +143,6 @@ impl PlatformService {
                     meta.project_id.as_deref(),
                     &format!("bucket '{bucket}'"),
                 )?;
-                Ok(meta)
             }
             BlobAuth::Presigned { op, exp, sig } => {
                 if !allow_presigned_put || *op != "put" {
@@ -146,12 +158,15 @@ impl PlatformService {
                     sig,
                     Utc::now().timestamp(),
                 )?;
-                Ok(meta)
             }
-            BlobAuth::Anonymous => Err(FerroError::Unauthorized(format!(
-                "authentication required to write to bucket '{bucket}'"
-            ))),
+            BlobAuth::Anonymous => {
+                return Err(FerroError::Unauthorized(format!(
+                    "authentication required to write to bucket '{bucket}'"
+                )));
+            }
         }
+        self.enforce_bucket_caller_rate_limit(&meta, auth)?;
+        Ok(meta)
     }
 
     pub async fn create_bucket(
@@ -214,6 +229,7 @@ impl PlatformService {
             }
         };
         opts.project_id = resolved_pid.clone();
+        opts.rate_limit_rpm = opts.rate_limit_rpm.filter(|v| *v > 0);
 
         let meta = self.objects.create_bucket_with_opts(name, opts).await?;
         self.audit(
@@ -280,6 +296,9 @@ impl PlatformService {
             } else {
                 Some(trimmed.to_string())
             };
+        }
+        if let Some(rpm) = opts.rate_limit_rpm {
+            meta.rate_limit_rpm = if rpm == 0 { None } else { Some(rpm) };
         }
         self.objects.update_bucket(&meta).await?;
         self.invalidate_bucket_cache_control(&meta.name);
@@ -492,6 +511,12 @@ impl PlatformService {
             caller,
             meta.project_id.as_deref(),
             &format!("bucket '{bucket}'"),
+        )?;
+        self.enforce_service_rate_limit(
+            &format!("blob-actor:{}:{}", meta.name, caller.actor),
+            meta.rate_limit_rpm,
+            super::DEFAULT_BLOB_RATE_LIMIT_RPM,
+            &format!("bucket '{}'", meta.name),
         )?;
 
         let norm_prefix = normalize_folder_prefix(prefix.unwrap_or(""))?;

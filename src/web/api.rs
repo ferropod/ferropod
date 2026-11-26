@@ -175,6 +175,7 @@ struct CreateKvNamespaceReq {
     default_ephemeral: bool,
     max_value_bytes: Option<usize>,
     max_keys: Option<usize>,
+    rate_limit_rpm: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -185,6 +186,7 @@ struct UpdateKvNamespaceReq {
     default_ephemeral: Option<bool>,
     max_value_bytes: Option<usize>,
     max_keys: Option<usize>,
+    rate_limit_rpm: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -260,6 +262,7 @@ struct CreateBucketReq {
     allowed_content_types: Option<String>,
     cache_control: Option<String>,
     cors_origins: Option<String>,
+    rate_limit_rpm: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -272,6 +275,7 @@ struct UpdateBucketReq {
     allowed_content_types: Option<String>,
     cache_control: Option<String>,
     cors_origins: Option<String>,
+    rate_limit_rpm: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -308,6 +312,8 @@ struct CreateDbReq {
     max_size_mb: Option<usize>,
     foreign_keys: Option<bool>,
     read_only: Option<bool>,
+    query_timeout_ms: Option<u64>,
+    rate_limit_rpm: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -318,6 +324,8 @@ struct UpdateDbReq {
     max_size_mb: Option<usize>,
     foreign_keys: Option<bool>,
     read_only: Option<bool>,
+    query_timeout_ms: Option<u64>,
+    rate_limit_rpm: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1602,6 +1610,7 @@ async fn kv_create_namespace(
                 default_ephemeral: Some(req.default_ephemeral),
                 max_value_bytes: req.max_value_bytes,
                 max_keys: req.max_keys,
+                rate_limit_rpm: req.rate_limit_rpm,
             },
         )
         .await
@@ -1628,6 +1637,7 @@ async fn kv_update_namespace(
                 default_ephemeral: req.default_ephemeral,
                 max_value_bytes: req.max_value_bytes,
                 max_keys: req.max_keys,
+                rate_limit_rpm: req.rate_limit_rpm,
             },
         )
         .await
@@ -1970,6 +1980,7 @@ async fn bucket_create(
                 allowed_content_types: req.allowed_content_types,
                 cache_control: req.cache_control,
                 cors_origins: req.cors_origins,
+                rate_limit_rpm: req.rate_limit_rpm,
             },
         )
         .await
@@ -1998,6 +2009,7 @@ async fn bucket_update(
                 allowed_content_types: req.allowed_content_types,
                 cache_control: req.cache_control,
                 cors_origins: req.cors_origins,
+                rate_limit_rpm: req.rate_limit_rpm,
             },
         )
         .await
@@ -2200,6 +2212,8 @@ async fn db_create(
                 max_size_mb: req.max_size_mb,
                 foreign_keys: req.foreign_keys,
                 read_only: req.read_only,
+                query_timeout_ms: req.query_timeout_ms,
+                rate_limit_rpm: req.rate_limit_rpm,
             },
         )
         .await
@@ -2227,6 +2241,8 @@ async fn db_update(
                 max_size_mb: req.max_size_mb,
                 foreign_keys: req.foreign_keys,
                 read_only: req.read_only,
+                query_timeout_ms: req.query_timeout_ms,
+                rate_limit_rpm: req.rate_limit_rpm,
             },
         )
         .await
@@ -2366,6 +2382,8 @@ struct CreateSearchIndexReq {
     description: Option<String>,
     tokenizer: Option<String>,
     writer_budget_mb: Option<usize>,
+    max_docs: Option<usize>,
+    rate_limit_rpm: Option<u32>,
     schema: Option<Vec<SearchFieldSchema>>,
     facet_fields: Option<Vec<String>>,
 }
@@ -2375,6 +2393,8 @@ struct UpdateSearchIndexReq {
     group: Option<String>,
     description: Option<String>,
     writer_budget_mb: Option<usize>,
+    max_docs: Option<usize>,
+    rate_limit_rpm: Option<u32>,
 }
 
 async fn search_list_indexes(
@@ -2403,6 +2423,8 @@ async fn search_create_index(
                 description: req.description,
                 tokenizer: req.tokenizer,
                 writer_budget_mb: req.writer_budget_mb,
+                max_docs: req.max_docs,
+                rate_limit_rpm: req.rate_limit_rpm,
                 schema: req.schema,
                 facet_fields: req.facet_fields,
             },
@@ -2429,6 +2451,8 @@ async fn search_update_index(
                 description: req.description,
                 tokenizer: None,
                 writer_budget_mb: req.writer_budget_mb,
+                max_docs: req.max_docs,
+                rate_limit_rpm: req.rate_limit_rpm,
                 schema: None,
                 facet_fields: None,
             },

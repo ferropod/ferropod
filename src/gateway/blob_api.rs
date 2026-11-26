@@ -1,6 +1,8 @@
+use std::net::{IpAddr, SocketAddr};
+
 use axum::{
     body::Body,
-    extract::{Path, Query, State},
+    extract::{ConnectInfo, FromRequestParts, Path, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, put},
@@ -11,7 +13,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::model::{BlobAuth, ByteRange, ByteStream, Caller, FerroError};
 use crate::core::service::PlatformService;
-use crate::gateway::guard::{authenticate_caller, extract_bearer_token, ApiError};
+use crate::gateway::guard::{
+    authenticate_caller, client_ip_from_headers, extract_bearer_token, ApiError,
+};
 
 const BLOB_CSP_HEADER: &str =
     "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'";
@@ -79,6 +83,63 @@ async fn resolve_blob_auth(
     Ok(OwnedBlobAuth::Anonymous)
 }
 
+struct OptionalPeerIp(Option<IpAddr>);
+
+impl<S> FromRequestParts<S> for OptionalPeerIp
+where
+    S: Send + Sync,
+{
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> std::result::Result<Self, Self::Rejection> {
+        let ip = parts
+            .extensions
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|ci| ci.0.ip());
+        Ok(Self(ip))
+    }
+}
+
+async fn enforce_bucket_rate_limit(
+    svc: &PlatformService,
+    bucket: &str,
+    headers: &HeaderMap,
+    peer_ip: Option<IpAddr>,
+) -> std::result::Result<(), Response> {
+    let Ok(Some(meta)) = svc.get_bucket_meta(bucket).await else {
+        return Ok(());
+    };
+    let rpm = meta
+        .rate_limit_rpm
+        .filter(|r| *r > 0)
+        .unwrap_or(crate::core::service::DEFAULT_BLOB_RATE_LIMIT_RPM);
+    if rpm == 0 {
+        return Ok(());
+    }
+    let ip = client_ip_from_headers(headers, peer_ip, svc.effective_trust_proxy_headers());
+    let rl_key = format!("blob:{bucket}:{ip}");
+    let (allowed, _remaining, reset_secs) = svc.rate_limiter().check_and_record(&rl_key, rpm);
+    if !allowed {
+        svc.metrics()
+            .rate_limited_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            [
+                ("retry-after", reset_secs.to_string()),
+                ("x-ratelimit-limit", rpm.to_string()),
+                ("x-ratelimit-remaining", "0".to_string()),
+            ],
+            Json(serde_json::json!({ "error": "bucket rate limit exceeded" })),
+        )
+            .into_response());
+    }
+    Ok(())
+}
+
 pub fn router() -> Router<PlatformService> {
     Router::new().route("/{bucket}", get(list_objects)).route(
         "/{bucket}/{*key}",
@@ -93,9 +154,13 @@ async fn put_object(
     State(svc): State<PlatformService>,
     Path((bucket, key)): Path<(String, String)>,
     Query(q): Query<BlobQuery>,
+    OptionalPeerIp(peer_ip): OptionalPeerIp,
     headers: HeaderMap,
     body: Body,
-) -> std::result::Result<impl IntoResponse, ApiError> {
+) -> std::result::Result<Response, ApiError> {
+    if let Err(resp) = enforce_bucket_rate_limit(&svc, &bucket, &headers, peer_ip).await {
+        return Ok(resp);
+    }
     let auth = resolve_blob_auth(&svc, &headers, &q).await?;
 
     let content_type = headers
@@ -118,15 +183,19 @@ async fn put_object(
         .put_object_stream(&auth.as_ref(), &bucket, &key, stream, &content_type, None)
         .await
         .map_err(ApiError)?;
-    Ok((StatusCode::CREATED, Json(meta)))
+    Ok((StatusCode::CREATED, Json(meta)).into_response())
 }
 
 async fn get_object(
     State(svc): State<PlatformService>,
     Path((bucket, key)): Path<(String, String)>,
     Query(q): Query<BlobQuery>,
+    OptionalPeerIp(peer_ip): OptionalPeerIp,
     headers: HeaderMap,
 ) -> std::result::Result<Response, ApiError> {
+    if let Err(resp) = enforce_bucket_rate_limit(&svc, &bucket, &headers, peer_ip).await {
+        return Ok(resp);
+    }
     let auth = resolve_blob_auth(&svc, &headers, &q).await?;
     let auth_ref = auth.as_ref();
 
@@ -208,8 +277,12 @@ async fn head_object(
     State(svc): State<PlatformService>,
     Path((bucket, key)): Path<(String, String)>,
     Query(q): Query<BlobQuery>,
+    OptionalPeerIp(peer_ip): OptionalPeerIp,
     headers: HeaderMap,
 ) -> std::result::Result<Response, ApiError> {
+    if let Err(resp) = enforce_bucket_rate_limit(&svc, &bucket, &headers, peer_ip).await {
+        return Ok(resp);
+    }
     let auth = resolve_blob_auth(&svc, &headers, &q).await?;
     let meta = svc
         .head_object(&auth.as_ref(), &bucket, &key)
@@ -242,8 +315,12 @@ async fn delete_object(
     State(svc): State<PlatformService>,
     Path((bucket, key)): Path<(String, String)>,
     Query(q): Query<BlobQuery>,
+    OptionalPeerIp(peer_ip): OptionalPeerIp,
     headers: HeaderMap,
-) -> std::result::Result<impl IntoResponse, ApiError> {
+) -> std::result::Result<Response, ApiError> {
+    if let Err(resp) = enforce_bucket_rate_limit(&svc, &bucket, &headers, peer_ip).await {
+        return Ok(resp);
+    }
     let auth = resolve_blob_auth(&svc, &headers, &q).await?;
     let deleted = svc
         .delete_object(&auth.as_ref(), &bucket, &key)
@@ -254,15 +331,19 @@ async fn delete_object(
             "object '{bucket}/{key}'"
         ))));
     }
-    Ok(Json(DeleteResp { deleted }))
+    Ok(Json(DeleteResp { deleted }).into_response())
 }
 
 async fn list_objects(
     State(svc): State<PlatformService>,
     Path(bucket): Path<String>,
     Query(q): Query<ListQuery>,
+    OptionalPeerIp(peer_ip): OptionalPeerIp,
     headers: HeaderMap,
-) -> std::result::Result<impl IntoResponse, ApiError> {
+) -> std::result::Result<Response, ApiError> {
+    if let Err(resp) = enforce_bucket_rate_limit(&svc, &bucket, &headers, peer_ip).await {
+        return Ok(resp);
+    }
     let auth = if extract_bearer_token(&headers, q.token.as_deref()).is_some() {
         OwnedBlobAuth::Caller(authenticate_caller(&svc, &headers, q.token.as_deref()).await?)
     } else {
@@ -277,7 +358,7 @@ async fn list_objects(
         )
         .await
         .map_err(ApiError)?;
-    Ok(Json(items))
+    Ok(Json(items).into_response())
 }
 
 pub fn parse_byte_range(header_val: &str, total_size: u64) -> Option<ByteRange> {

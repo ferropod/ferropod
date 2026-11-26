@@ -9,7 +9,7 @@ use crate::storage::tx::{connect_db, map_turso_err, with_retry};
 use super::{escape_like, opt_i64, opt_text, opt_text_param, row_to_object_meta, TursoCoreStore};
 
 const SELECT_BUCKET: &str =
-    "SELECT name, project_id, public_read, created_at, resource_group, description, max_object_size_mb, quota_mb, allowed_content_types, cache_control, cors_origins FROM blob_buckets";
+    "SELECT name, project_id, public_read, created_at, resource_group, description, max_object_size_mb, quota_mb, allowed_content_types, cache_control, cors_origins, rate_limit_rpm FROM blob_buckets";
 
 fn row_to_bucket(row: &turso::Row) -> Result<BucketMeta> {
     Ok(BucketMeta {
@@ -24,6 +24,9 @@ fn row_to_bucket(row: &turso::Row) -> Result<BucketMeta> {
         allowed_content_types: opt_text(row, 8)?,
         cache_control: opt_text(row, 9)?,
         cors_origins: opt_text(row, 10)?,
+        rate_limit_rpm: opt_i64(row, 11)?
+            .and_then(|v| u32::try_from(v).ok())
+            .filter(|v| *v > 0),
     })
 }
 
@@ -58,6 +61,7 @@ impl BlobMetaStore for TursoCoreStore {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_owned);
+        let rate_limit_rpm = opts.rate_limit_rpm.filter(|v| *v > 0);
 
         let meta = BucketMeta {
             name: name.to_string(),
@@ -71,6 +75,7 @@ impl BlobMetaStore for TursoCoreStore {
             allowed_content_types,
             cache_control,
             cors_origins,
+            rate_limit_rpm,
         };
 
         let m = meta.clone();
@@ -80,8 +85,8 @@ impl BlobMetaStore for TursoCoreStore {
             async move {
                 let conn = db.connect()?;
                 conn.execute(
-                    "INSERT INTO blob_buckets (name, project_id, public_read, created_at, resource_group, description, max_object_size_mb, quota_mb, allowed_content_types, cache_control, cors_origins)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    "INSERT INTO blob_buckets (name, project_id, public_read, created_at, resource_group, description, max_object_size_mb, quota_mb, allowed_content_types, cache_control, cors_origins, rate_limit_rpm)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                     vec![
                         TursoValue::Text(m.name),
                         opt_text_param(m.project_id),
@@ -98,6 +103,9 @@ impl BlobMetaStore for TursoCoreStore {
                         opt_text_param(m.allowed_content_types),
                         opt_text_param(m.cache_control),
                         opt_text_param(m.cors_origins),
+                        m.rate_limit_rpm
+                            .map(|v| TursoValue::Integer(v as i64))
+                            .unwrap_or(TursoValue::Null),
                     ],
                 )
                 .await
@@ -117,8 +125,8 @@ impl BlobMetaStore for TursoCoreStore {
                 let conn = db.connect()?;
                 conn.execute(
                     "UPDATE blob_buckets SET public_read = ?1, resource_group = ?2, description = ?3,
-                     max_object_size_mb = ?4, quota_mb = ?5, allowed_content_types = ?6, cache_control = ?7, cors_origins = ?8
-                     WHERE name = ?9",
+                     max_object_size_mb = ?4, quota_mb = ?5, allowed_content_types = ?6, cache_control = ?7, cors_origins = ?8, rate_limit_rpm = ?9
+                     WHERE name = ?10",
                     vec![
                         TursoValue::Integer(if m.public_read { 1 } else { 0 }),
                         opt_text_param(m.group),
@@ -132,6 +140,10 @@ impl BlobMetaStore for TursoCoreStore {
                         opt_text_param(m.allowed_content_types),
                         opt_text_param(m.cache_control),
                         opt_text_param(m.cors_origins),
+                        m.rate_limit_rpm
+                            .filter(|v| *v > 0)
+                            .map(|v| TursoValue::Integer(v as i64))
+                            .unwrap_or(TursoValue::Null),
                         TursoValue::Text(m.name),
                     ],
                 )

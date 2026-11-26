@@ -155,6 +155,9 @@ impl PlatformService {
         if let Some(mk) = opts.max_keys {
             meta.max_keys = if mk == 0 { None } else { Some(mk) };
         }
+        if let Some(rpm) = opts.rate_limit_rpm {
+            meta.rate_limit_rpm = if rpm == 0 { None } else { Some(rpm) };
+        }
         self.registry.update_kv_namespace(&meta).await?;
         self.audit(
             meta.project_id.as_deref(),
@@ -202,8 +205,23 @@ impl PlatformService {
         Ok(())
     }
 
+    fn enforce_kv_rate_limit(
+        &self,
+        meta: Option<&KvNamespaceMeta>,
+        ns: &str,
+        actor: &str,
+    ) -> Result<()> {
+        self.enforce_service_rate_limit(
+            &format!("kv:{ns}:{actor}"),
+            meta.and_then(|m| m.rate_limit_rpm),
+            super::DEFAULT_KV_RATE_LIMIT_RPM,
+            &format!("kv namespace '{ns}'"),
+        )
+    }
+
     pub async fn kv_get(&self, caller: &Caller, ns: &str, key: &str) -> Result<Option<KvValue>> {
-        self.resolve_kv_namespace_for_read(caller, ns).await?;
+        let meta = self.resolve_kv_namespace_for_read(caller, ns).await?;
+        self.enforce_kv_rate_limit(meta.as_ref(), ns, &caller.actor)?;
         self.kv.get(ns, key).await
     }
 
@@ -247,6 +265,7 @@ impl PlatformService {
         ephemeral: bool,
     ) -> Result<()> {
         let meta = self.resolve_kv_namespace_for_write(caller, ns).await?;
+        self.enforce_kv_rate_limit(meta.as_ref(), ns, &caller.actor)?;
         self.check_kv_quotas(ns, key, val.len(), meta.as_ref())
             .await?;
         let ns_default_ttl = meta
@@ -270,6 +289,7 @@ impl PlatformService {
         ttl_secs: Option<u64>,
     ) -> Result<bool> {
         let meta = self.resolve_kv_namespace_for_write(caller, ns).await?;
+        self.enforce_kv_rate_limit(meta.as_ref(), ns, &caller.actor)?;
         self.check_kv_quotas(ns, key, val.len(), meta.as_ref())
             .await?;
         let ns_default_ttl = meta
@@ -291,6 +311,7 @@ impl PlatformService {
         ttl_secs: Option<u64>,
     ) -> Result<i64> {
         let meta = self.resolve_kv_namespace_for_write(caller, ns).await?;
+        self.enforce_kv_rate_limit(meta.as_ref(), ns, &caller.actor)?;
         self.check_kv_quotas(ns, key, 8, meta.as_ref()).await?;
         let ns_default_ttl = meta
             .as_ref()
@@ -316,7 +337,8 @@ impl PlatformService {
     }
 
     pub async fn kv_delete(&self, caller: &Caller, ns: &str, key: &str) -> Result<()> {
-        self.resolve_kv_namespace_for_write(caller, ns).await?;
+        let meta = self.resolve_kv_namespace_for_write(caller, ns).await?;
+        self.enforce_kv_rate_limit(meta.as_ref(), ns, &caller.actor)?;
         self.kv.delete(ns, key).await
     }
 
@@ -327,7 +349,8 @@ impl PlatformService {
         prefix: Option<&str>,
         limit: usize,
     ) -> Result<Vec<KvKeyMeta>> {
-        self.resolve_kv_namespace_for_read(caller, ns).await?;
+        let meta = self.resolve_kv_namespace_for_read(caller, ns).await?;
+        self.enforce_kv_rate_limit(meta.as_ref(), ns, &caller.actor)?;
         self.kv.list(ns, prefix, limit).await
     }
 
@@ -339,7 +362,8 @@ impl PlatformService {
         cursor: Option<&str>,
         limit: usize,
     ) -> Result<(Vec<KvKeyMeta>, Option<String>)> {
-        self.resolve_kv_namespace_for_read(caller, ns).await?;
+        let meta = self.resolve_kv_namespace_for_read(caller, ns).await?;
+        self.enforce_kv_rate_limit(meta.as_ref(), ns, &caller.actor)?;
         self.kv.list_page(ns, prefix, cursor, limit).await
     }
 }

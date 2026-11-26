@@ -1997,6 +1997,7 @@
     return 'TTL: ' + esc(nsMeta.default_ttl_secs || 604800) + 's' +
       (nsMeta.max_keys ? ' · Max Keys: ' + esc(nsMeta.max_keys) : '') +
       (nsMeta.max_value_bytes ? ' · Max Value: ' + esc(formatBytes(nsMeta.max_value_bytes)) : '') +
+      (nsMeta.rate_limit_rpm ? ' · ' + esc(nsMeta.rate_limit_rpm) + ' RPM' : '') +
       (nsMeta.description ? ' · ' + esc(nsMeta.description) : '');
   }
 
@@ -2249,6 +2250,7 @@
         '<div class="field"><label>' + esc(t('kv.maxValueBytes')) + '</label><input type="number" id="kns-max-val" min="1" placeholder="1048576"></div>' +
         '<div class="field"><label>' + esc(t('kv.maxKeys')) + '</label><input type="number" id="kns-max-keys" min="1" placeholder="100000"></div>' +
         '</div>' +
+        '<div class="field"><label>' + esc(t('kv.rateLimitRpm')) + '</label><input type="number" id="kns-rpm" min="1" placeholder="1000"></div>' +
         '<label class="checkbox-row"><input type="checkbox" id="kns-eph"> ' + esc(t('kv.defaultEphemeral')) + '</label>' +
         '</div></details>' +
         '</form>',
@@ -2270,6 +2272,7 @@
           var desc = $('kns-desc').value.trim();
           var maxValRaw = $('kns-max-val').value.trim();
           var maxKeysRaw = $('kns-max-keys').value.trim();
+          var rpmRaw = $('kns-rpm').value.trim();
           try {
             await api('/_api/v1/kv', {
               method: 'POST',
@@ -2281,7 +2284,8 @@
                 default_ttl_secs: ttl,
                 default_ephemeral: $('kns-eph').checked,
                 max_value_bytes: maxValRaw ? Number(maxValRaw) : null,
-                max_keys: maxKeysRaw ? Number(maxKeysRaw) : null
+                max_keys: maxKeysRaw ? Number(maxKeysRaw) : null,
+                rate_limit_rpm: rpmRaw ? Number(rpmRaw) : null
               }
             });
             closeModal();
@@ -2313,6 +2317,7 @@
         '<div class="field"><label>' + esc(t('kv.maxValueBytes')) + '</label><input type="number" id="ekns-max-val" min="0" value="' + esc(nsMeta.max_value_bytes || '') + '" placeholder="' + esc(t('common.unlimited')) + '"></div>' +
         '<div class="field"><label>' + esc(t('kv.maxKeys')) + '</label><input type="number" id="ekns-max-keys" min="0" value="' + esc(nsMeta.max_keys || '') + '" placeholder="' + esc(t('common.unlimited')) + '"></div>' +
         '</div>' +
+        '<div class="field"><label>' + esc(t('kv.rateLimitRpm')) + '</label><input type="number" id="ekns-rpm" min="0" value="' + esc(nsMeta.rate_limit_rpm || '') + '" placeholder="' + esc(t('common.unlimited')) + '"></div>' +
         '<label class="checkbox-row"><input type="checkbox" id="ekns-eph"' + (nsMeta.default_ephemeral ? ' checked' : '') + '> ' + esc(t('kv.defaultEphemeral')) + '</label>' +
         '</form>',
       footer:
@@ -2329,6 +2334,7 @@
         withSubmitLock('edit-kv-ns-form', async function () {
           var maxValRaw = $('ekns-max-val').value.trim();
           var maxKeysRaw = $('ekns-max-keys').value.trim();
+          var rpmRaw = $('ekns-rpm').value.trim();
           try {
             var updated = await api('/_api/v1/kv/' + enc(nsMeta.name), {
               method: 'PATCH',
@@ -2338,7 +2344,8 @@
                 default_ttl_secs: Number($('ekns-ttl').value || 604800),
                 default_ephemeral: $('ekns-eph').checked,
                 max_value_bytes: maxValRaw ? Number(maxValRaw) : 0,
-                max_keys: maxKeysRaw ? Number(maxKeysRaw) : 0
+                max_keys: maxKeysRaw ? Number(maxKeysRaw) : 0,
+                rate_limit_rpm: rpmRaw ? Number(rpmRaw) : 0
               }
             });
             closeModal();
@@ -3614,6 +3621,7 @@
         '<div class="field"><label>' + esc(t('blobs.cacheControl')) + '</label><input type="text" id="cb-cache" placeholder="public, max-age=86400"></div>' +
         '<div class="field"><label>' + esc(t('blobs.corsOrigins')) + '</label><input type="text" id="cb-cors" placeholder="*"></div>' +
         '</div>' +
+        '<div class="field"><label>' + esc(t('blobs.rateLimitRpm')) + '</label><input type="number" id="cb-rpm" min="1" placeholder="600"></div>' +
         '</div></details>' +
         '</form>',
       footer:
@@ -3626,6 +3634,7 @@
           var name = $('cb-name').value.trim();
           var maxObjRaw = $('cb-max-obj').value.trim();
           var quotaRaw = $('cb-quota').value.trim();
+          var rpmRaw = $('cb-rpm').value.trim();
           try {
             await api('/_api/v1/buckets', {
               method: 'POST',
@@ -3639,7 +3648,8 @@
                 quota_mb: quotaRaw ? Number(quotaRaw) : null,
                 allowed_content_types: $('cb-types').value.trim() || null,
                 cache_control: $('cb-cache').value.trim() || null,
-                cors_origins: $('cb-cors').value.trim() || null
+                cors_origins: $('cb-cors').value.trim() || null,
+                rate_limit_rpm: rpmRaw ? Number(rpmRaw) : null
               }
             });
             closeModal();
@@ -3670,6 +3680,7 @@
         '<div class="field"><label>' + esc(t('blobs.cacheControl')) + '</label><input type="text" id="eb-cache" value="' + esc(bCfg.cache_control || '') + '" placeholder="public, max-age=86400"></div>' +
         '<div class="field"><label>' + esc(t('blobs.corsOrigins')) + '</label><input type="text" id="eb-cors" value="' + esc(bCfg.cors_origins || '') + '" placeholder="*"></div>' +
         '</div>' +
+        '<div class="field"><label>' + esc(t('blobs.rateLimitRpm')) + '</label><input type="number" id="eb-rpm" min="0" value="' + esc(bCfg.rate_limit_rpm || '') + '" placeholder="' + esc(t('common.unlimited')) + '"></div>' +
         '</form>',
       footer:
         '<button type="button" class="btn" id="eb-cancel">' + esc(t('common.cancel')) + '</button>' +
@@ -3680,6 +3691,7 @@
         withSubmitLock('edit-bkt-form', async function () {
           var maxObjRaw = $('eb-max-obj').value.trim();
           var quotaRaw = $('eb-quota').value.trim();
+          var rpmRaw = $('eb-rpm').value.trim();
           var body = {
             group: $('resource-group').value.trim(),
             description: $('eb-desc').value.trim(),
@@ -3687,7 +3699,8 @@
             quota_mb: quotaRaw ? Number(quotaRaw) : 0,
             allowed_content_types: $('eb-types').value.trim(),
             cache_control: $('eb-cache').value.trim(),
-            cors_origins: $('eb-cors').value.trim()
+            cors_origins: $('eb-cors').value.trim(),
+            rate_limit_rpm: rpmRaw ? Number(rpmRaw) : 0
           };
           if ($('eb-pub')) body.public_read = $('eb-pub').checked;
           try {
@@ -3750,6 +3763,8 @@
       (dbMeta.read_only ? ' · Read-Only' : '') +
       (dbMeta.max_rows ? ' · Max Rows: ' + esc(dbMeta.max_rows) : '') +
       (dbMeta.max_size_mb ? ' · Max Size: ' + esc(dbMeta.max_size_mb) + ' MiB' : '') +
+      (dbMeta.query_timeout_ms ? ' · Timeout: ' + esc(dbMeta.query_timeout_ms) + 'ms' : '') +
+      (dbMeta.rate_limit_rpm ? ' · ' + esc(dbMeta.rate_limit_rpm) + ' RPM' : '') +
       (dbMeta.description ? ' · ' + esc(dbMeta.description) : '');
   }
 
@@ -4140,6 +4155,10 @@
         '<div class="field"><label>' + esc(t('dbs.maxRows')) + '</label><input type="number" id="cdb-max-rows" min="1" placeholder="1000000"></div>' +
         '<div class="field"><label>' + esc(t('dbs.maxSizeMb')) + '</label><input type="number" id="cdb-max-size" min="1" placeholder="512"></div>' +
         '</div>' +
+        '<div class="form-grid">' +
+        '<div class="field"><label>' + esc(t('dbs.queryTimeoutMs')) + '</label><input type="number" id="cdb-timeout" min="100" placeholder="15000"></div>' +
+        '<div class="field"><label>' + esc(t('dbs.rateLimitRpm')) + '</label><input type="number" id="cdb-rpm" min="1" placeholder="600"></div>' +
+        '</div>' +
         '<label class="checkbox-row"><input type="checkbox" id="cdb-fk" checked> ' + esc(t('dbs.foreignKeys')) + '</label>' +
         '<label class="checkbox-row"><input type="checkbox" id="cdb-ro"> ' + esc(t('dbs.readOnly')) + '</label>' +
         '</div></details>' +
@@ -4153,6 +4172,8 @@
         withSubmitLock('create-db-form', async function () {
           var maxRowsRaw = $('cdb-max-rows').value.trim();
           var maxSizeRaw = $('cdb-max-size').value.trim();
+          var timeoutRaw = $('cdb-timeout').value.trim();
+          var rpmRaw = $('cdb-rpm').value.trim();
           var initSqlRaw = $('cdb-init-sql').value.trim();
           try {
             var res = await api('/_api/v1/dbs', {
@@ -4166,7 +4187,9 @@
                 max_rows: maxRowsRaw ? Number(maxRowsRaw) : null,
                 max_size_mb: maxSizeRaw ? Number(maxSizeRaw) : null,
                 foreign_keys: $('cdb-fk').checked,
-                read_only: $('cdb-ro').checked
+                read_only: $('cdb-ro').checked,
+                query_timeout_ms: timeoutRaw ? Number(timeoutRaw) : null,
+                rate_limit_rpm: rpmRaw ? Number(rpmRaw) : null
               }
             });
             closeModal();
@@ -4190,6 +4213,10 @@
         '<div class="field"><label>' + esc(t('dbs.maxRows')) + '</label><input type="number" id="edb-max-rows" min="0" value="' + esc(dbMeta.max_rows || '') + '" placeholder="' + esc(t('common.unlimited')) + '"></div>' +
         '<div class="field"><label>' + esc(t('dbs.maxSizeMb')) + '</label><input type="number" id="edb-max-size" min="0" value="' + esc(dbMeta.max_size_mb || '') + '" placeholder="' + esc(t('common.unlimited')) + '"></div>' +
         '</div>' +
+        '<div class="form-grid">' +
+        '<div class="field"><label>' + esc(t('dbs.queryTimeoutMs')) + '</label><input type="number" id="edb-timeout" min="0" value="' + esc(dbMeta.query_timeout_ms || '') + '" placeholder="15000"></div>' +
+        '<div class="field"><label>' + esc(t('dbs.rateLimitRpm')) + '</label><input type="number" id="edb-rpm" min="0" value="' + esc(dbMeta.rate_limit_rpm || '') + '" placeholder="' + esc(t('common.unlimited')) + '"></div>' +
+        '</div>' +
         '<label class="checkbox-row"><input type="checkbox" id="edb-fk"' + (dbMeta.foreign_keys !== false ? ' checked' : '') + '> ' + esc(t('dbs.foreignKeys')) + '</label>' +
         '<label class="checkbox-row"><input type="checkbox" id="edb-ro"' + (dbMeta.read_only ? ' checked' : '') + '> ' + esc(t('dbs.readOnly')) + '</label>' +
         '</form>',
@@ -4202,6 +4229,8 @@
         withSubmitLock('edit-db-form', async function () {
           var maxRowsRaw = $('edb-max-rows').value.trim();
           var maxSizeRaw = $('edb-max-size').value.trim();
+          var timeoutRaw = $('edb-timeout').value.trim();
+          var rpmRaw = $('edb-rpm').value.trim();
           try {
             var updated = await api('/_api/v1/dbs/' + enc(dbMeta.id), {
               method: 'PATCH',
@@ -4211,7 +4240,9 @@
                 max_rows: maxRowsRaw ? Number(maxRowsRaw) : 0,
                 max_size_mb: maxSizeRaw ? Number(maxSizeRaw) : 0,
                 foreign_keys: $('edb-fk').checked,
-                read_only: $('edb-ro').checked
+                read_only: $('edb-ro').checked,
+                query_timeout_ms: timeoutRaw ? Number(timeoutRaw) : 0,
+                rate_limit_rpm: rpmRaw ? Number(rpmRaw) : 0
               }
             });
             closeModal();
@@ -4501,6 +4532,10 @@
             resourceGroupField(selected.group || '') +
             '<div class="field"><label>' + esc(t('common.description')) + '</label><input type="text" id="esi-desc" value="' + esc(selected.description || '') + '" placeholder="' + esc(t('common.descriptionPlaceholder')) + '"></div>' +
             '<div class="field"><label>' + esc(t('search.writerBudgetMb')) + '</label><input type="number" id="esi-budget" min="15" max="256" value="' + esc(selected.writer_budget_mb || 20) + '"></div>' +
+            '<div class="form-grid">' +
+            '<div class="field"><label>' + esc(t('search.maxDocs')) + '</label><input type="number" id="esi-max-docs" min="0" value="' + esc(selected.max_docs || '') + '" placeholder="' + esc(t('common.unlimited')) + '"></div>' +
+            '<div class="field"><label>' + esc(t('search.rateLimitRpm')) + '</label><input type="number" id="esi-rpm" min="0" value="' + esc(selected.rate_limit_rpm || '') + '" placeholder="' + esc(t('common.unlimited')) + '"></div>' +
+            '</div>' +
             '</form>',
           footer:
             '<button type="button" class="btn" id="esi-cancel">' + esc(t('common.cancel')) + '</button>' +
@@ -4509,13 +4544,17 @@
             loadResourceGroupOptions();
             $('esi-cancel').addEventListener('click', closeModal);
             withSubmitLock('edit-search-index-form', async function () {
+              var maxDocsRaw = $('esi-max-docs').value.trim();
+              var rpmRaw = $('esi-rpm').value.trim();
               try {
                 await api('/_api/v1/search/' + enc(selected.id), {
                   method: 'PATCH',
                   json: {
                     group: $('resource-group').value.trim(),
                     description: $('esi-desc').value.trim(),
-                    writer_budget_mb: Number($('esi-budget').value || 20)
+                    writer_budget_mb: Number($('esi-budget').value || 20),
+                    max_docs: maxDocsRaw ? Number(maxDocsRaw) : 0,
+                    rate_limit_rpm: rpmRaw ? Number(rpmRaw) : 0
                   }
                 });
                 closeModal();
@@ -4545,6 +4584,10 @@
             '</select></div>' +
             '<div class="field"><label>' + esc(t('search.writerBudgetMb')) + '</label><input type="number" id="search-index-budget" min="15" max="256" value="20"></div>' +
             '</div>' +
+            '<div class="form-grid">' +
+            '<div class="field"><label>' + esc(t('search.maxDocs')) + '</label><input type="number" id="search-index-max-docs" min="1" placeholder="100000"></div>' +
+            '<div class="field"><label>' + esc(t('search.rateLimitRpm')) + '</label><input type="number" id="search-index-rpm" min="1" placeholder="600"></div>' +
+            '</div>' +
             '<div class="field"><label>' + esc(t('search.facetFields')) + '</label><input type="text" id="search-index-facets" placeholder="category,status,lang,source,level"></div>' +
             '</div></details>' +
             '</form>',
@@ -4558,6 +4601,8 @@
               var facetsRaw = $('search-index-facets').value.trim();
               var facets = facetsRaw ? facetsRaw.split(',').map(function (s) { return s.trim(); }).filter(Boolean) : null;
               var budgetRaw = $('search-index-budget').value.trim();
+              var maxDocsRaw = $('search-index-max-docs').value.trim();
+              var rpmRaw = $('search-index-rpm').value.trim();
               try {
                 var created = await api('/_api/v1/search', { method: 'POST', json: {
                   name: $('search-index-name').value.trim(),
@@ -4566,6 +4611,8 @@
                   description: $('search-index-desc').value.trim() || null,
                   tokenizer: $('search-index-tok').value || null,
                   writer_budget_mb: budgetRaw ? Number(budgetRaw) : null,
+                  max_docs: maxDocsRaw ? Number(maxDocsRaw) : null,
+                  rate_limit_rpm: rpmRaw ? Number(rpmRaw) : null,
                   facet_fields: facets
                 } });
                 searchState.selected = created.id;

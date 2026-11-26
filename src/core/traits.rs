@@ -452,6 +452,19 @@ pub trait DbManager: Send + Sync {
     async fn create_db(&self, db_id: &str) -> Result<()>;
     async fn delete_db(&self, db_id: &str) -> Result<()>;
     async fn query(&self, db_id: &str, sql: &str, params: Vec<SqlValue>) -> Result<QueryResult>;
+    async fn query_limited(
+        &self,
+        db_id: &str,
+        sql: &str,
+        params: Vec<SqlValue>,
+        max_rows: Option<usize>,
+    ) -> Result<QueryResult> {
+        let mut res = self.query(db_id, sql, params).await?;
+        if let Some(cap) = max_rows.filter(|r| *r > 0) {
+            res.rows.truncate(cap);
+        }
+        Ok(res)
+    }
     async fn visit_rows(&self, db_id: &str, sql: &str, visitor: &mut RowVisitor<'_>) -> Result<()> {
         let result = self.query(db_id, sql, Vec::new()).await?;
         for row in result.rows {

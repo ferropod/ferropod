@@ -95,6 +95,7 @@ use scheduled_wit::exports::ferropod::platform::scheduled as wit_sched;
 const EPOCH_TICK_MS: u64 = 100;
 const PIPE_CAPACITY_BYTES: usize = 64 * 1024;
 const MAX_HTTP_BODY_BYTES: usize = 32 * 1024 * 1024;
+const DEFAULT_MAX_HOSTCALLS_PER_INVOCATION: u32 = 500;
 
 struct CachedComponent {
     component: Component,
@@ -502,6 +503,8 @@ impl WasmtimeRuntime {
             svc,
             ctx: ctx.clone(),
             caller,
+            hostcalls_used: 0,
+            max_hostcalls: DEFAULT_MAX_HOSTCALLS_PER_INVOCATION,
         };
 
         let mut store = Store::new(&self.engine, state);
@@ -1297,6 +1300,8 @@ struct HostState {
     svc: PlatformService,
     ctx: RequestCtx,
     caller: Caller,
+    hostcalls_used: u32,
+    max_hostcalls: u32,
 }
 
 impl WasiView for HostState {
@@ -1368,6 +1373,17 @@ impl HostState {
             .map(String::as_str)
             .ok_or_else(|| format!("search binding '{binding}' is not configured"))
     }
+
+    fn consume_hostcall(&mut self, op: &str) -> std::result::Result<(), String> {
+        if self.hostcalls_used >= self.max_hostcalls {
+            return Err(format!(
+                "worker exceeded max hostcall budget ({}) during '{op}'",
+                self.max_hostcalls
+            ));
+        }
+        self.hostcalls_used += 1;
+        Ok(())
+    }
 }
 
 impl wit_log::Host for HostState {
@@ -1398,6 +1414,7 @@ impl wit_kv::Host for HostState {
         binding: String,
         key: String,
     ) -> std::result::Result<Option<Vec<u8>>, String> {
+        self.consume_hostcall("kv.get")?;
         let ns = self.resolve_kv(&binding)?;
         self.svc
             .kv_get(&self.caller, ns, &key)
@@ -1411,6 +1428,7 @@ impl wit_kv::Host for HostState {
         binding: String,
         key: String,
     ) -> std::result::Result<Option<wit_kv::Entry>, String> {
+        self.consume_hostcall("kv.get_entry")?;
         let ns = self.resolve_kv(&binding)?;
         self.svc
             .kv_get(&self.caller, ns, &key)
@@ -1435,6 +1453,7 @@ impl wit_kv::Host for HostState {
         ttl_secs: Option<u64>,
         ephemeral: bool,
     ) -> std::result::Result<(), String> {
+        self.consume_hostcall("kv.put")?;
         let ns = self.resolve_kv(&binding)?;
         self.svc
             .kv_put(
@@ -1458,6 +1477,7 @@ impl wit_kv::Host for HostState {
         metadata: Option<String>,
         ttl_secs: Option<u64>,
     ) -> std::result::Result<bool, String> {
+        self.consume_hostcall("kv.put_if_absent")?;
         let ns = self.resolve_kv(&binding)?;
         self.svc
             .kv_put_if_absent(
@@ -1479,6 +1499,7 @@ impl wit_kv::Host for HostState {
         delta: i64,
         ttl_secs: Option<u64>,
     ) -> std::result::Result<i64, String> {
+        self.consume_hostcall("kv.incr")?;
         let ns = self.resolve_kv(&binding)?;
         self.svc
             .kv_incr(&self.caller, ns, &key, delta, ttl_secs)
@@ -1487,6 +1508,7 @@ impl wit_kv::Host for HostState {
     }
 
     async fn delete(&mut self, binding: String, key: String) -> std::result::Result<(), String> {
+        self.consume_hostcall("kv.delete")?;
         let ns = self.resolve_kv(&binding)?;
         self.svc
             .kv_delete(&self.caller, ns, &key)
@@ -1501,6 +1523,7 @@ impl wit_kv::Host for HostState {
         cursor: Option<String>,
         limit: u32,
     ) -> std::result::Result<wit_kv::ListPage, String> {
+        self.consume_hostcall("kv.list")?;
         let ns = self.resolve_kv(&binding)?;
         let (keys, next_cursor) = self
             .svc
@@ -1565,6 +1588,7 @@ impl wit_db::Host for HostState {
         sql: String,
         params: Vec<wit_db::SqlValue>,
     ) -> std::result::Result<wit_db::QueryResult, String> {
+        self.consume_hostcall("db.query")?;
         let db_id = self.resolve_db(&binding)?;
         let mapped: Vec<SqlValue> = params.into_iter().map(map_wit_sql_param).collect();
         let qr = self
@@ -1590,6 +1614,7 @@ impl wit_db::Host for HostState {
         sql: String,
         params: Vec<wit_db::SqlValue>,
     ) -> std::result::Result<u64, String> {
+        self.consume_hostcall("db.execute")?;
         let db_id = self.resolve_db(&binding)?;
         let mapped: Vec<SqlValue> = params.into_iter().map(map_wit_sql_param).collect();
         self.svc
@@ -1606,6 +1631,7 @@ impl wit_queue::Host for HostState {
         payload: Vec<u8>,
         options: Option<wit_queue::EnqueueOptions>,
     ) -> std::result::Result<i64, String> {
+        self.consume_hostcall("queue.enqueue")?;
         let q_name = self.resolve_queue(&binding)?;
         let opts = match options {
             Some(o) => EnqueueOpts {
@@ -1641,6 +1667,7 @@ impl wit_bucket::Host for HostState {
         binding: String,
         key: String,
     ) -> std::result::Result<Option<Vec<u8>>, String> {
+        self.consume_hostcall("bucket.get")?;
         let bucket_name = self.resolve_bucket(&binding)?;
         let auth = BlobAuth::Caller(&self.caller);
         let Some((meta, mut stream, _len, _)) = self
@@ -1670,6 +1697,7 @@ impl wit_bucket::Host for HostState {
         binding: String,
         key: String,
     ) -> std::result::Result<Option<wit_bucket::ObjectData>, String> {
+        self.consume_hostcall("bucket.get_object")?;
         let bucket_name = self.resolve_bucket(&binding)?;
         let auth = BlobAuth::Caller(&self.caller);
         let Some((meta, mut stream, _len, _)) = self
@@ -1702,6 +1730,7 @@ impl wit_bucket::Host for HostState {
         binding: String,
         key: String,
     ) -> std::result::Result<Option<wit_bucket::ObjectMeta>, String> {
+        self.consume_hostcall("bucket.head")?;
         let bucket_name = self.resolve_bucket(&binding)?;
         let auth = BlobAuth::Caller(&self.caller);
         self.svc
@@ -1719,6 +1748,7 @@ impl wit_bucket::Host for HostState {
         content_type: Option<String>,
         custom_meta: Option<String>,
     ) -> std::result::Result<wit_bucket::ObjectMeta, String> {
+        self.consume_hostcall("bucket.put")?;
         let bucket_name = self.resolve_bucket(&binding)?;
         let auth = BlobAuth::Caller(&self.caller);
         let ct = content_type
@@ -1735,6 +1765,7 @@ impl wit_bucket::Host for HostState {
     }
 
     async fn delete(&mut self, binding: String, key: String) -> std::result::Result<bool, String> {
+        self.consume_hostcall("bucket.delete")?;
         let bucket_name = self.resolve_bucket(&binding)?;
         let auth = BlobAuth::Caller(&self.caller);
         self.svc
@@ -1750,6 +1781,7 @@ impl wit_bucket::Host for HostState {
         cursor: Option<String>,
         limit: u32,
     ) -> std::result::Result<wit_bucket::ListPage, String> {
+        self.consume_hostcall("bucket.list")?;
         let bucket_name = self.resolve_bucket(&binding)?;
         let auth = BlobAuth::Caller(&self.caller);
         let (items, next_cursor) = self
@@ -1776,6 +1808,7 @@ impl wit_bucket::Host for HostState {
         method: String,
         expires_secs: u64,
     ) -> std::result::Result<String, String> {
+        self.consume_hostcall("bucket.presign_url")?;
         let bucket_name = self.resolve_bucket(&binding)?;
         let (url, _exp) = self
             .svc
@@ -1808,6 +1841,7 @@ impl wit_search::Host for HostState {
         fuzzy: bool,
         limit: u32,
     ) -> std::result::Result<wit_search::SearchResult, String> {
+        self.consume_hostcall("search.query")?;
         let index_ref = self.resolve_search(&binding)?;
         let res = self
             .svc
@@ -1857,6 +1891,7 @@ impl wit_search::Host for HostState {
         alpha: f64,
         limit: u32,
     ) -> std::result::Result<wit_search::SearchResult, String> {
+        self.consume_hostcall("search.vector_query")?;
         let index_ref = self.resolve_search(&binding)?;
         let res = self
             .svc
@@ -1903,6 +1938,7 @@ impl wit_search::Host for HostState {
         binding: String,
         doc_json: String,
     ) -> std::result::Result<String, String> {
+        self.consume_hostcall("search.upsert")?;
         let index_ref = self.resolve_search(&binding)?;
         let parsed: serde_json::Value =
             serde_json::from_str(&doc_json).map_err(|e| format!("invalid doc json: {e}"))?;
@@ -1923,6 +1959,7 @@ impl wit_search::Host for HostState {
         binding: String,
         doc_id: String,
     ) -> std::result::Result<bool, String> {
+        self.consume_hostcall("search.delete")?;
         let index_ref = self.resolve_search(&binding)?;
         self.svc
             .delete_search_doc(&self.caller, index_ref, &doc_id)
@@ -1937,6 +1974,7 @@ impl wit_ai::Host for HostState {
         provider: Option<String>,
         body_json: String,
     ) -> std::result::Result<wit_ai::ChatResponse, String> {
+        self.consume_hostcall("ai.chat_completions")?;
         let parsed: serde_json::Value =
             serde_json::from_str(&body_json).map_err(|e| format!("invalid json body: {e}"))?;
         let res = self
@@ -1962,6 +2000,7 @@ impl wit_ai::Host for HostState {
         provider: Option<String>,
         body_json: String,
     ) -> std::result::Result<wit_ai::ChatResponse, String> {
+        self.consume_hostcall("ai.embeddings")?;
         let parsed: serde_json::Value =
             serde_json::from_str(&body_json).map_err(|e| format!("invalid json body: {e}"))?;
         let res = self

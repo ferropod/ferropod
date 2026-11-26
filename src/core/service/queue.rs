@@ -223,6 +223,19 @@ impl PlatformService {
         opts: EnqueueOpts,
     ) -> Result<i64> {
         self.require_queue_write(caller, queue).await?;
+        if payload.len() > super::MAX_QUEUE_PAYLOAD_BYTES {
+            return Err(FerroError::InvalidArgument(format!(
+                "queue '{queue}' payload size ({} bytes) exceeds maximum ({} bytes)",
+                payload.len(),
+                super::MAX_QUEUE_PAYLOAD_BYTES
+            )));
+        }
+        self.enforce_service_rate_limit(
+            &format!("queue-enq:{queue}:{}", caller.actor),
+            None,
+            super::DEFAULT_QUEUE_ENQUEUE_RPM,
+            &format!("queue '{queue}'"),
+        )?;
         self.queue.enqueue(queue, payload, opts).await
     }
 

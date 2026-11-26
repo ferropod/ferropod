@@ -1,13 +1,14 @@
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::{
-    extract::{Request, State},
-    http::{header, HeaderValue, StatusCode},
+    extract::{ConnectInfo, Request, State},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
     Json,
@@ -28,6 +29,30 @@ struct WindowSlot {
     window_start: Instant,
     prev_count: u32,
     curr_count: u32,
+}
+
+impl WindowSlot {
+    fn effective_and_remaining(&mut self, now: Instant) -> (u32, u64) {
+        let elapsed = now.saturating_duration_since(self.window_start);
+        if elapsed >= RATE_WINDOW * 2 {
+            self.prev_count = 0;
+            self.curr_count = 0;
+            self.window_start = now;
+        } else if elapsed >= RATE_WINDOW {
+            self.prev_count = self.curr_count;
+            self.curr_count = 0;
+            self.window_start += RATE_WINDOW;
+        }
+
+        let elapsed_secs = now
+            .saturating_duration_since(self.window_start)
+            .as_secs()
+            .min(60);
+        let remaining_secs = 60 - elapsed_secs;
+        let weighted_prev = ((u64::from(self.prev_count) * remaining_secs) / 60) as u32;
+        let effective = self.curr_count.saturating_add(weighted_prev);
+        (effective, remaining_secs.max(1))
+    }
 }
 
 /// Sharded O(1)-memory sliding-window per-key rate limiter (60-second window).
@@ -51,6 +76,21 @@ impl SlidingWindowRateLimiter {
         (hasher.finish() as usize) % RATE_LIMITER_SHARDS
     }
 
+    pub fn is_limited(&self, key: &str, max_per_min: u32) -> (bool, u64) {
+        if max_per_min == 0 {
+            return (false, 0);
+        }
+        let now = Instant::now();
+        let shard = &self.shards[Self::shard_index(key)];
+        let map = shard.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(&slot_copy) = map.get(key) else {
+            return (false, 0);
+        };
+        let mut slot = slot_copy;
+        let (effective, reset_secs) = slot.effective_and_remaining(now);
+        (effective >= max_per_min, reset_secs)
+    }
+
     pub fn check_and_record(&self, key: &str, max_per_min: u32) -> (bool, u32, u64) {
         if max_per_min == 0 {
             return (true, 0, 0);
@@ -72,32 +112,44 @@ impl SlidingWindowRateLimiter {
             prev_count: 0,
             curr_count: 0,
         });
-        let elapsed = now.saturating_duration_since(slot.window_start);
-        if elapsed >= RATE_WINDOW * 2 {
-            slot.prev_count = 0;
-            slot.curr_count = 0;
-            slot.window_start = now;
-        } else if elapsed >= RATE_WINDOW {
-            slot.prev_count = slot.curr_count;
-            slot.curr_count = 0;
-            slot.window_start += RATE_WINDOW;
-        }
-
-        let elapsed_secs = now
-            .saturating_duration_since(slot.window_start)
-            .as_secs()
-            .min(60);
-        let remaining_secs = 60 - elapsed_secs;
-        let weighted_prev = ((u64::from(slot.prev_count) * remaining_secs) / 60) as u32;
-        let effective = slot.curr_count.saturating_add(weighted_prev);
+        let (effective, reset_secs) = slot.effective_and_remaining(now);
         if effective >= max_per_min {
-            return (false, 0, remaining_secs.max(1));
+            return (false, 0, reset_secs);
         }
 
         slot.curr_count = slot.curr_count.saturating_add(1);
         let remaining = max_per_min.saturating_sub(effective + 1);
-        (true, remaining, remaining_secs.max(1))
+        (true, remaining, reset_secs)
     }
+}
+
+/// Extract client IP from proxy headers (when trusted) or TCP peer address.
+pub fn client_ip_from_headers(
+    headers: &HeaderMap,
+    peer_ip: Option<IpAddr>,
+    trust_proxy: bool,
+) -> String {
+    if trust_proxy {
+        if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+            if let Some(first) = xff
+                .split(',')
+                .next()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                return first.to_string();
+            }
+        }
+        if let Some(real_ip) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
+            let t = real_ip.trim();
+            if !t.is_empty() {
+                return t.to_string();
+            }
+        }
+    }
+    peer_ip
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| "anon".to_string())
 }
 
 #[derive(Debug, Serialize)]
@@ -295,12 +347,46 @@ pub async fn access_log_middleware(
         .unwrap_or("")
         .to_string();
 
+    const AUTH_FAIL_RPM: u32 = 30;
+    let peer_ip = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ci| ci.0.ip());
+    let client_ip =
+        client_ip_from_headers(req.headers(), peer_ip, svc.effective_trust_proxy_headers());
+    let is_auth_precheck_path = path.starts_with("/_api/v1/")
+        || path == "/_mcp"
+        || path == "/mcp"
+        || path.starts_with("/_ai/")
+        || path.starts_with("/_realtime/");
+    let is_auth_record_path = is_auth_precheck_path || path.starts_with("/_blob/");
+    let auth_fail_key = format!("auth_fail:{client_ip}");
+
+    if is_auth_precheck_path {
+        let (limited, retry_after) = svc.rate_limiter().is_limited(&auth_fail_key, AUTH_FAIL_RPM);
+        if limited {
+            metrics.rate_limited_total.fetch_add(1, Ordering::Relaxed);
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                [("retry-after", retry_after.to_string())],
+                Json(ErrorBody {
+                    error: "too many failed authentication attempts, please retry later".into(),
+                }),
+            )
+                .into_response();
+        }
+    }
+
     let started = Instant::now();
     let mut res = next.run(req).await;
     drop(permit);
 
     let elapsed_ms = started.elapsed().as_millis() as u64;
     let status = res.status().as_u16();
+    if status == 401 && is_auth_record_path {
+        svc.rate_limiter()
+            .check_and_record(&auth_fail_key, AUTH_FAIL_RPM);
+    }
     metrics.record_http(status, elapsed_ms);
     if let Ok(hv) = HeaderValue::from_str(&req_id) {
         res.headers_mut().insert("x-request-id", hv);

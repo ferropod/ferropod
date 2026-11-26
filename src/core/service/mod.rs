@@ -25,7 +25,15 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+pub const DEFAULT_SERVICE_RATE_LIMIT_RPM: u32 = 1_200;
+pub const DEFAULT_KV_RATE_LIMIT_RPM: u32 = 2_400;
+pub const DEFAULT_BLOB_RATE_LIMIT_RPM: u32 = 1_200;
+pub const DEFAULT_QUEUE_ENQUEUE_RPM: u32 = 1_200;
+pub const DEFAULT_DB_MAX_CONCURRENCY: usize = 16;
+pub const MAX_DB_BATCH_STATEMENTS: usize = 200;
+pub const MAX_QUEUE_PAYLOAD_BYTES: usize = 512 * 1024;
 
 use chrono::Utc;
 use tokio::sync::{watch, Mutex, OwnedSemaphorePermit, RwLock, Semaphore};
@@ -189,6 +197,8 @@ pub struct PlatformService {
     tls_reload_tx: watch::Sender<u64>,
     realtime: Arc<RealtimeHub>,
     bucket_cache_control: Arc<std::sync::RwLock<HashMap<String, Option<String>>>>,
+    db_concurrency: Arc<std::sync::Mutex<HashMap<String, Arc<Semaphore>>>>,
+    db_row_count_cache: Arc<std::sync::Mutex<HashMap<String, (Instant, usize)>>>,
 }
 
 impl PlatformService {
@@ -270,6 +280,8 @@ impl PlatformService {
             tls_reload_tx,
             realtime,
             bucket_cache_control: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            db_concurrency: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            db_row_count_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
         };
         wasmtime_rt.bind_service(svc.clone());
         svc.refresh_routes().await?;
@@ -282,6 +294,67 @@ impl PlatformService {
 
     pub fn rate_limiter(&self) -> &Arc<crate::gateway::guard::SlidingWindowRateLimiter> {
         &self.rate_limiter
+    }
+
+    pub(crate) fn enforce_service_rate_limit(
+        &self,
+        rl_key: &str,
+        rpm: Option<u32>,
+        default_rpm: u32,
+        resource_label: &str,
+    ) -> Result<()> {
+        let effective_rpm = rpm.filter(|r| *r > 0).unwrap_or(default_rpm);
+        if effective_rpm == 0 {
+            return Ok(());
+        }
+        let (allowed, _, reset_secs) = self.rate_limiter.check_and_record(rl_key, effective_rpm);
+        if !allowed {
+            self.metrics
+                .rate_limited_total
+                .fetch_add(1, Ordering::Relaxed);
+            return Err(FerroError::RateLimited(format!(
+                "{resource_label} rate limit exceeded ({effective_rpm}/min, retry after {reset_secs}s)"
+            )));
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn acquire_db_permit(
+        &self,
+        db_id: &str,
+        db_name: &str,
+    ) -> Result<OwnedSemaphorePermit> {
+        let sem = {
+            let mut guard = self.db_concurrency.lock().unwrap_or_else(|e| e.into_inner());
+            guard
+                .entry(db_id.to_string())
+                .or_insert_with(|| Arc::new(Semaphore::new(DEFAULT_DB_MAX_CONCURRENCY)))
+                .clone()
+        };
+        match tokio::time::timeout(Duration::from_millis(250), sem.acquire_owned()).await {
+            Ok(Ok(permit)) => Ok(permit),
+            Ok(Err(_)) | Err(_) => {
+                self.metrics
+                    .rate_limited_total
+                    .fetch_add(1, Ordering::Relaxed);
+                Err(FerroError::RateLimited(format!(
+                    "database '{db_name}' is busy (max concurrency {DEFAULT_DB_MAX_CONCURRENCY} reached)"
+                )))
+            }
+        }
+    }
+
+    pub(crate) fn invalidate_db_caches(&self, db_id: &str) {
+        let mut cache = self
+            .db_row_count_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        cache.remove(db_id);
+    }
+
+    pub(crate) fn remove_db_concurrency(&self, db_id: &str) {
+        let mut guard = self.db_concurrency.lock().unwrap_or_else(|e| e.into_inner());
+        guard.remove(db_id);
     }
 
     pub fn health_tracker(&self) -> &Arc<DeploymentHealthTracker> {

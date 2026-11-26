@@ -93,7 +93,8 @@ CREATE TABLE IF NOT EXISTS kv_namespaces (
     default_ttl_secs INTEGER NOT NULL DEFAULT 604800,
     default_ephemeral INTEGER NOT NULL DEFAULT 0,
     max_value_bytes INTEGER,
-    max_keys INTEGER
+    max_keys INTEGER,
+    rate_limit_rpm INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS blob_buckets (
@@ -107,7 +108,8 @@ CREATE TABLE IF NOT EXISTS blob_buckets (
     quota_mb INTEGER,
     allowed_content_types TEXT,
     cache_control TEXT,
-    cors_origins TEXT
+    cors_origins TEXT,
+    rate_limit_rpm INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS blob_objects (
@@ -138,7 +140,9 @@ CREATE TABLE IF NOT EXISTS user_databases (
     max_rows INTEGER,
     max_size_mb INTEGER,
     foreign_keys INTEGER NOT NULL DEFAULT 0,
-    read_only INTEGER NOT NULL DEFAULT 0
+    read_only INTEGER NOT NULL DEFAULT 0,
+    query_timeout_ms INTEGER,
+    rate_limit_rpm INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS cron_jobs (
@@ -267,12 +271,14 @@ impl TursoCoreStore {
             ),
             ("kv_namespaces", "max_value_bytes", "INTEGER"),
             ("kv_namespaces", "max_keys", "INTEGER"),
+            ("kv_namespaces", "rate_limit_rpm", "INTEGER"),
             ("blob_buckets", "description", "TEXT"),
             ("blob_buckets", "max_object_size_mb", "INTEGER"),
             ("blob_buckets", "quota_mb", "INTEGER"),
             ("blob_buckets", "allowed_content_types", "TEXT"),
             ("blob_buckets", "cache_control", "TEXT"),
             ("blob_buckets", "cors_origins", "TEXT"),
+            ("blob_buckets", "rate_limit_rpm", "INTEGER"),
             ("user_databases", "description", "TEXT"),
             ("user_databases", "max_rows", "INTEGER"),
             ("user_databases", "max_size_mb", "INTEGER"),
@@ -282,6 +288,8 @@ impl TursoCoreStore {
                 "INTEGER NOT NULL DEFAULT 0",
             ),
             ("user_databases", "read_only", "INTEGER NOT NULL DEFAULT 0"),
+            ("user_databases", "query_timeout_ms", "INTEGER"),
+            ("user_databases", "rate_limit_rpm", "INTEGER"),
             ("cron_jobs", "description", "TEXT"),
             ("cron_jobs", "timezone", "TEXT NOT NULL DEFAULT 'UTC'"),
             ("cron_jobs", "timeout_ms", "INTEGER"),

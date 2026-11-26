@@ -12,7 +12,7 @@ use crate::core::model::{
     SearchQueryInput, SearchQueryResult,
 };
 use crate::core::traits::SearchStore;
-use crate::storage::core_store::{opt_text, opt_text_param};
+use crate::storage::core_store::{opt_i64, opt_text, opt_text_param};
 use crate::storage::tx::{
     checkpoint_db, connect_db, copy_db_with_sidecars, ensure_column, map_turso_err, open_turso_db,
     with_retry,
@@ -31,7 +31,9 @@ CREATE TABLE IF NOT EXISTS search_indexes (
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     resource_group TEXT,
-    description TEXT
+    description TEXT,
+    max_docs INTEGER,
+    rate_limit_rpm INTEGER
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_search_name_proj
     ON search_indexes (name, COALESCE(project_id, ''));
@@ -66,6 +68,8 @@ impl TursoSearchStore {
             .map_err(map_turso_err)?;
         ensure_column(&conn, "search_indexes", "resource_group", "TEXT").await?;
         ensure_column(&conn, "search_indexes", "description", "TEXT").await?;
+        ensure_column(&conn, "search_indexes", "max_docs", "INTEGER").await?;
+        ensure_column(&conn, "search_indexes", "rate_limit_rpm", "INTEGER").await?;
         ensure_column(&conn, "search_docs", "embedding", "BLOB").await?;
         ensure_column(&conn, "search_docs", "embedding_dim", "INTEGER").await?;
         Ok(Self {
@@ -145,6 +149,12 @@ impl TursoSearchStore {
             doc_count: row.get::<i64>(10).map_err(map_turso_err)?.max(0) as usize,
             group: opt_text(row, 11)?,
             description: opt_text(row, 12)?,
+            max_docs: opt_i64(row, 13)?
+                .and_then(|v| usize::try_from(v).ok())
+                .filter(|v| *v > 0),
+            rate_limit_rpm: opt_i64(row, 14)?
+                .and_then(|v| u32::try_from(v).ok())
+                .filter(|v| *v > 0),
         })
     }
 }
@@ -464,6 +474,8 @@ impl SearchStore for TursoSearchStore {
             .unwrap_or("jieba+ngram")
             .to_string();
         let writer_budget_mb = opts.writer_budget_mb.unwrap_or(15).clamp(1, 256);
+        let max_docs = opts.max_docs.filter(|v| *v > 0);
+        let rate_limit_rpm = opts.rate_limit_rpm.filter(|v| *v > 0);
         let description = opts
             .description
             .as_deref()
@@ -488,6 +500,8 @@ impl SearchStore for TursoSearchStore {
             segments: 1,
             disk_bytes: 16384,
             writer_budget_mb,
+            max_docs,
+            rate_limit_rpm,
             created_at: now,
             updated_at: now,
             schema: schema_vec,
@@ -501,8 +515,8 @@ impl SearchStore for TursoSearchStore {
             async move {
                 let conn = db.connect()?;
                 conn.execute(
-                    "INSERT INTO search_indexes (id, name, project_id, tokenizer, segments, disk_bytes, writer_budget_mb, schema_json, created_at, updated_at, resource_group, description)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                    "INSERT INTO search_indexes (id, name, project_id, tokenizer, segments, disk_bytes, writer_budget_mb, schema_json, created_at, updated_at, resource_group, description, max_docs, rate_limit_rpm)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                     vec![
                         TursoValue::Text(m.id),
                         TursoValue::Text(m.name),
@@ -516,6 +530,12 @@ impl SearchStore for TursoSearchStore {
                         TursoValue::Integer(m.updated_at),
                         opt_text_param(m.group),
                         opt_text_param(m.description),
+                        m.max_docs
+                            .map(|v| TursoValue::Integer(v as i64))
+                            .unwrap_or(TursoValue::Null),
+                        m.rate_limit_rpm
+                            .map(|v| TursoValue::Integer(v as i64))
+                            .unwrap_or(TursoValue::Null),
                     ],
                 )
                 .await
@@ -537,8 +557,8 @@ impl SearchStore for TursoSearchStore {
                 let conn = db.connect()?;
                 conn.execute(
                     "UPDATE search_indexes SET resource_group = ?1, description = ?2, tokenizer = ?3,
-                     writer_budget_mb = ?4, schema_json = ?5, updated_at = ?6
-                     WHERE id = ?7",
+                     writer_budget_mb = ?4, schema_json = ?5, updated_at = ?6, max_docs = ?7, rate_limit_rpm = ?8
+                     WHERE id = ?9",
                     vec![
                         opt_text_param(m.group),
                         opt_text_param(m.description),
@@ -546,6 +566,14 @@ impl SearchStore for TursoSearchStore {
                         TursoValue::Integer(m.writer_budget_mb.max(1) as i64),
                         TursoValue::Text(schema_json),
                         TursoValue::Integer(m.updated_at),
+                        m.max_docs
+                            .filter(|v| *v > 0)
+                            .map(|v| TursoValue::Integer(v as i64))
+                            .unwrap_or(TursoValue::Null),
+                        m.rate_limit_rpm
+                            .filter(|v| *v > 0)
+                            .map(|v| TursoValue::Integer(v as i64))
+                            .unwrap_or(TursoValue::Null),
                         TursoValue::Text(m.id),
                     ],
                 )
@@ -566,7 +594,7 @@ impl SearchStore for TursoSearchStore {
                 "SELECT s.id, s.name, s.project_id, s.tokenizer, s.segments, s.disk_bytes, s.writer_budget_mb,
                         s.schema_json, s.created_at, s.updated_at,
                         (SELECT COUNT(*) FROM search_docs d WHERE d.index_id = s.id),
-                        s.resource_group, s.description
+                        s.resource_group, s.description, s.max_docs, s.rate_limit_rpm
                  FROM search_indexes s
                  WHERE s.id = ?1 OR s.name = ?1
                  ORDER BY CASE WHEN s.id = ?1 THEN 0 ELSE 1 END
@@ -589,7 +617,7 @@ impl SearchStore for TursoSearchStore {
                 "SELECT s.id, s.name, s.project_id, s.tokenizer, s.segments, s.disk_bytes, s.writer_budget_mb,
                         s.schema_json, s.created_at, s.updated_at,
                         (SELECT COUNT(*) FROM search_docs d WHERE d.index_id = s.id),
-                        s.resource_group, s.description
+                        s.resource_group, s.description, s.max_docs, s.rate_limit_rpm
                  FROM search_indexes s
                  ORDER BY s.updated_at DESC",
                 (),
@@ -722,6 +750,34 @@ impl SearchStore for TursoSearchStore {
         let idx_s = index_id.to_string();
         let doc_id_s = doc_id.clone();
         let json_s = doc_json;
+
+        {
+            let conn = connect_db(&self.db)?;
+            let mut qrows = conn
+                .query(
+                    "SELECT s.max_docs,
+                            (SELECT COUNT(*) FROM search_docs d WHERE d.index_id = s.id),
+                            EXISTS(SELECT 1 FROM search_docs d WHERE d.index_id = s.id AND d.doc_id = ?2)
+                     FROM search_indexes s WHERE s.id = ?1 LIMIT 1",
+                    (idx_s.as_str(), doc_id_s.as_str()),
+                )
+                .await
+                .map_err(map_turso_err)?;
+            if let Some(row) = qrows.next().await.map_err(map_turso_err)? {
+                let max_docs = opt_i64(&row, 0)?
+                    .and_then(|v| usize::try_from(v).ok())
+                    .filter(|v| *v > 0);
+                let cur_count = row.get::<i64>(1).map_err(map_turso_err)?.max(0) as usize;
+                let exists = row.get::<i64>(2).map_err(map_turso_err)? != 0;
+                if let Some(cap) = max_docs {
+                    if !exists && cur_count >= cap {
+                        return Err(FerroError::InvalidArgument(format!(
+                            "search index '{index_id}' reached max_docs quota ({cap})"
+                        )));
+                    }
+                }
+            }
+        }
 
         with_retry(|| {
             let db = self.db.clone();

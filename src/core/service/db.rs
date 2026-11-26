@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use uuid::Uuid;
@@ -16,12 +16,58 @@ fn valid_sql_ident(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+fn starts_with_sql_keyword(sql: &str, kw: &str) -> bool {
+    let trimmed = sql.trim_start();
+    trimmed
+        .get(..kw.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(kw))
+}
+
 impl PlatformService {
     async fn resolve_user_db(&self, id_or_name: &str) -> Result<UserDbMeta> {
         self.registry
             .get_user_db(id_or_name)
             .await?
             .ok_or_else(|| FerroError::NotFound(format!("user db '{id_or_name}'")))
+    }
+
+    fn enforce_db_rate_limit(&self, meta: &UserDbMeta, actor: &str) -> Result<()> {
+        self.enforce_service_rate_limit(
+            &format!("db:{}:{}", meta.id, actor),
+            meta.rate_limit_rpm,
+            super::DEFAULT_SERVICE_RATE_LIMIT_RPM,
+            &format!("database '{}'", meta.name),
+        )
+    }
+
+    async fn count_user_db_rows(&self, db_id: &str) -> Result<usize> {
+        let tables_qr = self
+            .db
+            .query(db_id, "SELECT name, type FROM sqlite_master", vec![])
+            .await?;
+        let mut total_rows = 0usize;
+        for row in &tables_qr.rows {
+            let tbl = row.first().and_then(|v| v.as_str()).unwrap_or("");
+            let typ = row.get(1).and_then(|v| v.as_str()).unwrap_or("");
+            if typ.eq_ignore_ascii_case("table")
+                && !tbl.starts_with("sqlite_")
+                && !tbl.starts_with("__turso_")
+                && !tbl.starts_with("_turso_")
+                && valid_sql_ident(tbl)
+            {
+                let cnt_sql = format!("SELECT COUNT(*) FROM \"{tbl}\"");
+                if let Ok(cqr) = self.db.query(db_id, &cnt_sql, vec![]).await {
+                    let n = cqr
+                        .rows
+                        .first()
+                        .and_then(|r| r.first())
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    total_rows = total_rows.saturating_add(n.max(0) as usize);
+                }
+            }
+        }
+        Ok(total_rows)
     }
 
     pub async fn create_user_db(
@@ -157,6 +203,12 @@ impl PlatformService {
         if let Some(ro) = opts.read_only {
             meta.read_only = ro;
         }
+        if let Some(qt) = opts.query_timeout_ms {
+            meta.query_timeout_ms = if qt == 0 { None } else { Some(qt) };
+        }
+        if let Some(rpm) = opts.rate_limit_rpm {
+            meta.rate_limit_rpm = if rpm == 0 { None } else { Some(rpm) };
+        }
         self.registry.update_user_db(&meta).await?;
         self.audit(
             meta.project_id.as_deref(),
@@ -187,6 +239,8 @@ impl PlatformService {
         )?;
         self.db.delete_db(&meta.id).await?;
         self.registry.delete_user_db(&meta.id).await?;
+        self.invalidate_db_caches(&meta.id);
+        self.remove_db_concurrency(&meta.id);
         self.audit(
             meta.project_id.as_deref(),
             &caller.actor,
@@ -219,12 +273,21 @@ impl PlatformService {
             meta.project_id.as_deref(),
             &format!("database '{}'", meta.name),
         )?;
-        let mut res = self.db.query(&meta.id, sql, params).await?;
-        if let Some(max_r) = meta.max_rows.filter(|r| *r > 0) {
-            if res.rows.len() > max_r {
-                res.rows.truncate(max_r);
-            }
-        }
+        self.enforce_db_rate_limit(&meta, &caller.actor)?;
+        let _permit = self.acquire_db_permit(&meta.id, &meta.name).await?;
+        let row_cap = meta.max_rows.filter(|r| *r > 0).unwrap_or(10_000);
+        let timeout_ms = meta.query_timeout_ms.filter(|t| *t > 0).unwrap_or(15_000);
+        let res = tokio::time::timeout(
+            Duration::from_millis(timeout_ms),
+            self.db.query_limited(&meta.id, sql, params, Some(row_cap)),
+        )
+        .await
+        .map_err(|_| {
+            FerroError::InvalidArgument(format!(
+                "database '{}' query timed out after {timeout_ms}ms",
+                meta.name
+            ))
+        })??;
         Ok(res)
     }
 
@@ -240,12 +303,22 @@ impl PlatformService {
             meta.project_id.as_deref(),
             &format!("database '{}'", meta.name),
         )?;
+        self.enforce_db_rate_limit(&meta, &caller.actor)?;
         if meta.read_only {
             return Err(FerroError::Forbidden(format!(
                 "database '{}' is configured as read-only",
                 meta.name
             )));
         }
+        if stmts.len() > super::MAX_DB_BATCH_STATEMENTS {
+            return Err(FerroError::InvalidArgument(format!(
+                "database '{}' batch has {} statements (max {})",
+                meta.name,
+                stmts.len(),
+                super::MAX_DB_BATCH_STATEMENTS
+            )));
+        }
+        let _permit = self.acquire_db_permit(&meta.id, &meta.name).await?;
         if let Some(max_mb) = meta.max_size_mb.filter(|m| *m > 0) {
             let db_path = self.config.user_dbs_dir().join(format!("{}.db", meta.id));
             let wal_path = self
@@ -261,46 +334,94 @@ impl PlatformService {
                 )));
             }
         }
+        let timeout_ms = meta.query_timeout_ms.filter(|t| *t > 0).unwrap_or(15_000);
+        let insert_count = stmts
+            .iter()
+            .filter(|(s, _)| starts_with_sql_keyword(s, "INSERT"))
+            .count();
+        let has_delete_or_ddl = stmts.iter().any(|(s, _)| {
+            starts_with_sql_keyword(s, "DELETE")
+                || starts_with_sql_keyword(s, "DROP")
+                || starts_with_sql_keyword(s, "TRUNCATE")
+        });
         if let Some(max_r) = meta.max_rows.filter(|r| *r > 0) {
-            let has_insert = stmts
-                .iter()
-                .any(|(s, _)| s.trim_start().to_ascii_uppercase().starts_with("INSERT"));
-            if has_insert {
-                let tables_qr = self
-                    .db
-                    .query(&meta.id, "SELECT name, type FROM sqlite_master", vec![])
-                    .await?;
-                let mut total_rows = 0usize;
-                for row in &tables_qr.rows {
-                    let tbl = row.first().and_then(|v| v.as_str()).unwrap_or("");
-                    let typ = row.get(1).and_then(|v| v.as_str()).unwrap_or("");
-                    if typ.eq_ignore_ascii_case("table")
-                        && !tbl.starts_with("sqlite_")
-                        && !tbl.starts_with("__turso_")
-                        && !tbl.starts_with("_turso_")
-                        && valid_sql_ident(tbl)
-                    {
-                        let cnt_sql = format!("SELECT COUNT(*) FROM \"{tbl}\"");
-                        if let Ok(cqr) = self.db.query(&meta.id, &cnt_sql, vec![]).await {
-                            let n = cqr
-                                .rows
-                                .first()
-                                .and_then(|r| r.first())
-                                .and_then(|v| v.as_i64())
-                                .unwrap_or(0);
-                            total_rows = total_rows.saturating_add(n.max(0) as usize);
+            if insert_count > 0 {
+                let fresh_cached = {
+                    let cache = self
+                        .db_row_count_cache
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    cache.get(&meta.id).and_then(|(ts, cnt)| {
+                        if ts.elapsed() < Duration::from_secs(5) {
+                            Some(*cnt)
+                        } else {
+                            None
                         }
+                    })
+                };
+                if let Some(cached_rows) = fresh_cached {
+                    if cached_rows >= max_r {
+                        return Err(FerroError::InvalidArgument(format!(
+                            "database '{}' exceeded max_rows quota ({max_r})",
+                            meta.name
+                        )));
                     }
-                }
-                if total_rows >= max_r {
-                    return Err(FerroError::InvalidArgument(format!(
-                        "database '{}' exceeded max_rows quota ({max_r})",
-                        meta.name
-                    )));
+                    let mut cache = self
+                        .db_row_count_cache
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    if let Some((_, cnt)) = cache.get_mut(&meta.id) {
+                        *cnt = cnt.saturating_add(insert_count);
+                    }
+                } else {
+                    let total_rows = tokio::time::timeout(
+                        Duration::from_millis(timeout_ms),
+                        self.count_user_db_rows(&meta.id),
+                    )
+                    .await
+                    .map_err(|_| {
+                        FerroError::InvalidArgument(format!(
+                            "database '{}' execute timed out after {timeout_ms}ms",
+                            meta.name
+                        ))
+                    })??;
+                    if total_rows >= max_r {
+                        let mut cache = self
+                            .db_row_count_cache
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        cache.insert(meta.id.clone(), (Instant::now(), total_rows));
+                        return Err(FerroError::InvalidArgument(format!(
+                            "database '{}' exceeded max_rows quota ({max_r})",
+                            meta.name
+                        )));
+                    }
+                    let mut cache = self
+                        .db_row_count_cache
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    cache.insert(
+                        meta.id.clone(),
+                        (Instant::now(), total_rows.saturating_add(insert_count)),
+                    );
                 }
             }
         }
-        self.db.execute_batch(&meta.id, stmts).await
+        let affected = tokio::time::timeout(
+            Duration::from_millis(timeout_ms),
+            self.db.execute_batch(&meta.id, stmts),
+        )
+        .await
+        .map_err(|_| {
+            FerroError::InvalidArgument(format!(
+                "database '{}' execute timed out after {timeout_ms}ms",
+                meta.name
+            ))
+        })??;
+        if has_delete_or_ddl {
+            self.invalidate_db_caches(&meta.id);
+        }
+        Ok(affected)
     }
 
     pub async fn snapshot_user_dbs(&self, caller: &Caller, out_dir: &Path) -> Result<usize> {
@@ -478,6 +599,8 @@ impl PlatformService {
             meta.project_id.as_deref(),
             &format!("database '{}'", meta.name),
         )?;
+        self.enforce_db_rate_limit(&meta, &caller.actor)?;
+        let _permit = self.acquire_db_permit(&meta.id, &meta.name).await?;
         let indexes = self.registry.list_db_fts_indexes(&meta.id).await?;
         let mut idx = indexes
             .into_iter()

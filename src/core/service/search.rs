@@ -16,6 +16,15 @@ impl PlatformService {
             .ok_or_else(|| FerroError::NotFound(format!("search index '{id_or_name}'")))
     }
 
+    fn enforce_search_rate_limit(&self, meta: &SearchIndexMeta, actor: &str) -> Result<()> {
+        self.enforce_service_rate_limit(
+            &format!("search:{}:{}", meta.id, actor),
+            meta.rate_limit_rpm,
+            super::DEFAULT_SERVICE_RATE_LIMIT_RPM,
+            &format!("search index '{}'", meta.name),
+        )
+    }
+
     pub async fn list_search_indexes(&self, caller: &Caller) -> Result<Vec<SearchIndexMeta>> {
         let all = self.search.list_indexes().await?;
         match &caller.scope {
@@ -121,6 +130,12 @@ impl PlatformService {
                 meta.writer_budget_mb = wb.clamp(1, 256);
             }
         }
+        if let Some(md) = opts.max_docs {
+            meta.max_docs = if md == 0 { None } else { Some(md) };
+        }
+        if let Some(rpm) = opts.rate_limit_rpm {
+            meta.rate_limit_rpm = if rpm == 0 { None } else { Some(rpm) };
+        }
         if let Some(schema) = opts.schema {
             if !schema.is_empty() {
                 meta.schema = schema;
@@ -189,6 +204,7 @@ impl PlatformService {
             meta.project_id.as_deref(),
             &format!("search index '{}'", meta.name),
         )?;
+        self.enforce_search_rate_limit(&meta, &caller.actor)?;
         self.search.list_docs(&meta.id).await
     }
 
@@ -205,6 +221,7 @@ impl PlatformService {
             meta.project_id.as_deref(),
             &format!("search index '{}'", meta.name),
         )?;
+        self.enforce_search_rate_limit(&meta, &caller.actor)?;
         self.search
             .list_docs_page(&meta.id, limit.clamp(1, 200), offset)
             .await
@@ -222,6 +239,7 @@ impl PlatformService {
             meta.project_id.as_deref(),
             &format!("search index '{}'", meta.name),
         )?;
+        self.enforce_search_rate_limit(&meta, &caller.actor)?;
         self.search.upsert_doc(&meta.id, doc).await
     }
 
@@ -237,6 +255,7 @@ impl PlatformService {
             meta.project_id.as_deref(),
             &format!("search index '{}'", meta.name),
         )?;
+        self.enforce_search_rate_limit(&meta, &caller.actor)?;
         self.search.delete_doc(&meta.id, doc_id).await
     }
 
@@ -252,6 +271,7 @@ impl PlatformService {
             meta.project_id.as_deref(),
             &format!("search index '{}'", meta.name),
         )?;
+        self.enforce_search_rate_limit(&meta, &caller.actor)?;
         self.search.search(&meta.id, input).await
     }
 }

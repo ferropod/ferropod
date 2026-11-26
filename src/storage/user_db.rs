@@ -346,6 +346,46 @@ fn contains_ddl_or_pragma(stmts: &[(String, Vec<SqlValue>)]) -> bool {
     stmts.iter().any(|(sql, _)| is_ddl_or_pragma_sql(sql))
 }
 
+impl TursoUserDbManager {
+    async fn query_inner(
+        &self,
+        db_id: &str,
+        sql: &str,
+        params: Vec<SqlValue>,
+        max_rows: Option<usize>,
+    ) -> Result<QueryResult> {
+        validate_read_only_sql(sql)?;
+        let (db, ddl_lock) = self.get_or_open(db_id).await?;
+        let _read_guard = ddl_lock.read().await;
+        let conn = connect_db(&db)?;
+        let turso_params: Vec<TursoValue> = params.iter().map(sql_value_to_turso).collect();
+        let mut rows = conn.query(sql, turso_params).await.map_err(map_turso_err)?;
+        let columns = rows.column_names();
+        let col_count = columns.len();
+        let row_cap = max_rows.filter(|r| *r > 0);
+
+        let mut out_rows = Vec::new();
+        while let Some(row) = rows.next().await.map_err(map_turso_err)? {
+            if let Some(cap) = row_cap {
+                if out_rows.len() >= cap {
+                    break;
+                }
+            }
+            let mut vals = Vec::with_capacity(col_count);
+            for i in 0..col_count {
+                let v = row.get_value(i).map_err(map_turso_err)?;
+                vals.push(turso_value_to_json(v));
+            }
+            out_rows.push(vals);
+        }
+
+        Ok(QueryResult {
+            columns,
+            rows: out_rows,
+        })
+    }
+}
+
 #[async_trait]
 impl DbManager for TursoUserDbManager {
     async fn create_db(&self, db_id: &str) -> Result<()> {
@@ -374,29 +414,17 @@ impl DbManager for TursoUserDbManager {
     }
 
     async fn query(&self, db_id: &str, sql: &str, params: Vec<SqlValue>) -> Result<QueryResult> {
-        validate_read_only_sql(sql)?;
-        let (db, ddl_lock) = self.get_or_open(db_id).await?;
-        let _read_guard = ddl_lock.read().await;
-        let conn = connect_db(&db)?;
-        let turso_params: Vec<TursoValue> = params.iter().map(sql_value_to_turso).collect();
-        let mut rows = conn.query(sql, turso_params).await.map_err(map_turso_err)?;
-        let columns = rows.column_names();
-        let col_count = columns.len();
+        self.query_inner(db_id, sql, params, None).await
+    }
 
-        let mut out_rows = Vec::new();
-        while let Some(row) = rows.next().await.map_err(map_turso_err)? {
-            let mut vals = Vec::with_capacity(col_count);
-            for i in 0..col_count {
-                let v = row.get_value(i).map_err(map_turso_err)?;
-                vals.push(turso_value_to_json(v));
-            }
-            out_rows.push(vals);
-        }
-
-        Ok(QueryResult {
-            columns,
-            rows: out_rows,
-        })
+    async fn query_limited(
+        &self,
+        db_id: &str,
+        sql: &str,
+        params: Vec<SqlValue>,
+        max_rows: Option<usize>,
+    ) -> Result<QueryResult> {
+        self.query_inner(db_id, sql, params, max_rows).await
     }
 
     async fn visit_rows(&self, db_id: &str, sql: &str, visitor: &mut RowVisitor<'_>) -> Result<()> {

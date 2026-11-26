@@ -346,6 +346,8 @@ pub struct KvNamespaceMeta {
     pub max_value_bytes: Option<usize>,
     #[serde(default)]
     pub max_keys: Option<usize>,
+    #[serde(default)]
+    pub rate_limit_rpm: Option<u32>,
     pub created_at: i64,
 }
 
@@ -359,6 +361,7 @@ pub struct KvNamespaceOpts {
     pub default_ephemeral: Option<bool>,
     pub max_value_bytes: Option<usize>,
     pub max_keys: Option<usize>,
+    pub rate_limit_rpm: Option<u32>,
 }
 
 /// User database registry metadata stored in `core.db`.
@@ -379,6 +382,10 @@ pub struct UserDbMeta {
     pub foreign_keys: bool,
     #[serde(default)]
     pub read_only: bool,
+    #[serde(default)]
+    pub query_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub rate_limit_rpm: Option<u32>,
     pub created_at: i64,
 }
 
@@ -393,6 +400,8 @@ pub struct UserDbOpts {
     pub max_size_mb: Option<usize>,
     pub foreign_keys: Option<bool>,
     pub read_only: Option<bool>,
+    pub query_timeout_ms: Option<u64>,
+    pub rate_limit_rpm: Option<u32>,
 }
 
 /// Stored KV entry value.
@@ -525,6 +534,8 @@ pub struct BucketMeta {
     pub cache_control: Option<String>,
     #[serde(default)]
     pub cors_origins: Option<String>,
+    #[serde(default)]
+    pub rate_limit_rpm: Option<u32>,
     pub created_at: i64,
 }
 
@@ -540,6 +551,7 @@ pub struct BucketOpts {
     pub allowed_content_types: Option<String>,
     pub cache_control: Option<String>,
     pub cors_origins: Option<String>,
+    pub rate_limit_rpm: Option<u32>,
 }
 
 /// Native Blob object metadata.
@@ -760,6 +772,10 @@ pub struct SearchIndexMeta {
     pub segments: usize,
     pub disk_bytes: u64,
     pub writer_budget_mb: usize,
+    #[serde(default)]
+    pub max_docs: Option<usize>,
+    #[serde(default)]
+    pub rate_limit_rpm: Option<u32>,
     pub created_at: i64,
     pub updated_at: i64,
     pub schema: Vec<SearchFieldSchema>,
@@ -773,6 +789,8 @@ pub struct SearchIndexOpts {
     pub description: Option<String>,
     pub tokenizer: Option<String>,
     pub writer_budget_mb: Option<usize>,
+    pub max_docs: Option<usize>,
+    pub rate_limit_rpm: Option<u32>,
     pub schema: Option<Vec<SearchFieldSchema>>,
     pub facet_fields: Option<Vec<String>>,
 }

@@ -89,6 +89,7 @@ fn row_to_queue(row: &turso::Row) -> Result<QueueConfig> {
 
 const MAX_JOB_DELAY_SECS: u64 = 365 * 86_400;
 const DEFAULT_EPHEMERAL_MAX_PENDING_JOBS: i64 = 10_000;
+const DEFAULT_PERSISTENT_MAX_PENDING_JOBS: i64 = 100_000;
 const MEM_JOB_ID_START: i64 = 1_000_000_000;
 
 #[derive(Default)]
@@ -483,14 +484,15 @@ impl QueueStore for TursoQueueStore {
             return Ok(id);
         }
 
-        if let Some((false, Some(cap), _)) = cfg_entry {
-            if cap > 0 {
-                let st = self.stats(queue).await?;
-                if st.pending.saturating_add(st.running) >= cap {
-                    return Err(FerroError::RateLimited(format!(
-                        "queue '{queue}' reached max_pending_jobs limit ({cap})"
-                    )));
-                }
+        if let Some((false, max_pend, _)) = cfg_entry {
+            let cap = max_pend
+                .filter(|v| *v > 0)
+                .unwrap_or(DEFAULT_PERSISTENT_MAX_PENDING_JOBS);
+            let st = self.stats(queue).await?;
+            if st.pending.saturating_add(st.running) >= cap {
+                return Err(FerroError::RateLimited(format!(
+                    "queue '{queue}' reached max_pending_jobs limit ({cap})"
+                )));
             }
         }
 

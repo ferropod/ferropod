@@ -13,10 +13,10 @@ use crate::storage::tx::{connect_db, map_turso_err, with_retry};
 use super::{opt_blob, opt_blob_param, opt_i64, opt_text, opt_text_param, TursoCoreStore};
 
 const SELECT_USER_DB: &str =
-    "SELECT id, name, project_id, created_at, resource_group, description, max_rows, max_size_mb, foreign_keys, read_only FROM user_databases";
+    "SELECT id, name, project_id, created_at, resource_group, description, max_rows, max_size_mb, foreign_keys, read_only, query_timeout_ms, rate_limit_rpm FROM user_databases";
 
 const SELECT_KV_NAMESPACE: &str =
-    "SELECT name, project_id, created_at, resource_group, description, default_ttl_secs, default_ephemeral, max_value_bytes, max_keys FROM kv_namespaces";
+    "SELECT name, project_id, created_at, resource_group, description, default_ttl_secs, default_ephemeral, max_value_bytes, max_keys, rate_limit_rpm FROM kv_namespaces";
 
 const SELECT_CRON_JOB: &str = "SELECT id, name, project_id, schedule, target, enabled, \
      last_run_at, last_status, created_at, updated_at, description, timezone, timeout_ms, max_retries \
@@ -34,6 +34,12 @@ fn row_to_user_db(row: &turso::Row) -> Result<UserDbMeta> {
         max_size_mb: opt_i64(row, 7)?.and_then(|v| usize::try_from(v).ok()),
         foreign_keys: opt_i64(row, 8)?.unwrap_or(0) != 0,
         read_only: opt_i64(row, 9)?.unwrap_or(0) != 0,
+        query_timeout_ms: opt_i64(row, 10)?
+            .and_then(|v| u64::try_from(v).ok())
+            .filter(|v| *v > 0),
+        rate_limit_rpm: opt_i64(row, 11)?
+            .and_then(|v| u32::try_from(v).ok())
+            .filter(|v| *v > 0),
     })
 }
 
@@ -52,6 +58,9 @@ fn row_to_kv_namespace(row: &turso::Row) -> Result<KvNamespaceMeta> {
         default_ephemeral: opt_i64(row, 6)?.unwrap_or(0) != 0,
         max_value_bytes: opt_i64(row, 7)?.and_then(|v| usize::try_from(v).ok()),
         max_keys: opt_i64(row, 8)?.and_then(|v| usize::try_from(v).ok()),
+        rate_limit_rpm: opt_i64(row, 9)?
+            .and_then(|v| u32::try_from(v).ok())
+            .filter(|v| *v > 0),
     })
 }
 
@@ -97,6 +106,8 @@ impl RegistryStore for TursoCoreStore {
         let max_size_mb = opts.max_size_mb.filter(|v| *v > 0);
         let foreign_keys = opts.foreign_keys.unwrap_or(false);
         let read_only = opts.read_only.unwrap_or(false);
+        let query_timeout_ms = opts.query_timeout_ms.filter(|v| *v > 0);
+        let rate_limit_rpm = opts.rate_limit_rpm.filter(|v| *v > 0);
         let proj_s = opts.project_id;
         let group = opts.group;
         with_retry(|| {
@@ -109,8 +120,8 @@ impl RegistryStore for TursoCoreStore {
             async move {
                 let conn = db.connect()?;
                 conn.execute(
-                    "INSERT INTO user_databases (id, name, project_id, created_at, resource_group, description, max_rows, max_size_mb, foreign_keys, read_only)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    "INSERT INTO user_databases (id, name, project_id, created_at, resource_group, description, max_rows, max_size_mb, foreign_keys, read_only, query_timeout_ms, rate_limit_rpm)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                     vec![
                         TursoValue::Text(id_s),
                         TursoValue::Text(name_s),
@@ -126,6 +137,12 @@ impl RegistryStore for TursoCoreStore {
                             .unwrap_or(TursoValue::Null),
                         TursoValue::Integer(if foreign_keys { 1 } else { 0 }),
                         TursoValue::Integer(if read_only { 1 } else { 0 }),
+                        query_timeout_ms
+                            .map(|v| TursoValue::Integer(v as i64))
+                            .unwrap_or(TursoValue::Null),
+                        rate_limit_rpm
+                            .map(|v| TursoValue::Integer(v as i64))
+                            .unwrap_or(TursoValue::Null),
                     ],
                 )
                 .await
@@ -143,8 +160,8 @@ impl RegistryStore for TursoCoreStore {
             async move {
                 let conn = db.connect()?;
                 conn.execute(
-                    "UPDATE user_databases SET resource_group = ?1, description = ?2, max_rows = ?3, max_size_mb = ?4, foreign_keys = ?5, read_only = ?6
-                     WHERE id = ?7",
+                    "UPDATE user_databases SET resource_group = ?1, description = ?2, max_rows = ?3, max_size_mb = ?4, foreign_keys = ?5, read_only = ?6, query_timeout_ms = ?7, rate_limit_rpm = ?8
+                     WHERE id = ?9",
                     vec![
                         opt_text_param(m.group),
                         opt_text_param(m.description),
@@ -156,6 +173,14 @@ impl RegistryStore for TursoCoreStore {
                             .unwrap_or(TursoValue::Null),
                         TursoValue::Integer(if m.foreign_keys { 1 } else { 0 }),
                         TursoValue::Integer(if m.read_only { 1 } else { 0 }),
+                        m.query_timeout_ms
+                            .filter(|v| *v > 0)
+                            .map(|v| TursoValue::Integer(v as i64))
+                            .unwrap_or(TursoValue::Null),
+                        m.rate_limit_rpm
+                            .filter(|v| *v > 0)
+                            .map(|v| TursoValue::Integer(v as i64))
+                            .unwrap_or(TursoValue::Null),
                         TursoValue::Text(m.id),
                     ],
                 )
@@ -229,6 +254,7 @@ impl RegistryStore for TursoCoreStore {
         let default_ephemeral = opts.default_ephemeral.unwrap_or(false);
         let max_value_bytes = opts.max_value_bytes.filter(|v| *v > 0);
         let max_keys = opts.max_keys.filter(|v| *v > 0);
+        let rate_limit_rpm = opts.rate_limit_rpm.filter(|v| *v > 0);
         let description = opts
             .description
             .as_deref()
@@ -246,6 +272,7 @@ impl RegistryStore for TursoCoreStore {
             default_ephemeral,
             max_value_bytes,
             max_keys,
+            rate_limit_rpm,
         };
 
         let m = meta.clone();
@@ -255,8 +282,8 @@ impl RegistryStore for TursoCoreStore {
             async move {
                 let conn = db.connect()?;
                 conn.execute(
-                    "INSERT INTO kv_namespaces (name, project_id, created_at, resource_group, description, default_ttl_secs, default_ephemeral, max_value_bytes, max_keys)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    "INSERT INTO kv_namespaces (name, project_id, created_at, resource_group, description, default_ttl_secs, default_ephemeral, max_value_bytes, max_keys, rate_limit_rpm)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                     vec![
                         TursoValue::Text(m.name),
                         opt_text_param(m.project_id),
@@ -269,6 +296,9 @@ impl RegistryStore for TursoCoreStore {
                             .map(|v| TursoValue::Integer(v as i64))
                             .unwrap_or(TursoValue::Null),
                         m.max_keys
+                            .map(|v| TursoValue::Integer(v as i64))
+                            .unwrap_or(TursoValue::Null),
+                        m.rate_limit_rpm
                             .map(|v| TursoValue::Integer(v as i64))
                             .unwrap_or(TursoValue::Null),
                     ],
@@ -289,8 +319,8 @@ impl RegistryStore for TursoCoreStore {
             async move {
                 let conn = db.connect()?;
                 conn.execute(
-                    "UPDATE kv_namespaces SET resource_group = ?1, description = ?2, default_ttl_secs = ?3, default_ephemeral = ?4, max_value_bytes = ?5, max_keys = ?6
-                     WHERE name = ?7",
+                    "UPDATE kv_namespaces SET resource_group = ?1, description = ?2, default_ttl_secs = ?3, default_ephemeral = ?4, max_value_bytes = ?5, max_keys = ?6, rate_limit_rpm = ?7
+                     WHERE name = ?8",
                     vec![
                         opt_text_param(m.group),
                         opt_text_param(m.description),
@@ -300,6 +330,10 @@ impl RegistryStore for TursoCoreStore {
                             .map(|v| TursoValue::Integer(v as i64))
                             .unwrap_or(TursoValue::Null),
                         m.max_keys
+                            .map(|v| TursoValue::Integer(v as i64))
+                            .unwrap_or(TursoValue::Null),
+                        m.rate_limit_rpm
+                            .filter(|v| *v > 0)
                             .map(|v| TursoValue::Integer(v as i64))
                             .unwrap_or(TursoValue::Null),
                         TursoValue::Text(m.name),

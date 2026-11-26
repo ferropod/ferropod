@@ -1,4 +1,4 @@
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 
 use axum::{
     body::Body,
@@ -19,7 +19,10 @@ use crate::core::model::{RequestCtx, TargetEnv, WorkerHttpRequest};
 use crate::core::service::PlatformService;
 use crate::gateway::{
     blob_api::{self, etag_matches},
-    guard::{access_log_middleware, panel_domain_guard_middleware, verify_basic_auth},
+    guard::{
+        access_log_middleware, client_ip_from_headers, panel_domain_guard_middleware,
+        verify_basic_auth,
+    },
     local_api::{
         forward_dynamic_upstream, has_unsafe_path_segments, strip_hop_headers, LocalApiProxy,
     },
@@ -81,34 +84,6 @@ pub fn build_router(svc: PlatformService) -> Router {
             access_log_middleware,
         ))
         .with_state(svc)
-}
-
-fn client_ip_from_headers(
-    headers: &HeaderMap,
-    peer_ip: Option<IpAddr>,
-    trust_proxy: bool,
-) -> String {
-    if trust_proxy {
-        if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-            if let Some(first) = xff
-                .split(',')
-                .next()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-            {
-                return first.to_string();
-            }
-        }
-        if let Some(real_ip) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
-            let t = real_ip.trim();
-            if !t.is_empty() {
-                return t.to_string();
-            }
-        }
-    }
-    peer_ip
-        .map(|ip| ip.to_string())
-        .unwrap_or_else(|| "anon".to_string())
 }
 
 fn attach_rate_limit_headers(resp: &mut Response, info: Option<(u32, u32)>) {
