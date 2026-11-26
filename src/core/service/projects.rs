@@ -926,6 +926,12 @@ impl PlatformService {
     ) -> Result<WorkerHttpResponse> {
         let project_id = ctx.project_id.clone();
         let request_id = ctx.request_id.clone();
+        let _app_permit = self.try_acquire_app_permit(&project_id).ok_or_else(|| {
+            self.metrics
+                .rate_limited_total
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            FerroError::RateLimited(format!("app '{project_id}' concurrency limit reached"))
+        })?;
         if ctx.timeout_ms.is_none()
             && ctx.wasm_max_memory_mb.is_none()
             && !ctx.allow_private_outbound

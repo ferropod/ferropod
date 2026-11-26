@@ -5337,3 +5337,143 @@ async fn service_rate_limits_and_db_row_cap_guardrails() {
     };
     assert!(matches!(internal_blob_err, FerroError::RateLimited(_)));
 }
+
+#[tokio::test]
+async fn multi_tenant_bulkhead_realtime_db_cache_and_alert_cooldown() {
+    let h = setup_harness().await;
+    let app = build_router(h.svc.clone());
+    let tok = Some(h.admin_token.as_str());
+
+    // 1. Hold all data-plane http_concurrency permits -> control-plane /_healthz and /_api/v1/status still succeed,
+    //    while a non-control-plane route is rejected with 429.
+    let mut data_permits = Vec::new();
+    while let Some(p) = h.svc.try_acquire_http_permit() {
+        data_permits.push(p);
+    }
+    assert!(!data_permits.is_empty());
+
+    let (st_hz, _) = json_req(&app, Method::GET, "/_healthz", None, None).await;
+    assert_eq!(st_hz, StatusCode::OK);
+    let (st_api, _) = json_req(&app, Method::GET, "/_api/v1/status", tok, None).await;
+    assert_eq!(st_api, StatusCode::OK);
+    let (st_data, _) = json_req(&app, Method::GET, "/some-worker-path", None, None).await;
+    assert_eq!(st_data, StatusCode::TOO_MANY_REQUESTS);
+    drop(data_permits);
+
+    // 2. Realtime publish rejects payloads > 64 KiB and enforces SSE connection limit + drop cleanup
+    let big_rt_err = h
+        .svc
+        .realtime_publish(
+            &h.admin,
+            "cap-ch",
+            Some("big"),
+            serde_json::json!({ "blob": "a".repeat(65 * 1024) }),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(big_rt_err, FerroError::InvalidArgument(_)));
+
+    let mut subs = Vec::new();
+    for _ in 0..128 {
+        subs.push(h.svc.realtime_subscribe(&h.admin, "cap-ch").await.unwrap());
+    }
+    let full_err = match h.svc.realtime_subscribe(&h.admin, "cap-ch").await {
+        Ok(_) => panic!("expected RateLimited when channel SSE limit is reached"),
+        Err(e) => e,
+    };
+    assert!(matches!(full_err, FerroError::RateLimited(_)));
+    subs.pop();
+    assert!(h.svc.realtime_subscribe(&h.admin, "cap-ch").await.is_ok());
+    drop(subs);
+
+    // 3. DB metadata cache invalidates immediately on update_user_db
+    let cached_db = h
+        .svc
+        .create_user_db_with_opts(
+            &h.admin,
+            "meta-cache-db",
+            UserDbOpts {
+                init_sql: Some("CREATE TABLE m (id INTEGER PRIMARY KEY);".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    h.svc
+        .execute_user_db_batch(
+            &h.admin,
+            &cached_db.id,
+            vec![("INSERT INTO m VALUES (1)".to_string(), vec![])],
+        )
+        .await
+        .unwrap();
+    h.svc
+        .update_user_db(
+            &h.admin,
+            &cached_db.id,
+            UserDbOpts {
+                read_only: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let ro_err = h
+        .svc
+        .execute_user_db_batch(
+            &h.admin,
+            &cached_db.id,
+            vec![("INSERT INTO m VALUES (2)".to_string(), vec![])],
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(ro_err, FerroError::Forbidden(_)));
+
+    // 4. Alert cooldown suppresses duplicate alerts within 60s
+    let hits = Arc::new(AtomicUsize::new(0));
+    let hits_srv = hits.clone();
+    let hook_router = Router::new().route(
+        "/hook",
+        axum::routing::post(move || {
+            let hits_srv = hits_srv.clone();
+            async move {
+                hits_srv.fetch_add(1, Ordering::SeqCst);
+                StatusCode::OK
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let hook_addr = listener.local_addr().unwrap();
+    let srv = tokio::spawn(async move {
+        axum::serve(listener, hook_router).await.unwrap();
+    });
+
+    h.svc
+        .create_alert_webhook(
+            &h.admin,
+            ferropod::core::model::AlertWebhookOpts {
+                name: Some("cd-hook".to_string()),
+                url: Some(format!("http://{hook_addr}/hook")),
+                secret: None,
+                clear_secret: None,
+                events: Some(vec!["worker_oom".to_string()]),
+                enabled: Some(true),
+            },
+        )
+        .await
+        .unwrap();
+
+    h.svc.fire_alert(
+        "worker_oom",
+        "Worker OOM 1".into(),
+        serde_json::json!({ "project_id": "proj_cd" }),
+    );
+    h.svc.fire_alert(
+        "worker_oom",
+        "Worker OOM 2".into(),
+        serde_json::json!({ "project_id": "proj_cd" }),
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    srv.abort();
+}

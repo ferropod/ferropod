@@ -1,5 +1,22 @@
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+
 use chrono::{DateTime, Datelike, Timelike, Utc};
+use futures_util::stream::{self, StreamExt};
 use uuid::Uuid;
+
+struct CronInFlightGuard {
+    set: Arc<std::sync::Mutex<HashSet<String>>>,
+    job_id: String,
+}
+
+impl Drop for CronInFlightGuard {
+    fn drop(&mut self) {
+        let mut guard = self.set.lock().unwrap_or_else(|e| e.into_inner());
+        guard.remove(&self.job_id);
+    }
+}
 
 use crate::core::model::{
     Caller, CronJob, CronJobOpts, FerroError, LogEntry, RequestCtx, Result, TokenScope,
@@ -499,6 +516,28 @@ impl PlatformService {
             job.project_id.as_deref(),
             &format!("cron job '{}'", job.name),
         )?;
+        self.enforce_service_rate_limit(
+            &format!("cron-trig:{id}:{}", caller.actor),
+            None,
+            30,
+            &format!("cron job '{}'", job.name),
+        )?;
+        {
+            let mut guard = self
+                .in_flight_crons
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if !guard.insert(job.id.clone()) {
+                return Err(FerroError::Conflict(format!(
+                    "cron job '{}' is already running",
+                    job.name
+                )));
+            }
+        }
+        let _guard = CronInFlightGuard {
+            set: self.in_flight_crons.clone(),
+            job_id: job.id.clone(),
+        };
         self.execute_cron_job_internal(job, &caller.actor, true)
             .await
     }
@@ -509,7 +548,7 @@ impl PlatformService {
         let now_ms = Utc::now().timestamp_millis();
         let now_secs = now_ms / 1000;
         let current_min = now_secs / 60;
-        let mut executed = 0usize;
+        let mut due_jobs = Vec::new();
 
         for job in jobs {
             if !job.enabled {
@@ -527,11 +566,50 @@ impl PlatformService {
                         .unwrap_or(true)
             };
             if due {
-                self.execute_cron_job_internal(job, "scheduler", false)
-                    .await?;
-                executed += 1;
+                let inserted = {
+                    let mut guard = self
+                        .in_flight_crons
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    guard.insert(job.id.clone())
+                };
+                if inserted {
+                    let guard = CronInFlightGuard {
+                        set: self.in_flight_crons.clone(),
+                        job_id: job.id.clone(),
+                    };
+                    due_jobs.push((job, guard));
+                }
             }
         }
-        Ok(executed)
+
+        let executed = AtomicUsize::new(0);
+        let first_err: std::sync::Mutex<Option<FerroError>> = std::sync::Mutex::new(None);
+        stream::iter(due_jobs)
+            .for_each_concurrent(8, |(job, guard)| {
+                let svc = self.clone();
+                let executed = &executed;
+                let first_err = &first_err;
+                async move {
+                    let _guard = guard;
+                    match svc.execute_cron_job_internal(job, "scheduler", false).await {
+                        Ok(_) => {
+                            executed.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Err(e) => {
+                            let mut err_slot = first_err.lock().unwrap_or_else(|x| x.into_inner());
+                            if err_slot.is_none() {
+                                *err_slot = Some(e);
+                            }
+                        }
+                    }
+                }
+            })
+            .await;
+
+        if let Some(err) = first_err.into_inner().unwrap_or_else(|x| x.into_inner()) {
+            return Err(err);
+        }
+        Ok(executed.load(Ordering::Relaxed))
     }
 }

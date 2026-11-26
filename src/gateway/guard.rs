@@ -18,7 +18,9 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::core::model::{Caller, FerroError, LogEntry};
-use crate::core::service::{GatewayMetrics, PlatformService};
+use crate::core::service::{
+    GatewayMetrics, PlatformService, DEFAULT_API_IP_RPM, DEFAULT_INGRESS_IP_RPM,
+};
 
 const RATE_LIMITER_SHARDS: usize = 16;
 const MAX_KEYS_PER_SHARD: usize = 1024;
@@ -306,6 +308,21 @@ impl Drop for ActiveRequestGuard {
     }
 }
 
+fn rate_limited_response(retry_after: Option<u64>, msg: &str) -> Response {
+    let body = Json(ErrorBody {
+        error: msg.to_string(),
+    });
+    match retry_after {
+        Some(secs) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            [("retry-after", secs.to_string())],
+            body,
+        )
+            .into_response(),
+        None => (StatusCode::TOO_MANY_REQUESTS, body).into_response(),
+    }
+}
+
 /// Request ID injection, global concurrency limiting, and non-blocking access logging middleware.
 pub async fn access_log_middleware(
     State(svc): State<PlatformService>,
@@ -313,18 +330,28 @@ pub async fn access_log_middleware(
     next: Next,
 ) -> Response {
     let metrics = svc.metrics().clone();
-    let permit = match svc.try_acquire_http_permit() {
-        Some(p) => p,
-        None => {
-            metrics.rate_limited_total.fetch_add(1, Ordering::Relaxed);
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(ErrorBody {
-                    error: "server concurrency limit reached".into(),
-                }),
-            )
-                .into_response();
-        }
+    let method = req.method().to_string();
+    let path = req.uri().path().to_string();
+    let host = crate::gateway::extract_request_host(&req)
+        .unwrap_or("")
+        .to_string();
+
+    let is_control_plane = path == "/_healthz"
+        || path == "/_panel"
+        || path.starts_with("/_panel/")
+        || path.starts_with("/_api/v1/")
+        || path == "/_mcp"
+        || path == "/mcp"
+        || path.starts_with("/_internal/");
+
+    let permit = if is_control_plane {
+        svc.try_acquire_admin_permit()
+    } else {
+        svc.try_acquire_http_permit()
+    };
+    let Some(permit) = permit else {
+        metrics.rate_limited_total.fetch_add(1, Ordering::Relaxed);
+        return rate_limited_response(None, "server concurrency limit reached");
     };
 
     metrics.active_http_requests.fetch_add(1, Ordering::Relaxed);
@@ -341,12 +368,6 @@ pub async fn access_log_middleware(
         req.headers_mut().insert("x-request-id", hv);
     }
 
-    let method = req.method().to_string();
-    let path = req.uri().path().to_string();
-    let host = crate::gateway::extract_request_host(&req)
-        .unwrap_or("")
-        .to_string();
-
     const AUTH_FAIL_RPM: u32 = 30;
     let peer_ip = req
         .extensions()
@@ -354,11 +375,21 @@ pub async fn access_log_middleware(
         .map(|ci| ci.0.ip());
     let client_ip =
         client_ip_from_headers(req.headers(), peer_ip, svc.effective_trust_proxy_headers());
-    let is_auth_precheck_path = path.starts_with("/_api/v1/")
-        || path == "/_mcp"
-        || path == "/mcp"
-        || path.starts_with("/_ai/")
-        || path.starts_with("/_realtime/");
+
+    if path != "/_healthz" && !path.starts_with("/_internal/") {
+        let ingress_key = format!("ingress:{client_ip}");
+        let (allowed, _, retry_after) = svc
+            .rate_limiter()
+            .check_and_record(&ingress_key, DEFAULT_INGRESS_IP_RPM);
+        if !allowed {
+            metrics.rate_limited_total.fetch_add(1, Ordering::Relaxed);
+            return rate_limited_response(Some(retry_after), "global ingress rate limit exceeded");
+        }
+    }
+
+    let is_api_or_mcp = path.starts_with("/_api/v1/") || path == "/_mcp" || path == "/mcp";
+    let is_auth_precheck_path =
+        is_api_or_mcp || path.starts_with("/_ai/") || path.starts_with("/_realtime/");
     let is_auth_record_path = is_auth_precheck_path || path.starts_with("/_blob/");
     let auth_fail_key = format!("auth_fail:{client_ip}");
 
@@ -366,14 +397,21 @@ pub async fn access_log_middleware(
         let (limited, retry_after) = svc.rate_limiter().is_limited(&auth_fail_key, AUTH_FAIL_RPM);
         if limited {
             metrics.rate_limited_total.fetch_add(1, Ordering::Relaxed);
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                [("retry-after", retry_after.to_string())],
-                Json(ErrorBody {
-                    error: "too many failed authentication attempts, please retry later".into(),
-                }),
-            )
-                .into_response();
+            return rate_limited_response(
+                Some(retry_after),
+                "too many failed authentication attempts, please retry later",
+            );
+        }
+    }
+
+    if is_api_or_mcp {
+        let api_key = format!("api:{client_ip}");
+        let (allowed, _, retry_after) = svc
+            .rate_limiter()
+            .check_and_record(&api_key, DEFAULT_API_IP_RPM);
+        if !allowed {
+            metrics.rate_limited_total.fetch_add(1, Ordering::Relaxed);
+            return rate_limited_response(Some(retry_after), "API rate limit exceeded");
         }
     }
 

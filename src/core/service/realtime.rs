@@ -1,7 +1,8 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use chrono::Utc;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, OwnedSemaphorePermit, RwLock, Semaphore};
 use uuid::Uuid;
 
 use crate::core::model::{
@@ -11,6 +12,10 @@ use crate::core::model::{
 use super::PlatformService;
 
 const CHANNEL_BUFFER_CAPACITY: usize = 64;
+pub const MAX_REALTIME_SSE_GLOBAL: usize = 512;
+pub const MAX_REALTIME_SSE_PER_CHANNEL: usize = 128;
+pub const MAX_REALTIME_PAYLOAD_BYTES: usize = 64 * 1024;
+pub const DEFAULT_REALTIME_PUBLISH_RPM: u32 = 600;
 
 struct RealtimeChannelEntry {
     tx: broadcast::Sender<RealtimeMessage>,
@@ -22,6 +27,7 @@ struct RealtimeChannelEntry {
 pub struct RealtimeHub {
     max_channels: usize,
     channels: RwLock<HashMap<String, RealtimeChannelEntry>>,
+    sse_slots: Arc<Semaphore>,
 }
 
 impl RealtimeHub {
@@ -29,6 +35,7 @@ impl RealtimeHub {
         Self {
             max_channels: max_channels.max(16),
             channels: RwLock::new(HashMap::new()),
+            sse_slots: Arc::new(Semaphore::new(MAX_REALTIME_SSE_GLOBAL)),
         }
     }
 
@@ -70,9 +77,20 @@ impl RealtimeHub {
         Ok(tx)
     }
 
-    pub async fn subscribe(&self, channel: &str) -> Result<broadcast::Receiver<RealtimeMessage>> {
+    pub async fn subscribe(
+        &self,
+        channel: &str,
+    ) -> Result<(broadcast::Receiver<RealtimeMessage>, OwnedSemaphorePermit)> {
+        let permit = self.sse_slots.clone().try_acquire_owned().map_err(|_| {
+            FerroError::RateLimited("realtime global SSE connection limit reached".into())
+        })?;
         let tx = self.get_or_create_sender(channel).await?;
-        Ok(tx.subscribe())
+        if tx.receiver_count() >= MAX_REALTIME_SSE_PER_CHANNEL {
+            return Err(FerroError::RateLimited(format!(
+                "realtime channel '{channel}' subscriber limit ({MAX_REALTIME_SSE_PER_CHANNEL}) reached"
+            )));
+        }
+        Ok((tx.subscribe(), permit))
     }
 
     pub async fn publish(
@@ -159,7 +177,7 @@ impl PlatformService {
         &self,
         caller: &Caller,
         channel: &str,
-    ) -> Result<broadcast::Receiver<RealtimeMessage>> {
+    ) -> Result<(broadcast::Receiver<RealtimeMessage>, OwnedSemaphorePermit)> {
         let clean = validate_channel_name(channel)?;
         ensure_channel_scope(caller, &clean)?;
         self.realtime.subscribe(&clean).await
@@ -179,6 +197,18 @@ impl PlatformService {
         }
         let clean = validate_channel_name(channel)?;
         ensure_channel_scope(caller, &clean)?;
+        self.enforce_service_rate_limit(
+            &format!("rt-pub:{clean}:{}", caller.actor),
+            None,
+            DEFAULT_REALTIME_PUBLISH_RPM,
+            &format!("realtime channel '{clean}'"),
+        )?;
+        let payload_len = data.to_string().len();
+        if payload_len > MAX_REALTIME_PAYLOAD_BYTES {
+            return Err(FerroError::InvalidArgument(format!(
+                "realtime payload size ({payload_len} bytes) exceeds maximum ({MAX_REALTIME_PAYLOAD_BYTES} bytes)"
+            )));
+        }
         let ev_name = event
             .map(str::trim)
             .filter(|s| !s.is_empty())

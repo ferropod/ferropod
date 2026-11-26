@@ -2,10 +2,9 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use chrono::{Datelike, TimeZone, Utc};
-use reqwest::Client;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, OwnedSemaphorePermit};
 use uuid::Uuid;
 
 use crate::core::model::{
@@ -387,7 +386,6 @@ impl PlatformService {
 
     fn build_provider_request(
         &self,
-        client: &Client,
         rec: &AiProviderRecord,
         subpath: &str,
         body: &Value,
@@ -405,7 +403,12 @@ impl PlatformService {
             rec.provider.base_url.trim_end_matches('/'),
             subpath.trim_start_matches('/')
         );
-        let mut req = client.post(&target_url).json(&payload);
+        let timeout_secs = rec.provider.timeout_secs.clamp(5, 600);
+        let mut req = self
+            .ai_http_client
+            .post(&target_url)
+            .timeout(Duration::from_secs(timeout_secs))
+            .json(&payload);
         if let (Some(nonce), Some(ct)) = (&rec.api_key_nonce, &rec.api_key_ciphertext) {
             if let Ok(key_bytes) = self.crypto.decrypt_secret(nonce, ct) {
                 if let Ok(key_str) = String::from_utf8(key_bytes) {
@@ -422,13 +425,8 @@ impl PlatformService {
         subpath: &str,
         body: &Value,
     ) -> std::result::Result<(u16, Value), String> {
-        let timeout_secs = rec.provider.timeout_secs.clamp(5, 600);
-        let client = Client::builder()
-            .timeout(Duration::from_secs(timeout_secs))
-            .build()
-            .map_err(|e| format!("ai client init: {e}"))?;
         let resp = self
-            .build_provider_request(&client, rec, subpath, body)
+            .build_provider_request(rec, subpath, body)
             .send()
             .await
             .map_err(|e| format!("upstream connect failed: {e}"))?;
@@ -445,28 +443,19 @@ impl PlatformService {
         subpath: &str,
         body: &Value,
     ) -> std::result::Result<reqwest::Response, String> {
-        let timeout_secs = rec.provider.timeout_secs.clamp(5, 600);
-        let client = Client::builder()
-            .timeout(Duration::from_secs(timeout_secs))
-            .build()
-            .map_err(|e| format!("ai client init: {e}"))?;
-        self.build_provider_request(&client, rec, subpath, body)
+        self.build_provider_request(rec, subpath, body)
             .send()
             .await
             .map_err(|e| format!("upstream connect failed: {e}"))
     }
 
     async fn enforce_ai_limits(&self, primary: &AiProviderRecord) -> Result<()> {
-        if let Some(rpm) = primary.provider.rate_limit_rpm {
-            let key = format!("ai:{}", primary.provider.name);
-            let (allowed, _, reset) = self.rate_limiter.check_and_record(&key, rpm);
-            if !allowed {
-                return Err(FerroError::RateLimited(format!(
-                    "AI provider '{}' RPM limit exceeded (retry in {reset}s)",
-                    primary.provider.name
-                )));
-            }
-        }
+        self.enforce_service_rate_limit(
+            &format!("ai:{}", primary.provider.name),
+            primary.provider.rate_limit_rpm,
+            super::DEFAULT_AI_RATE_LIMIT_RPM,
+            &format!("AI provider '{}'", primary.provider.name),
+        )?;
 
         if let Some(budget) = primary.provider.monthly_token_budget {
             let used = self
@@ -530,6 +519,15 @@ impl PlatformService {
         }
         let primary = self.resolve_provider_record(requested_provider).await?;
         self.enforce_ai_limits(&primary).await?;
+        let _ai_permit = self
+            .acquire_timed_permit(
+                self.ai_concurrency.clone(),
+                format!(
+                    "AI gateway is busy (max concurrency {} reached)",
+                    super::DEFAULT_AI_MAX_CONCURRENCY
+                ),
+            )
+            .await?;
 
         let is_stream = body
             .get("stream")
@@ -537,7 +535,7 @@ impl PlatformService {
             .unwrap_or(false);
         if is_stream {
             return self
-                .ai_proxy_stream(caller, primary, subpath, body)
+                .ai_proxy_stream(caller, primary, subpath, body, _ai_permit)
                 .await
                 .map(AiProxyResult::Stream);
         }
@@ -699,6 +697,7 @@ impl PlatformService {
         primary: AiProviderRecord,
         subpath: &str,
         body: Value,
+        _ai_permit: OwnedSemaphorePermit,
     ) -> Result<AiProxyStreamResponse> {
         let started = Instant::now();
         let mut active = primary.clone();
@@ -768,6 +767,7 @@ impl PlatformService {
         let mut resp = upstream;
         let provider_for_task = provider_name.clone();
         tokio::spawn(async move {
+            let _permit = _ai_permit;
             let mut sse_buf = String::new();
             let mut prompt_tokens = 0u64;
             let mut completion_tokens = 0u64;

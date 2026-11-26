@@ -163,6 +163,7 @@ impl PlatformService {
             &format!("search index '{}'", meta.name),
         )?;
         self.search.delete_index(&meta.id).await?;
+        self.remove_search_concurrency(&meta.id);
         self.audit(
             meta.project_id.as_deref(),
             &caller.actor,
@@ -205,6 +206,7 @@ impl PlatformService {
             &format!("search index '{}'", meta.name),
         )?;
         self.enforce_search_rate_limit(&meta, &caller.actor)?;
+        let _permit = self.acquire_search_permit(&meta.id, &meta.name).await?;
         self.search.list_docs(&meta.id).await
     }
 
@@ -222,6 +224,7 @@ impl PlatformService {
             &format!("search index '{}'", meta.name),
         )?;
         self.enforce_search_rate_limit(&meta, &caller.actor)?;
+        let _permit = self.acquire_search_permit(&meta.id, &meta.name).await?;
         self.search
             .list_docs_page(&meta.id, limit.clamp(1, 200), offset)
             .await
@@ -240,6 +243,7 @@ impl PlatformService {
             &format!("search index '{}'", meta.name),
         )?;
         self.enforce_search_rate_limit(&meta, &caller.actor)?;
+        let _permit = self.acquire_search_permit(&meta.id, &meta.name).await?;
         self.search.upsert_doc(&meta.id, doc).await
     }
 
@@ -256,6 +260,7 @@ impl PlatformService {
             &format!("search index '{}'", meta.name),
         )?;
         self.enforce_search_rate_limit(&meta, &caller.actor)?;
+        let _permit = self.acquire_search_permit(&meta.id, &meta.name).await?;
         self.search.delete_doc(&meta.id, doc_id).await
     }
 
@@ -272,6 +277,7 @@ impl PlatformService {
             &format!("search index '{}'", meta.name),
         )?;
         self.enforce_search_rate_limit(&meta, &caller.actor)?;
+        let _permit = self.acquire_search_permit(&meta.id, &meta.name).await?;
         self.search.search(&meta.id, input).await
     }
 }

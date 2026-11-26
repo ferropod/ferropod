@@ -3032,12 +3032,12 @@ pub async fn realtime_sse(
     Query(q): Query<AuthQuery>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
     let caller = authenticate_caller(&svc, &headers, q.token.as_deref()).await?;
-    let rx = svc
+    let (rx, permit) = svc
         .realtime_subscribe(&caller, &channel)
         .await
         .map_err(ApiError)?;
 
-    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+    let stream = futures_util::stream::unfold((rx, permit), |(mut rx, permit)| async move {
         loop {
             match rx.recv().await {
                 Ok(msg) => {
@@ -3046,13 +3046,13 @@ pub async fn realtime_sse(
                         .event(msg.event.clone())
                         .json_data(&msg)
                     {
-                        return Some((Ok::<Event, Infallible>(ev), rx));
+                        return Some((Ok::<Event, Infallible>(ev), (rx, permit)));
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                     return Some((
                         Ok(Event::default().event("lagged").data(skipped.to_string())),
-                        rx,
+                        (rx, permit),
                     ));
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,

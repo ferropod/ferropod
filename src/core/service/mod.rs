@@ -21,19 +21,11 @@ pub use projects::CreateDeploymentInput;
 pub use realtime::RealtimeHub;
 pub use settings::is_loopback_host;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-
-pub const DEFAULT_SERVICE_RATE_LIMIT_RPM: u32 = 1_200;
-pub const DEFAULT_KV_RATE_LIMIT_RPM: u32 = 2_400;
-pub const DEFAULT_BLOB_RATE_LIMIT_RPM: u32 = 1_200;
-pub const DEFAULT_QUEUE_ENQUEUE_RPM: u32 = 1_200;
-pub const DEFAULT_DB_MAX_CONCURRENCY: usize = 16;
-pub const MAX_DB_BATCH_STATEMENTS: usize = 200;
-pub const MAX_QUEUE_PAYLOAD_BYTES: usize = 512 * 1024;
 
 use chrono::Utc;
 use tokio::sync::{watch, Mutex, OwnedSemaphorePermit, RwLock, Semaphore};
@@ -43,8 +35,24 @@ use crate::config::{Config, Profile};
 use crate::core::crypto::Crypto;
 use crate::core::model::{
     AutoBackupConfig, Caller, FerroError, LogEntry, PlatformSettingsOverrides, Project, Result,
-    RouteEntry, TlsRuntimeState,
+    RouteEntry, TlsRuntimeState, UserDbMeta,
 };
+
+pub const DEFAULT_SERVICE_RATE_LIMIT_RPM: u32 = 1_200;
+pub const DEFAULT_KV_RATE_LIMIT_RPM: u32 = 2_400;
+pub const DEFAULT_BLOB_RATE_LIMIT_RPM: u32 = 1_200;
+pub const DEFAULT_QUEUE_ENQUEUE_RPM: u32 = 1_200;
+pub const DEFAULT_DB_MAX_CONCURRENCY: usize = 16;
+pub const MAX_DB_BATCH_STATEMENTS: usize = 200;
+pub const MAX_QUEUE_PAYLOAD_BYTES: usize = 512 * 1024;
+pub const DEFAULT_INGRESS_IP_RPM: u32 = 2_400;
+pub const DEFAULT_API_IP_RPM: u32 = 1_200;
+pub const DEFAULT_ROUTE_IP_RPM: u32 = 1_200;
+pub const DEFAULT_DB_MAX_SIZE_MB: usize = 512;
+pub const DEFAULT_SEARCH_MAX_CONCURRENCY: usize = 8;
+pub const DEFAULT_AI_RATE_LIMIT_RPM: u32 = 120;
+pub const DEFAULT_AI_MAX_CONCURRENCY: usize = 16;
+pub const ALERT_COOLDOWN_SECS: u64 = 60;
 use crate::core::traits::{
     DbManager, KvStore, LogStore, ObjectStore, ProjectStore, QueueStore, RegistryStore,
     SearchStore, SecretStore, TokenStore, WorkerRuntime,
@@ -199,12 +207,28 @@ pub struct PlatformService {
     bucket_cache_control: Arc<std::sync::RwLock<HashMap<String, Option<String>>>>,
     db_concurrency: Arc<std::sync::Mutex<HashMap<String, Arc<Semaphore>>>>,
     db_row_count_cache: Arc<std::sync::Mutex<HashMap<String, (Instant, usize)>>>,
+    admin_concurrency: Arc<Semaphore>,
+    app_concurrency: Arc<std::sync::Mutex<HashMap<String, Arc<Semaphore>>>>,
+    db_meta_cache: Arc<std::sync::Mutex<HashMap<String, (Instant, UserDbMeta)>>>,
+    search_concurrency: Arc<std::sync::Mutex<HashMap<String, Arc<Semaphore>>>>,
+    ai_http_client: reqwest::Client,
+    ai_concurrency: Arc<Semaphore>,
+    alert_cooldowns: Arc<std::sync::Mutex<HashMap<String, Instant>>>,
+    alert_concurrency: Arc<Semaphore>,
+    in_flight_crons: Arc<std::sync::Mutex<HashSet<String>>>,
+    queue_concurrency: Arc<std::sync::Mutex<HashMap<String, Arc<Semaphore>>>>,
 }
 
 impl PlatformService {
     pub async fn new(config: Config, deps: PlatformDeps) -> Result<Self> {
         let crypto = Crypto::from_master_key(&config.master_key);
         let http_concurrency = Arc::new(Semaphore::new(config.max_concurrency));
+        let admin_concurrency = Arc::new(Semaphore::new((config.max_concurrency / 2).clamp(16, 64)));
+        let ai_http_client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .pool_max_idle_per_host(16)
+            .build()
+            .map_err(|e| FerroError::Internal(anyhow::anyhow!("failed to build AI client: {e}")))?;
         let search: Arc<dyn SearchStore> =
             Arc::new(TursoSearchStore::open(&config.search_db_path()).await?);
         let wasmtime_rt = Arc::new(WasmtimeRuntime::new(config.clone())?);
@@ -282,6 +306,16 @@ impl PlatformService {
             bucket_cache_control: Arc::new(std::sync::RwLock::new(HashMap::new())),
             db_concurrency: Arc::new(std::sync::Mutex::new(HashMap::new())),
             db_row_count_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            admin_concurrency,
+            app_concurrency: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            db_meta_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            search_concurrency: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            ai_http_client,
+            ai_concurrency: Arc::new(Semaphore::new(DEFAULT_AI_MAX_CONCURRENCY)),
+            alert_cooldowns: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            alert_concurrency: Arc::new(Semaphore::new(8)),
+            in_flight_crons: Arc::new(std::sync::Mutex::new(HashSet::new())),
+            queue_concurrency: Arc::new(std::sync::Mutex::new(HashMap::new())),
         };
         wasmtime_rt.bind_service(svc.clone());
         svc.refresh_routes().await?;
@@ -319,29 +353,46 @@ impl PlatformService {
         Ok(())
     }
 
-    pub(crate) async fn acquire_db_permit(
+    fn get_or_init_semaphore(
+        map: &std::sync::Mutex<HashMap<String, Arc<Semaphore>>>,
+        key: &str,
+        cap: usize,
+    ) -> Arc<Semaphore> {
+        let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
+        guard
+            .entry(key.to_string())
+            .or_insert_with(|| Arc::new(Semaphore::new(cap.max(1))))
+            .clone()
+    }
+
+    pub(crate) async fn acquire_timed_permit(
         &self,
-        db_id: &str,
-        db_name: &str,
+        sem: Arc<Semaphore>,
+        busy_msg: String,
     ) -> Result<OwnedSemaphorePermit> {
-        let sem = {
-            let mut guard = self.db_concurrency.lock().unwrap_or_else(|e| e.into_inner());
-            guard
-                .entry(db_id.to_string())
-                .or_insert_with(|| Arc::new(Semaphore::new(DEFAULT_DB_MAX_CONCURRENCY)))
-                .clone()
-        };
         match tokio::time::timeout(Duration::from_millis(250), sem.acquire_owned()).await {
             Ok(Ok(permit)) => Ok(permit),
             Ok(Err(_)) | Err(_) => {
                 self.metrics
                     .rate_limited_total
                     .fetch_add(1, Ordering::Relaxed);
-                Err(FerroError::RateLimited(format!(
-                    "database '{db_name}' is busy (max concurrency {DEFAULT_DB_MAX_CONCURRENCY} reached)"
-                )))
+                Err(FerroError::RateLimited(busy_msg))
             }
         }
+    }
+
+    pub(crate) async fn acquire_db_permit(
+        &self,
+        db_id: &str,
+        db_name: &str,
+    ) -> Result<OwnedSemaphorePermit> {
+        let sem =
+            Self::get_or_init_semaphore(&self.db_concurrency, db_id, DEFAULT_DB_MAX_CONCURRENCY);
+        self.acquire_timed_permit(
+            sem,
+            format!("database '{db_name}' is busy (max concurrency {DEFAULT_DB_MAX_CONCURRENCY} reached)"),
+        )
+        .await
     }
 
     pub(crate) fn invalidate_db_caches(&self, db_id: &str) {
@@ -355,6 +406,48 @@ impl PlatformService {
     pub(crate) fn remove_db_concurrency(&self, db_id: &str) {
         let mut guard = self.db_concurrency.lock().unwrap_or_else(|e| e.into_inner());
         guard.remove(db_id);
+    }
+
+    pub(crate) fn invalidate_db_meta_cache(&self) {
+        let mut guard = self.db_meta_cache.lock().unwrap_or_else(|e| e.into_inner());
+        guard.clear();
+    }
+
+    pub fn try_acquire_admin_permit(&self) -> Option<OwnedSemaphorePermit> {
+        self.admin_concurrency.clone().try_acquire_owned().ok()
+    }
+
+    pub(crate) fn try_acquire_app_permit(&self, project_id: &str) -> Option<OwnedSemaphorePermit> {
+        let cap = (self.config.max_concurrency / 2).max(4);
+        let sem = Self::get_or_init_semaphore(&self.app_concurrency, project_id, cap);
+        sem.try_acquire_owned().ok()
+    }
+
+    pub(crate) async fn acquire_search_permit(
+        &self,
+        index_id: &str,
+        index_name: &str,
+    ) -> Result<OwnedSemaphorePermit> {
+        let sem = Self::get_or_init_semaphore(
+            &self.search_concurrency,
+            index_id,
+            DEFAULT_SEARCH_MAX_CONCURRENCY,
+        );
+        self.acquire_timed_permit(
+            sem,
+            format!(
+                "search index '{index_name}' is busy (max concurrency {DEFAULT_SEARCH_MAX_CONCURRENCY} reached)"
+            ),
+        )
+        .await
+    }
+
+    pub(crate) fn remove_search_concurrency(&self, index_id: &str) {
+        let mut guard = self
+            .search_concurrency
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.remove(index_id);
     }
 
     pub fn health_tracker(&self) -> &Arc<DeploymentHealthTracker> {

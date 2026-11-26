@@ -1,5 +1,6 @@
 use bytes::Bytes;
 use chrono::Utc;
+use futures_util::future::join_all;
 use uuid::Uuid;
 
 use crate::core::model::{
@@ -285,10 +286,10 @@ impl PlatformService {
     }
 
     /// Poll all queues with a configured `consumer_project_id`, dispatch claimed batches to
-    /// the Wasmtime runtime, and apply `Ack` / `Retry` / `Dead` outcomes.
+    /// the Wasmtime runtime concurrently (bounded per queue), and apply `Ack` / `Retry` / `Dead` outcomes.
     pub async fn run_queue_dispatch_once(&self) -> Result<usize> {
         let queues = self.queue.list_queues().await?;
-        let mut dispatched = 0usize;
+        let mut tasks = Vec::new();
 
         for cfg in queues {
             let Some(consumer_pid) = cfg.consumer_project_id.as_deref() else {
@@ -306,70 +307,85 @@ impl PlatformService {
             if dep.artifact_path.is_none() {
                 continue;
             }
-
-            let mut limit = cfg.batch_size.clamp(1, 100) as usize;
-            if let Some(rate) = cfg.rate_limit_per_sec.filter(|r| *r > 0) {
-                limit = limit.min(rate as usize).max(1);
-            }
-            let lease_secs = cfg.lease_secs.max(5);
-            let base_backoff = cfg.retry_backoff_secs.max(1) as u64;
-            let batch = self.queue.claim_batch(&cfg.name, limit, lease_secs).await?;
-            if batch.is_empty() {
+            let max_conc = cfg.max_concurrency.clamp(1, 32) as usize;
+            let q_sem = Self::get_or_init_semaphore(&self.queue_concurrency, &cfg.name, max_conc);
+            let Ok(q_permit) = q_sem.try_acquire_owned() else {
                 continue;
-            }
+            };
 
-            let request_id = format!("queue_{}", Uuid::new_v4().simple());
-            let ctx = RequestCtx::new(proj.id.clone(), request_id.clone(), dep)
-                .with_project_limits(&proj);
-            match self.runtime.handle_queue(ctx, batch.clone()).await {
-                Ok(outcomes) => {
-                    let mut ack_ids = Vec::new();
-                    for (idx, job) in batch.iter().enumerate() {
-                        match outcomes.get(idx) {
-                            Some(JobOutcome::Ack) => ack_ids.push(job.id),
-                            Some(JobOutcome::Retry { delay_secs, error }) => {
-                                self.queue.nack(job.id, (*delay_secs).max(1), error).await?;
-                            }
-                            Some(JobOutcome::Dead { error }) => {
-                                self.queue.mark_dead(job.id, error).await?;
-                            }
-                            None => {
-                                self.queue
-                                    .nack(
-                                        job.id,
-                                        base_backoff,
-                                        "worker returned fewer outcomes than jobs",
-                                    )
-                                    .await?;
+            let svc = self.clone();
+            tasks.push(async move {
+                let _q_permit = q_permit;
+                let mut limit = cfg.batch_size.clamp(1, 100) as usize;
+                if let Some(rate) = cfg.rate_limit_per_sec.filter(|r| *r > 0) {
+                    limit = limit.min(rate as usize).max(1);
+                }
+                let lease_secs = cfg.lease_secs.max(5);
+                let base_backoff = cfg.retry_backoff_secs.max(1) as u64;
+                let batch = svc.queue.claim_batch(&cfg.name, limit, lease_secs).await?;
+                if batch.is_empty() {
+                    return Ok::<usize, FerroError>(0);
+                }
+
+                let request_id = format!("queue_{}", Uuid::new_v4().simple());
+                let ctx = RequestCtx::new(proj.id.clone(), request_id.clone(), dep)
+                    .with_project_limits(&proj);
+                match svc.runtime.handle_queue(ctx, batch.clone()).await {
+                    Ok(outcomes) => {
+                        let mut ack_ids = Vec::new();
+                        for (idx, job) in batch.iter().enumerate() {
+                            match outcomes.get(idx) {
+                                Some(JobOutcome::Ack) => ack_ids.push(job.id),
+                                Some(JobOutcome::Retry { delay_secs, error }) => {
+                                    svc.queue.nack(job.id, (*delay_secs).max(1), error).await?;
+                                }
+                                Some(JobOutcome::Dead { error }) => {
+                                    svc.queue.mark_dead(job.id, error).await?;
+                                }
+                                None => {
+                                    svc.queue
+                                        .nack(
+                                            job.id,
+                                            base_backoff,
+                                            "worker returned fewer outcomes than jobs",
+                                        )
+                                        .await?;
+                                }
                             }
                         }
+                        if !ack_ids.is_empty() {
+                            svc.queue.ack_batch(&ack_ids).await?;
+                        }
+                        Ok(batch.len())
                     }
-                    if !ack_ids.is_empty() {
-                        self.queue.ack_batch(&ack_ids).await?;
+                    Err(err) => {
+                        let msg = err.to_string();
+                        svc.logs.emit(LogEntry {
+                            id: None,
+                            ts: Utc::now().timestamp_millis(),
+                            project_id: Some(proj.id.clone()),
+                            request_id: Some(request_id),
+                            source: "queue".into(),
+                            level: "error".into(),
+                            message: format!("Queue '{}' consumer failed: {msg}", cfg.name),
+                            meta_json: None,
+                        });
+                        for job in &batch {
+                            let exp = job.attempts.clamp(1, 6) as u32;
+                            let delay = (1u64 << exp).min(300);
+                            let _ = svc.queue.nack(job.id, delay, &msg).await;
+                        }
+                        Ok(0)
                     }
-                    dispatched += batch.len();
                 }
-                Err(err) => {
-                    let msg = err.to_string();
-                    self.logs.emit(LogEntry {
-                        id: None,
-                        ts: Utc::now().timestamp_millis(),
-                        project_id: Some(proj.id.clone()),
-                        request_id: Some(request_id),
-                        source: "queue".into(),
-                        level: "error".into(),
-                        message: format!("Queue '{}' consumer failed: {msg}", cfg.name),
-                        meta_json: None,
-                    });
-                    for job in &batch {
-                        let exp = job.attempts.clamp(1, 6) as u32;
-                        let delay = (1u64 << exp).min(300);
-                        let _ = self.queue.nack(job.id, delay, &msg).await;
-                    }
-                }
-            }
+            });
         }
 
+        let results = join_all(tasks).await;
+        let mut dispatched = 0usize;
+        for res in results {
+            dispatched += res?;
+        }
         Ok(dispatched)
     }
 }

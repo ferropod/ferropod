@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime};
 
@@ -96,6 +96,7 @@ const EPOCH_TICK_MS: u64 = 100;
 const PIPE_CAPACITY_BYTES: usize = 64 * 1024;
 const MAX_HTTP_BODY_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_MAX_HOSTCALLS_PER_INVOCATION: u32 = 500;
+const DEFAULT_MAX_OUTBOUND_HTTP_PER_INVOCATION: u32 = 50;
 
 struct CachedComponent {
     component: Component,
@@ -497,6 +498,8 @@ impl WasmtimeRuntime {
                 blocked_upstream: self.config.local_api.as_ref().map(|c| c.upstream),
                 allow_private_outbound: self.default_allow_private_outbound()
                     || ctx.allow_private_outbound,
+                outbound_http_used: Arc::new(AtomicU32::new(0)),
+                max_outbound_http: DEFAULT_MAX_OUTBOUND_HTTP_PER_INVOCATION,
             },
             table: ResourceTable::new(),
             limits,
@@ -1179,6 +1182,8 @@ fn is_blocked_socket_addr(
 struct FerroHttpHooks {
     blocked_upstream: Option<SocketAddr>,
     allow_private_outbound: bool,
+    outbound_http_used: Arc<AtomicU32>,
+    max_outbound_http: u32,
 }
 
 impl WasiHttpHooks for FerroHttpHooks {
@@ -1211,7 +1216,13 @@ impl WasiHttpHooks for FerroHttpHooks {
     > {
         let blocked_upstream = self.blocked_upstream;
         let allow_private_outbound = self.allow_private_outbound;
+        let outbound_http_used = self.outbound_http_used.clone();
+        let max_outbound_http = self.max_outbound_http;
         Box::new(async move {
+            let used = outbound_http_used.fetch_add(1, Ordering::Relaxed);
+            if used >= max_outbound_http {
+                return Err(wasmtime_wasi_http::Error::HttpRequestDenied);
+            }
             let Some(authority) = request.uri().authority().cloned() else {
                 return Err(wasmtime_wasi_http::Error::HttpRequestUriInvalid);
             };

@@ -25,10 +25,27 @@ fn starts_with_sql_keyword(sql: &str, kw: &str) -> bool {
 
 impl PlatformService {
     async fn resolve_user_db(&self, id_or_name: &str) -> Result<UserDbMeta> {
-        self.registry
+        {
+            let cache = self.db_meta_cache.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((ts, meta)) = cache.get(id_or_name) {
+                if ts.elapsed() < Duration::from_secs(5) {
+                    return Ok(meta.clone());
+                }
+            }
+        }
+        let meta = self
+            .registry
             .get_user_db(id_or_name)
             .await?
-            .ok_or_else(|| FerroError::NotFound(format!("user db '{id_or_name}'")))
+            .ok_or_else(|| FerroError::NotFound(format!("user db '{id_or_name}'")))?;
+        let mut cache = self.db_meta_cache.lock().unwrap_or_else(|e| e.into_inner());
+        if cache.len() >= 1024 {
+            cache.clear();
+        }
+        let now = Instant::now();
+        cache.insert(meta.id.clone(), (now, meta.clone()));
+        cache.insert(meta.name.clone(), (now, meta.clone()));
+        Ok(meta)
     }
 
     fn enforce_db_rate_limit(&self, meta: &UserDbMeta, actor: &str) -> Result<()> {
@@ -158,6 +175,7 @@ impl PlatformService {
                 }
             }
         }
+        self.invalidate_db_meta_cache();
         let meta = self.resolve_user_db(&id).await?;
         self.audit(
             resolved_pid.as_deref(),
@@ -210,6 +228,7 @@ impl PlatformService {
             meta.rate_limit_rpm = if rpm == 0 { None } else { Some(rpm) };
         }
         self.registry.update_user_db(&meta).await?;
+        self.invalidate_db_meta_cache();
         self.audit(
             meta.project_id.as_deref(),
             &caller.actor,
@@ -240,6 +259,7 @@ impl PlatformService {
         self.db.delete_db(&meta.id).await?;
         self.registry.delete_user_db(&meta.id).await?;
         self.invalidate_db_caches(&meta.id);
+        self.invalidate_db_meta_cache();
         self.remove_db_concurrency(&meta.id);
         self.audit(
             meta.project_id.as_deref(),
@@ -319,7 +339,11 @@ impl PlatformService {
             )));
         }
         let _permit = self.acquire_db_permit(&meta.id, &meta.name).await?;
-        if let Some(max_mb) = meta.max_size_mb.filter(|m| *m > 0) {
+        let max_mb = meta
+            .max_size_mb
+            .filter(|m| *m > 0)
+            .unwrap_or(super::DEFAULT_DB_MAX_SIZE_MB);
+        if max_mb > 0 {
             let db_path = self.config.user_dbs_dir().join(format!("{}.db", meta.id));
             let wal_path = self
                 .config

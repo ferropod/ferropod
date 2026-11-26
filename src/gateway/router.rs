@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use axum::{
     body::Body,
@@ -16,7 +17,7 @@ use tower_http::limit::RequestBodyLimitLayer;
 use uuid::Uuid;
 
 use crate::core::model::{RequestCtx, TargetEnv, WorkerHttpRequest};
-use crate::core::service::PlatformService;
+use crate::core::service::{PlatformService, DEFAULT_ROUTE_IP_RPM};
 use crate::gateway::{
     blob_api::{self, etag_matches},
     guard::{
@@ -46,10 +47,14 @@ pub fn build_router(svc: PlatformService) -> Router {
         .as_ref()
         .map(|cfg| LocalApiProxy::new(cfg, svc.config().max_blob_upload_bytes));
 
-    let panel_routes = Router::new()
-        .nest("/_api/v1", web::api::router())
+    let mcp_routes = Router::new()
         .route("/_mcp", post(web::mcp::mcp_http_handler))
         .route("/mcp", post(web::mcp::mcp_http_handler))
+        .layer(RequestBodyLimitLayer::new(2 * 1024 * 1024));
+
+    let panel_routes = Router::new()
+        .nest("/_api/v1", web::api::router())
+        .merge(mcp_routes)
         .route("/_panel", get(web::admin_index))
         .route("/_panel/", get(web::admin_index))
         .route("/_panel/assets/{file}", get(web::admin_asset))
@@ -58,12 +63,7 @@ pub fn build_router(svc: PlatformService) -> Router {
             panel_domain_guard_middleware,
         ));
 
-    Router::new()
-        .route(
-            "/_healthz",
-            get(|| async { Json(HealthzResp { status: "ok" }) }),
-        )
-        .nest("/_blob", blob_router)
+    let ai_realtime_routes = Router::new()
         .route("/_ai/v1/models", get(web::api::ai_list_models))
         .route(
             "/_ai/v1/chat/completions",
@@ -75,6 +75,15 @@ pub fn build_router(svc: PlatformService) -> Router {
             "/_realtime/{channel}/publish",
             post(web::api::realtime_publish),
         )
+        .layer(RequestBodyLimitLayer::new(2 * 1024 * 1024));
+
+    Router::new()
+        .route(
+            "/_healthz",
+            get(|| async { Json(HealthzResp { status: "ok" }) }),
+        )
+        .nest("/_blob", blob_router)
+        .merge(ai_realtime_routes)
         .merge(panel_routes)
         .fallback(host_route_handler)
         .layer(Extension(local_api))
@@ -136,12 +145,18 @@ async fn host_route_handler(
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ci| ci.0.ip());
 
-    // 2. Per-route sliding-window rate limiting
-    let rate_info = if let Some(rpm) = route.rate_limit_rpm.filter(|r| *r > 0) {
+    // 2. Per-route sliding-window rate limiting (fallback to DEFAULT_ROUTE_IP_RPM)
+    let effective_route_rpm = route
+        .rate_limit_rpm
+        .filter(|r| *r > 0)
+        .unwrap_or(DEFAULT_ROUTE_IP_RPM);
+    let rate_info = if effective_route_rpm > 0 {
         let ip =
             client_ip_from_headers(req.headers(), peer_ip, svc.effective_trust_proxy_headers());
         let rl_key = format!("route:{}:{ip}", route.host);
-        let (allowed, remaining, reset_secs) = svc.rate_limiter().check_and_record(&rl_key, rpm);
+        let (allowed, remaining, reset_secs) = svc
+            .rate_limiter()
+            .check_and_record(&rl_key, effective_route_rpm);
         if !allowed {
             svc.metrics()
                 .rate_limited_total
@@ -150,14 +165,14 @@ async fn host_route_handler(
                 StatusCode::TOO_MANY_REQUESTS,
                 [
                     ("retry-after", reset_secs.to_string()),
-                    ("x-ratelimit-limit", rpm.to_string()),
+                    ("x-ratelimit-limit", effective_route_rpm.to_string()),
                     ("x-ratelimit-remaining", "0".to_string()),
                 ],
                 "route rate limit exceeded",
             )
                 .into_response();
         }
-        Some((rpm, remaining))
+        Some((effective_route_rpm, remaining))
     } else {
         None
     };
@@ -179,6 +194,16 @@ async fn host_route_handler(
             .strip_prefix(prefix)
             .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
         {
+            let Some(_app_permit) = svc.try_acquire_app_permit(&route.project_id) else {
+                svc.metrics()
+                    .rate_limited_total
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "app concurrency limit reached",
+                )
+                    .into_response();
+            };
             let mut resp =
                 forward_dynamic_upstream(upstream, svc.config().max_blob_upload_bytes, req).await;
             attach_rate_limit_headers(&mut resp, rate_info);
@@ -266,12 +291,14 @@ async fn host_route_handler(
             .iter()
             .map(|(k, v)| (k.as_str().to_string(), v.as_bytes().to_vec()))
             .collect();
-        let collected_body = match Limited::new(req.into_body(), max_worker_req_bytes)
-            .collect()
-            .await
+        let collected_body = match tokio::time::timeout(
+            Duration::from_secs(30),
+            Limited::new(req.into_body(), max_worker_req_bytes).collect(),
+        )
+        .await
         {
-            Ok(collected) => collected.to_bytes(),
-            Err(err) => {
+            Ok(Ok(collected)) => collected.to_bytes(),
+            Ok(Err(err)) => {
                 if err.is::<LengthLimitError>() {
                     return finalize_resp(
                         (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response(),
@@ -279,6 +306,11 @@ async fn host_route_handler(
                 }
                 return finalize_resp(
                     (StatusCode::BAD_REQUEST, "failed to read request body").into_response(),
+                );
+            }
+            Err(_) => {
+                return finalize_resp(
+                    (StatusCode::REQUEST_TIMEOUT, "request body read timed out").into_response(),
                 );
             }
         };

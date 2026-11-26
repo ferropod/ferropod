@@ -1019,10 +1019,39 @@ impl PlatformService {
         if !enabled {
             return;
         }
+        let scope = detail
+            .get("project_id")
+            .or_else(|| detail.get("provider"))
+            .or_else(|| detail.get("cron_id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("global");
+        let cd_key = format!("{event}:{scope}");
+        let cooldown = std::time::Duration::from_secs(super::ALERT_COOLDOWN_SECS);
+        {
+            let mut cds = self
+                .alert_cooldowns
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if cds.get(&cd_key).is_some_and(|t| t.elapsed() < cooldown) {
+                return;
+            }
+            if cds.len() > 512 {
+                cds.retain(|_, t| t.elapsed() < cooldown);
+            }
+            cds.insert(cd_key, std::time::Instant::now());
+        }
+        let Ok(permit) = self.alert_concurrency.clone().try_acquire_owned() else {
+            warn!(
+                event = %event,
+                "alert webhook concurrency limit reached, dropping alert"
+            );
+            return;
+        };
         let legacy_url = eff.alert_webhook_url.filter(|u| !u.is_empty());
         let svc = self.clone();
         let event_s = event.to_string();
         tokio::spawn(async move {
+            let _permit = permit;
             if let Some(url) = legacy_url {
                 let res = svc
                     .send_webhook_payload(&url, &event_s, &title, &detail)
