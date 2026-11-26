@@ -282,6 +282,17 @@ struct PresignReq {
     expires_secs: u64,
 }
 
+#[derive(Debug, Deserialize)]
+struct BrowseBucketQuery {
+    prefix: Option<String>,
+    search: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeleteBucketPrefixQuery {
+    prefix: String,
+}
+
 fn default_presign_ttl() -> u64 {
     300
 }
@@ -397,6 +408,8 @@ pub fn router() -> Router<PlatformService> {
             patch(bucket_update).delete(bucket_delete),
         )
         .route("/buckets/{name}/presign", post(bucket_presign))
+        .route("/buckets/{name}/browse", get(bucket_browse))
+        .route("/buckets/{name}/prefix", delete(bucket_delete_prefix))
         .route("/dbs", get(db_list).post(db_create))
         .route("/dbs/{id}", patch(db_update).delete(db_delete))
         .route("/dbs/{id}/schema", get(db_schema))
@@ -2120,6 +2133,42 @@ async fn bucket_presign(
         .map_err(ApiError)?;
     Ok(Json(
         serde_json::json!({ "url": url, "expires_at": expires_at }),
+    ))
+}
+
+async fn bucket_browse(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Query(q): Query<BrowseBucketQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let res = svc
+        .browse_bucket(
+            &caller,
+            &name,
+            q.prefix.as_deref(),
+            q.search.as_deref(),
+            20_000,
+        )
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(res))
+}
+
+async fn bucket_delete_prefix(
+    State(svc): State<PlatformService>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Query(q): Query<DeleteBucketPrefixQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let caller = authenticate_caller(&svc, &headers, None).await?;
+    let (prefix, deleted) = svc
+        .delete_objects_by_prefix(&caller, &name, &q.prefix)
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(
+        serde_json::json!({ "prefix": prefix, "deleted": deleted }),
     ))
 }
 

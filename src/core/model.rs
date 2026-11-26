@@ -555,6 +555,25 @@ pub struct ObjectMeta {
     pub updated_at: i64,
 }
 
+/// Virtual folder summary returned by bucket directory browsing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlobFolderEntry {
+    pub prefix: String,
+    pub name: String,
+    pub object_count: u64,
+    pub total_size: u64,
+    pub updated_at: i64,
+}
+
+/// Directory-style listing result for a bucket prefix.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlobBrowseResult {
+    pub prefix: String,
+    pub folders: Vec<BlobFolderEntry>,
+    pub objects: Vec<ObjectMeta>,
+    pub truncated: bool,
+}
+
 /// Typed SQL parameter / cell value for user Turso DBs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]

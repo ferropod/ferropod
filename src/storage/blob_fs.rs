@@ -112,11 +112,19 @@ impl ObjectStore for FsBlobStore {
     }
 
     async fn delete_bucket(&self, name: &str) -> Result<()> {
-        let existing = self.meta.list_objects_meta(name, None, 1).await?;
-        if !existing.is_empty() {
-            return Err(FerroError::Conflict(format!(
-                "bucket '{name}' is not empty"
-            )));
+        if self.meta.get_bucket(name).await?.is_none() {
+            return Err(FerroError::NotFound(format!("bucket '{name}'")));
+        }
+        loop {
+            let batch = self.meta.list_objects_meta(name, None, 200).await?;
+            if batch.is_empty() {
+                break;
+            }
+            for obj in batch {
+                self.meta
+                    .delete_object_meta(name, &obj.key, self.gc_grace_secs)
+                    .await?;
+            }
         }
         self.meta.delete_bucket(name).await
     }

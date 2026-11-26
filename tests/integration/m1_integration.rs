@@ -4749,3 +4749,212 @@ async fn static_site_cache_control_and_streaming_dynamic_proxy() {
 
     upstream_task.abort();
 }
+
+#[tokio::test]
+async fn delete_non_empty_bucket_removes_objects_and_bucket() {
+    let h = setup_harness().await;
+    let app = build_router(h.svc.clone());
+    let tok = Some(h.admin_token.as_str());
+
+    let (st, _) = json_req(
+        &app,
+        Method::POST,
+        "/_api/v1/buckets",
+        tok,
+        Some(serde_json::json!({ "name": "non-empty-del" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+
+    for (key, content) in [
+        ("hello.txt", "hello-content"),
+        ("nested/file.txt", "nested-content"),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri(format!("/_blob/non-empty-del/{key}"))
+                    .header(header::AUTHORIZATION, format!("Bearer {}", h.admin_token))
+                    .header(header::CONTENT_TYPE, "text/plain")
+                    .body(Body::from(content))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    let (st_del, _) = json_req(
+        &app,
+        Method::DELETE,
+        "/_api/v1/buckets/non-empty-del",
+        tok,
+        None,
+    )
+    .await;
+    assert_eq!(st_del, StatusCode::NO_CONTENT);
+
+    let (st_get, _) = json_req(&app, Method::GET, "/_blob/non-empty-del/hello.txt", tok, None).await;
+    assert_eq!(st_get, StatusCode::NOT_FOUND);
+
+    let (st_list, list_bytes) = json_req(&app, Method::GET, "/_api/v1/buckets", tok, None).await;
+    assert_eq!(st_list, StatusCode::OK);
+    let buckets: Vec<serde_json::Value> = serde_json::from_slice(&list_bytes).unwrap();
+    assert!(!buckets.iter().any(|b| b["name"] == "non-empty-del"));
+
+    assert!(h.blobs.list("non-empty-del", None, 10).await.unwrap().is_empty());
+    assert_eq!(h.blobs.run_gc_batch(10).await.unwrap(), 2);
+
+    let (st_del_again, _) = json_req(
+        &app,
+        Method::DELETE,
+        "/_api/v1/buckets/non-empty-del",
+        tok,
+        None,
+    )
+    .await;
+    assert_eq!(st_del_again, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn blob_folder_browse_and_prefix_delete() {
+    let h = setup_harness().await;
+    let app = build_router(h.svc.clone());
+    let tok = Some(h.admin_token.as_str());
+
+    let (st, _) = json_req(
+        &app,
+        Method::POST,
+        "/_api/v1/buckets",
+        tok,
+        Some(serde_json::json!({ "name": "folder-bkt" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+
+    // Upload nested objects; omit Content-Type on assets/app.js and send empty Content-Type on root.txt
+    // to verify mime_guess fallback works in both cases.
+    let uploads = [
+        ("root.txt", "root-body", Some("")),
+        ("assets/app.js", "console.log(1);", None),
+        ("assets/img/logo.png", "png-data", Some("image/png")),
+        ("assets/img/bg.jpg", "jpg-data", Some("image/jpeg")),
+        ("assets2/other.txt", "other-body", Some("text/plain")),
+    ];
+    for (key, content, ct) in uploads {
+        let mut req_builder = Request::builder()
+            .method(Method::PUT)
+            .uri(format!("/_blob/folder-bkt/{key}"))
+            .header(header::AUTHORIZATION, format!("Bearer {}", h.admin_token));
+        if let Some(ctype) = ct {
+            req_builder = req_builder.header(header::CONTENT_TYPE, ctype);
+        }
+        let resp = app
+            .clone()
+            .oneshot(req_builder.body(Body::from(content)).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED, "failed putting {key}");
+    }
+
+    // Browse root directory
+    let (st_root, root_bytes) =
+        json_req(&app, Method::GET, "/_api/v1/buckets/folder-bkt/browse", tok, None).await;
+    assert_eq!(st_root, StatusCode::OK);
+    let root_res: serde_json::Value = serde_json::from_slice(&root_bytes).unwrap();
+    assert_eq!(root_res["prefix"], "");
+    assert_eq!(root_res["truncated"], false);
+    let root_folders = root_res["folders"].as_array().unwrap();
+    assert_eq!(root_folders.len(), 2);
+    assert_eq!(root_folders[0]["prefix"], "assets/");
+    assert_eq!(root_folders[0]["name"], "assets");
+    assert_eq!(root_folders[0]["object_count"], 3);
+    assert_eq!(root_folders[1]["prefix"], "assets2/");
+    assert_eq!(root_folders[1]["name"], "assets2");
+    assert_eq!(root_folders[1]["object_count"], 1);
+    let root_objs = root_res["objects"].as_array().unwrap();
+    assert_eq!(root_objs.len(), 1);
+    assert_eq!(root_objs[0]["key"], "root.txt");
+    assert_eq!(root_objs[0]["content_type"], "text/plain");
+
+    // Browse assets/ directory
+    let (st_assets, assets_bytes) = json_req(
+        &app,
+        Method::GET,
+        "/_api/v1/buckets/folder-bkt/browse?prefix=assets/",
+        tok,
+        None,
+    )
+    .await;
+    assert_eq!(st_assets, StatusCode::OK);
+    let assets_res: serde_json::Value = serde_json::from_slice(&assets_bytes).unwrap();
+    assert_eq!(assets_res["prefix"], "assets/");
+    let assets_folders = assets_res["folders"].as_array().unwrap();
+    assert_eq!(assets_folders.len(), 1);
+    assert_eq!(assets_folders[0]["prefix"], "assets/img/");
+    assert_eq!(assets_folders[0]["name"], "img");
+    assert_eq!(assets_folders[0]["object_count"], 2);
+    let assets_objs = assets_res["objects"].as_array().unwrap();
+    assert_eq!(assets_objs.len(), 1);
+    assert_eq!(assets_objs[0]["key"], "assets/app.js");
+    let js_ct = assets_objs[0]["content_type"].as_str().unwrap();
+    assert!(
+        js_ct.contains("javascript"),
+        "expected javascript mime type, got {js_ct}"
+    );
+
+    // Search within assets/
+    let (st_search, search_bytes) = json_req(
+        &app,
+        Method::GET,
+        "/_api/v1/buckets/folder-bkt/browse?prefix=assets/&search=logo",
+        tok,
+        None,
+    )
+    .await;
+    assert_eq!(st_search, StatusCode::OK);
+    let search_res: serde_json::Value = serde_json::from_slice(&search_bytes).unwrap();
+    assert!(search_res["folders"].as_array().unwrap().is_empty());
+    let search_objs = search_res["objects"].as_array().unwrap();
+    assert_eq!(search_objs.len(), 1);
+    assert_eq!(search_objs[0]["key"], "assets/img/logo.png");
+
+    // Empty prefix deletion must be rejected
+    let (st_empty_del, _) = json_req(
+        &app,
+        Method::DELETE,
+        "/_api/v1/buckets/folder-bkt/prefix?prefix=",
+        tok,
+        None,
+    )
+    .await;
+    assert_eq!(st_empty_del, StatusCode::BAD_REQUEST);
+
+    // Delete assets/ prefix recursively
+    let (st_del_pfx, del_pfx_bytes) = json_req(
+        &app,
+        Method::DELETE,
+        "/_api/v1/buckets/folder-bkt/prefix?prefix=assets/",
+        tok,
+        None,
+    )
+    .await;
+    assert_eq!(st_del_pfx, StatusCode::OK);
+    let del_res: serde_json::Value = serde_json::from_slice(&del_pfx_bytes).unwrap();
+    assert_eq!(del_res["prefix"], "assets/");
+    assert_eq!(del_res["deleted"], 3);
+
+    // Verify root.txt and assets2/other.txt remain untouched while assets/* are gone
+    let (st_after, after_bytes) =
+        json_req(&app, Method::GET, "/_api/v1/buckets/folder-bkt/browse", tok, None).await;
+    assert_eq!(st_after, StatusCode::OK);
+    let after_res: serde_json::Value = serde_json::from_slice(&after_bytes).unwrap();
+    let after_folders = after_res["folders"].as_array().unwrap();
+    assert_eq!(after_folders.len(), 1);
+    assert_eq!(after_folders[0]["prefix"], "assets2/");
+    let after_objs = after_res["objects"].as_array().unwrap();
+    assert_eq!(after_objs.len(), 1);
+    assert_eq!(after_objs[0]["key"], "root.txt");
+}

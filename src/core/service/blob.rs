@@ -1,11 +1,35 @@
+use std::collections::BTreeMap;
+
 use chrono::Utc;
 
 use crate::core::model::{
-    BlobAuth, BucketMeta, BucketOpts, ByteRange, ByteStream, Caller, FerroError, ObjectMeta,
-    Result, TokenScope,
+    BlobAuth, BlobBrowseResult, BlobFolderEntry, BucketMeta, BucketOpts, ByteRange, ByteStream,
+    Caller, FerroError, ObjectMeta, Result, TokenScope,
 };
 
 use super::PlatformService;
+
+fn normalize_folder_prefix(raw: &str) -> Result<String> {
+    let trimmed = raw.trim().trim_start_matches('/');
+    if trimmed.is_empty() {
+        return Ok(String::new());
+    }
+    let inner = trimmed.trim_end_matches('/');
+    if inner.is_empty() {
+        return Ok(String::new());
+    }
+    if inner.contains('\0')
+        || inner.contains('\\')
+        || inner
+            .split('/')
+            .any(|seg| seg.is_empty() || seg == "." || seg == "..")
+    {
+        return Err(FerroError::InvalidArgument(format!(
+            "invalid folder prefix '{raw}'"
+        )));
+    }
+    Ok(format!("{inner}/"))
+}
 
 fn content_type_allowed(allowed_list: &str, actual: &str) -> bool {
     let actual_essence = actual
@@ -453,6 +477,159 @@ impl PlatformService {
     ) -> Result<(Vec<ObjectMeta>, Option<String>)> {
         self.authorize_blob_read(auth, bucket, None).await?;
         self.objects.list_page(bucket, prefix, cursor, limit).await
+    }
+
+    pub async fn browse_bucket(
+        &self,
+        caller: &Caller,
+        bucket: &str,
+        prefix: Option<&str>,
+        search: Option<&str>,
+        max_scan: usize,
+    ) -> Result<BlobBrowseResult> {
+        let meta = self.get_bucket_or_err(bucket).await?;
+        Self::require_resource_read(
+            caller,
+            meta.project_id.as_deref(),
+            &format!("bucket '{bucket}'"),
+        )?;
+
+        let norm_prefix = normalize_folder_prefix(prefix.unwrap_or(""))?;
+        let search_q = search
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_ascii_lowercase);
+
+        let scan_cap = max_scan.clamp(100, 50_000);
+        let mut cursor: Option<String> = None;
+        let mut scanned = 0usize;
+        let mut truncated = false;
+        let mut folders_map: BTreeMap<String, BlobFolderEntry> = BTreeMap::new();
+        let mut objects: Vec<ObjectMeta> = Vec::new();
+
+        loop {
+            let (page, next_cursor) = self
+                .objects
+                .list_page(
+                    bucket,
+                    (!norm_prefix.is_empty()).then_some(norm_prefix.as_str()),
+                    cursor.as_deref(),
+                    1000,
+                )
+                .await?;
+            scanned += page.len();
+
+            if let Some(ref q) = search_q {
+                for obj in page {
+                    let rel = obj.key.strip_prefix(&norm_prefix).unwrap_or(&obj.key);
+                    if rel.to_ascii_lowercase().contains(q) && objects.len() < 500 {
+                        objects.push(obj);
+                    }
+                }
+            } else {
+                for obj in page {
+                    let rel = obj.key.strip_prefix(&norm_prefix).unwrap_or(&obj.key);
+                    if let Some(slash) = rel.find('/') {
+                        let folder_name = &rel[..slash];
+                        let folder_prefix = format!("{norm_prefix}{folder_name}/");
+                        let entry =
+                            folders_map
+                                .entry(folder_prefix.clone())
+                                .or_insert_with(|| BlobFolderEntry {
+                                    prefix: folder_prefix,
+                                    name: folder_name.to_string(),
+                                    object_count: 0,
+                                    total_size: 0,
+                                    updated_at: obj.updated_at,
+                                });
+                        entry.object_count += 1;
+                        entry.total_size = entry.total_size.saturating_add(obj.size);
+                        if obj.updated_at > entry.updated_at {
+                            entry.updated_at = obj.updated_at;
+                        }
+                    } else {
+                        objects.push(obj);
+                    }
+                }
+            }
+
+            if next_cursor.is_none() {
+                break;
+            }
+            if scanned >= scan_cap {
+                truncated = true;
+                break;
+            }
+            cursor = next_cursor;
+        }
+
+        Ok(BlobBrowseResult {
+            prefix: norm_prefix,
+            folders: folders_map.into_values().collect(),
+            objects,
+            truncated,
+        })
+    }
+
+    pub async fn delete_objects_by_prefix(
+        &self,
+        caller: &Caller,
+        bucket: &str,
+        prefix: &str,
+    ) -> Result<(String, u64)> {
+        let meta = self.get_bucket_or_err(bucket).await?;
+        Self::require_resource_write(
+            caller,
+            meta.project_id.as_deref(),
+            &format!("bucket '{bucket}'"),
+        )?;
+
+        let norm_prefix = normalize_folder_prefix(prefix)?;
+        if norm_prefix.is_empty() {
+            return Err(FerroError::InvalidArgument(
+                "folder prefix must not be empty".into(),
+            ));
+        }
+
+        let mut deleted = 0u64;
+        let mut cursor: Option<String> = None;
+        loop {
+            let (page, next_cursor) = self
+                .objects
+                .list_page(bucket, Some(&norm_prefix), cursor.as_deref(), 500)
+                .await?;
+            if page.is_empty() {
+                break;
+            }
+            let mut page_deleted = 0u64;
+            for obj in page {
+                if self.objects.delete(bucket, &obj.key).await? {
+                    deleted += 1;
+                    page_deleted += 1;
+                }
+            }
+            if page_deleted == 0 {
+                cursor = next_cursor;
+                if cursor.is_none() {
+                    break;
+                }
+            } else {
+                cursor = None;
+            }
+        }
+
+        self.audit(
+            meta.project_id.as_deref(),
+            &caller.actor,
+            "bucket.delete_prefix",
+            serde_json::json!({
+                "bucket": bucket,
+                "prefix": norm_prefix,
+                "deleted": deleted,
+            }),
+        );
+
+        Ok((norm_prefix, deleted))
     }
 
     fn invalidate_bucket_cache_control(&self, bucket: &str) {

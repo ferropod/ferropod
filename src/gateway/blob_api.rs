@@ -101,6 +101,7 @@ async fn put_object(
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.trim().is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| {
             mime_guess::from_path(&key)
