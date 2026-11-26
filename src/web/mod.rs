@@ -26,6 +26,11 @@ const ADMIN_RUNTIME_COMPONENT: &str = include_str!("assets/runtime_component.js"
 const ADMIN_UPDATE_COMPONENT: &str = include_str!("assets/update_component.js");
 const ADMIN_SETTINGS_COMPONENT: &str = include_str!("assets/settings_component.js");
 const ADMIN_AI_COMPONENT: &str = include_str!("assets/ai_component.js");
+const ADMIN_VIEW_KV: &str = include_str!("assets/view_kv.js");
+const ADMIN_VIEW_QUEUES: &str = include_str!("assets/view_queues.js");
+const ADMIN_VIEW_BLOBS: &str = include_str!("assets/view_blobs.js");
+const ADMIN_VIEW_DBS: &str = include_str!("assets/view_dbs.js");
+const ADMIN_VIEW_SEARCH: &str = include_str!("assets/view_search.js");
 const ADMIN_JS: &str = include_str!("assets/app.js");
 
 fn asset_etags() -> &'static HashMap<&'static str, String> {
@@ -46,6 +51,11 @@ fn asset_etags() -> &'static HashMap<&'static str, String> {
             ("update_component.js", ADMIN_UPDATE_COMPONENT),
             ("settings_component.js", ADMIN_SETTINGS_COMPONENT),
             ("ai_component.js", ADMIN_AI_COMPONENT),
+            ("view_kv.js", ADMIN_VIEW_KV),
+            ("view_queues.js", ADMIN_VIEW_QUEUES),
+            ("view_blobs.js", ADMIN_VIEW_BLOBS),
+            ("view_dbs.js", ADMIN_VIEW_DBS),
+            ("view_search.js", ADMIN_VIEW_SEARCH),
             ("app.js", ADMIN_JS),
         ];
         items
@@ -173,6 +183,31 @@ pub async fn admin_asset(Path(file): Path<String>, headers: HeaderMap) -> Respon
             "ai_component.js",
             "application/javascript; charset=utf-8",
             ADMIN_AI_COMPONENT,
+        ),
+        "view_kv.js" => (
+            "view_kv.js",
+            "application/javascript; charset=utf-8",
+            ADMIN_VIEW_KV,
+        ),
+        "view_queues.js" => (
+            "view_queues.js",
+            "application/javascript; charset=utf-8",
+            ADMIN_VIEW_QUEUES,
+        ),
+        "view_blobs.js" => (
+            "view_blobs.js",
+            "application/javascript; charset=utf-8",
+            ADMIN_VIEW_BLOBS,
+        ),
+        "view_dbs.js" => (
+            "view_dbs.js",
+            "application/javascript; charset=utf-8",
+            ADMIN_VIEW_DBS,
+        ),
+        "view_search.js" => (
+            "view_search.js",
+            "application/javascript; charset=utf-8",
+            ADMIN_VIEW_SEARCH,
         ),
         "app.js" => ("app.js", "application/javascript; charset=utf-8", ADMIN_JS),
         _ => return StatusCode::NOT_FOUND.into_response(),
