@@ -8,6 +8,7 @@
 
   var TOKEN_STORAGE = 'ferropod_token';
   var THEME_STORAGE = 'ferropod_theme';
+  var SIDEBAR_STORAGE = 'ferropod_sidebar_collapsed';
 
   var ROUTES = [
     'overview',
@@ -47,8 +48,11 @@
     queueJobs: [],
     queueInspectStatus: 'dead',
     selectedBucket: '',
+    blobDir: '',
+    blobSearch: '',
+    blobFolders: [],
     blobObjects: [],
-    blobPrefix: '',
+    blobTruncated: false,
     selectedDbId: '',
     dbTab: 'console',
     dbSchema: '',
@@ -88,6 +92,67 @@
         (!extraCheck || extraCheck())
       );
     };
+  }
+
+  function showViewLoadingIfNeeded(root, viewKey) {
+    if (!root) return;
+    if (root.getAttribute('data-view-key') !== viewKey) {
+      root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
+    }
+  }
+
+  function markViewRendered(root, viewKey) {
+    if (root) root.setAttribute('data-view-key', viewKey);
+  }
+
+  function captureUiSnapshot(root) {
+    var snap = {
+      scrollX: window.scrollX || 0,
+      scrollY: window.scrollY || 0,
+      activeId: '',
+      selStart: null,
+      selEnd: null,
+      openDetails: []
+    };
+    if (!root) return snap;
+    var active = document.activeElement;
+    if (active && root.contains(active) && active.id) {
+      snap.activeId = active.id;
+      try {
+        if (typeof active.selectionStart === 'number' && typeof active.selectionEnd === 'number') {
+          snap.selStart = active.selectionStart;
+          snap.selEnd = active.selectionEnd;
+        }
+      } catch (_) {}
+    }
+    root.querySelectorAll('details').forEach(function (d) {
+      snap.openDetails.push(Boolean(d.open));
+    });
+    return snap;
+  }
+
+  function restoreUiSnapshot(root, snap) {
+    if (!root || !snap) return;
+    if (snap.openDetails && snap.openDetails.length) {
+      var details = root.querySelectorAll('details');
+      for (var i = 0; i < details.length && i < snap.openDetails.length; i++) {
+        if (snap.openDetails[i]) details[i].open = true;
+      }
+    }
+    if (snap.activeId) {
+      var el = $(snap.activeId);
+      if (el && root.contains(el)) {
+        try {
+          el.focus({ preventScroll: true });
+        } catch (_) {
+          try { el.focus(); } catch (__) {}
+        }
+        if (snap.selStart !== null && snap.selEnd !== null) {
+          try { el.setSelectionRange(snap.selStart, snap.selEnd); } catch (_) {}
+        }
+      }
+    }
+    window.scrollTo(snap.scrollX, snap.scrollY);
   }
 
   function $(id) {
@@ -229,6 +294,11 @@
     var phs = document.querySelectorAll('[data-i18n-placeholder]');
     phs.forEach(function (el) {
       el.setAttribute('placeholder', t(el.getAttribute('data-i18n-placeholder')));
+    });
+    document.querySelectorAll('[data-i18n-title]').forEach(function (el) {
+      var label = t(el.getAttribute('data-i18n-title'));
+      el.setAttribute('title', label);
+      el.setAttribute('aria-label', label);
     });
     var curLocale = I18n.getLocale();
     document.querySelectorAll('[data-action="select-lang"]').forEach(function (sel) {
@@ -473,6 +543,32 @@
 
   // --- Drawer & Navigation ---
 
+  function isDesktopViewport() {
+    return window.matchMedia && window.matchMedia('(min-width: 960px)').matches;
+  }
+
+  function applySidebarCollapsed(collapsed) {
+    var shell = $('app-shell');
+    if (shell) shell.classList.toggle('sidebar-collapsed', Boolean(collapsed));
+    var btn = $('open-drawer-btn');
+    if (btn) btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    try {
+      localStorage.setItem(SIDEBAR_STORAGE, collapsed ? '1' : '0');
+    } catch (_) {}
+  }
+
+  function toggleSidebar() {
+    if (isDesktopViewport()) {
+      var shell = $('app-shell');
+      var collapsed = shell ? shell.classList.contains('sidebar-collapsed') : false;
+      applySidebarCollapsed(!collapsed);
+    } else if ($('sidebar').classList.contains('open')) {
+      closeDrawer();
+    } else {
+      openDrawer();
+    }
+  }
+
   function openDrawer() {
     $('sidebar').classList.add('open');
     $('drawer-backdrop').classList.add('open');
@@ -535,7 +631,6 @@
   }
 
   function navSectionForRoute(route) {
-    if (['dbs', 'kv', 'blobs', 'queues', 'search'].indexOf(route) !== -1) return 'data';
     if (['logs', 'ops'].indexOf(route) !== -1) return 'ops';
     if (['settings', 'tokens', 'updates'].indexOf(route) !== -1) return 'settings';
     return route;
@@ -557,15 +652,7 @@
 
   function renderSectionTabs(section, actionsHtml) {
     var items = [];
-    if (section === 'data') {
-      items = [
-        { route: 'dbs', href: '#/dbs', label: t('nav.dbs') },
-        { route: 'kv', href: '#/kv', label: t('nav.kv') },
-        { route: 'blobs', href: '#/blobs', label: t('nav.blobs') },
-        { route: 'queues', href: '#/queues', label: t('nav.queues') },
-        { route: 'search', href: '#/search', label: t('nav.search') }
-      ];
-    } else if (section === 'ops') {
+    if (section === 'ops') {
       items = [
         { route: 'logs', href: '#/logs', label: t('nav.logs') },
         { route: 'ops', href: '#/ops', label: t('nav.ops') }
@@ -606,7 +693,10 @@
       $('login-view').classList.add('hidden');
       $('app-shell').classList.remove('hidden');
       var vr = $('view-root');
-      if (vr) vr.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
+      if (vr) {
+        vr.removeAttribute('data-view-key');
+        vr.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
+      }
     }
 
     state.token = clean;
@@ -660,6 +750,8 @@
     state.status = null;
     clearStoredToken();
     applyDocumentTitle();
+    var vr = $('view-root');
+    if (vr) vr.removeAttribute('data-view-key');
     $('app-shell').classList.add('hidden');
     $('login-view').classList.remove('hidden');
     if (!keepError) hideLoginError();
@@ -692,18 +784,56 @@
     return $('resource-group').value.trim() || null;
   }
 
-  function groupedMenu(items, renderItem) {
+  function groupedSelectOptions(items, selectedValue, valueFn, labelFn) {
     var groups = new Map();
     items.forEach(function (item) {
       var name = item.group || '';
       if (!groups.has(name)) groups.set(name, []);
       groups.get(name).push(item);
     });
-    if (groups.size === 1 && groups.has('')) return items.map(renderItem).join('');
+    function renderOpt(item) {
+      var val = String(valueFn(item));
+      var sel = val === String(selectedValue || '') ? ' selected' : '';
+      return '<option value="' + esc(val) + '"' + sel + '>' + esc(labelFn(item)) + '</option>';
+    }
+    if (groups.size === 1 && groups.has('')) {
+      return items.map(renderOpt).join('');
+    }
     return Array.from(groups.keys()).sort().map(function (name) {
-      return '<div class="nav-group-label">' + esc(name || t('groups.ungrouped')) + '</div>' +
-        groups.get(name).map(renderItem).join('');
+      return '<optgroup label="' + esc(name || t('groups.ungrouped')) + '">' +
+        groups.get(name).map(renderOpt).join('') +
+        '</optgroup>';
     }).join('');
+  }
+
+  function renderResourceBar(opts) {
+    var items = opts.items || [];
+    var optionsHtml = groupedSelectOptions(items, opts.selectedValue, opts.valueFn, opts.labelFn);
+    if (opts.extraOption) {
+      optionsHtml = '<option value="' + esc(opts.extraOption.value) + '"' +
+        (String(opts.extraOption.value) === String(opts.selectedValue || '') ? ' selected' : '') + '>' +
+        esc(opts.extraOption.label) + '</option>' + optionsHtml;
+    }
+    var selectHtml = (items.length > 0 || opts.extraOption)
+      ? '<select id="' + esc(opts.selectId) + '" class="resource-select">' + optionsHtml + '</select>' +
+        (items.length > 0 ? '<span class="badge badge-neutral mono">' + esc(items.length) + '</span>' : '')
+      : '';
+    var leftHtml = (selectHtml || opts.extraLeftHtml)
+      ? '<div class="resource-switcher">' + selectHtml + (opts.extraLeftHtml || '') + '</div>'
+      : '';
+    var rightHtml = opts.actionHtml
+      ? '<div class="section-actions">' + opts.actionHtml + '</div>'
+      : '';
+    if (!leftHtml && !rightHtml) return '';
+    return '<div class="resource-bar">' + leftHtml + rightHtml + '</div>';
+  }
+
+  function renderResourceEmpty(emptyText, actionHtml, extraHtml) {
+    return '<div class="panel"><div class="empty-state stack gap-sm" style="align-items:center;">' +
+      '<div class="muted">' + esc(emptyText) + '</div>' +
+      (extraHtml || '') +
+      (actionHtml || '') +
+      '</div></div>';
   }
 
   function renderProjectSelectOptions(selectedId, includeGlobal) {
@@ -820,7 +950,7 @@
     var root = $('view-root');
     var isCurrent = beginViewRender('overview');
     if (fetchData) {
-      root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
+      showViewLoadingIfNeeded(root, 'overview');
       try {
         var results = await Promise.all([
           api('/_api/v1/status'),
@@ -836,7 +966,10 @@
         $('session-actor').textContent = state.status.actor || '-';
         $('session-scope').textContent = state.status.scope || '-';
       } catch (e) {
-        if (isCurrent()) root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+        if (isCurrent()) {
+          root.removeAttribute('data-view-key');
+          root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+        }
         return;
       }
     }
@@ -863,7 +996,6 @@
         '</tr>';
     }).join('');
 
-    var dataTotal = (st.dbs || 0) + (st.kv_namespaces || 0) + (st.buckets || 0) + (st.queues || 0) + (st.search_indexes || 0);
     var hasAppsOrRoutes = state.projects.length > 0 || state.routes.length > 0;
     var appsSectionHtml = hasAppsOrRoutes
       ? '<div class="grid-2">' +
@@ -882,6 +1014,7 @@
         (isAdmin() ? '<button type="button" class="btn btn-primary btn-sm" id="overview-empty-new-app-btn">+ ' + esc(t('runtime.newRuntime')) + '</button>' : '') +
         '</div></div>';
 
+    var snap = captureUiSnapshot(root);
     root.innerHTML =
       '<div class="overview-bar">' +
       '<div class="row gap-xs">' +
@@ -894,7 +1027,11 @@
       '<div class="stats-grid stats-grid-4">' +
       statCard(t('overview.projects'), st.projects, '#/apps') +
       statCard(t('overview.routes'), st.routes, '#/apps') +
-      statCard(t('nav.data'), dataTotal, '#/dbs') +
+      statCard(t('overview.dbs'), st.dbs, '#/dbs') +
+      statCard(t('overview.kvNamespaces'), st.kv_namespaces, '#/kv') +
+      statCard(t('overview.buckets'), st.buckets, '#/blobs') +
+      statCard(t('overview.queues'), st.queues, '#/queues') +
+      statCard(t('overview.searchIndexes'), st.search_indexes || 0, '#/search') +
       statCard(t('overview.aiProviders'), st.ai_providers || 0, '#/ai') +
       '</div>' +
 
@@ -934,6 +1071,8 @@
         perfEl.token = state.token || readStoredToken();
       }).catch(function () {});
     }
+    markViewRendered(root, 'overview');
+    restoreUiSnapshot(root, snap);
   }
 
   function statCard(label, value, hash) {
@@ -1061,11 +1200,12 @@
 
   async function renderProjectDetail(id, fetchData) {
     var root = $('view-root');
+    var viewKey = 'project:' + id;
     var isCurrentDetail = beginViewRender('apps', function () {
       return state.projectId === id;
     });
     if (fetchData) {
-      root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
+      showViewLoadingIfNeeded(root, viewKey);
       try {
         var reqs = [
           api('/_api/v1/apps/' + enc(id)),
@@ -1092,7 +1232,10 @@
         if (Array.isArray(res[4]) && res[4].length) state.projects = res[4];
         state.detailSecrets = secrets;
       } catch (e) {
-        if (isCurrentDetail()) root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+        if (isCurrentDetail()) {
+          root.removeAttribute('data-view-key');
+          root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+        }
         return;
       }
     }
@@ -1223,6 +1366,7 @@
         '</div>';
     }
 
+    var snap = captureUiSnapshot(root);
     root.innerHTML = headerHtml + summaryHtml + tabsHtml + bodyHtml;
 
     root.querySelectorAll('[data-pd-tab]').forEach(function (btn) {
@@ -1420,6 +1564,8 @@
         });
       });
     });
+    markViewRendered(root, viewKey);
+    restoreUiSnapshot(root, snap);
   }
 
   function renderDeploymentEnv(runtime, deployments, writable) {
@@ -1846,11 +1992,96 @@
 
   // --- 4. KV Store ---
 
+  function buildKvMetaHtml(nsMeta) {
+    if (!nsMeta) return '';
+    return 'TTL: ' + esc(nsMeta.default_ttl_secs || 604800) + 's' +
+      (nsMeta.max_keys ? ' · Max Keys: ' + esc(nsMeta.max_keys) : '') +
+      (nsMeta.max_value_bytes ? ' · Max Value: ' + esc(formatBytes(nsMeta.max_value_bytes)) : '') +
+      (nsMeta.description ? ' · ' + esc(nsMeta.description) : '');
+  }
+
+  function buildKvTableHtml(canWriteNs) {
+    var keyRows = state.kvKeys.map(function (k) {
+      return '<tr>' +
+        '<td data-label="' + esc(t('kv.key')) + '" class="mono text-strong break-all">' + esc(k.key) + '</td>' +
+        '<td data-label="' + esc(t('kv.size')) + '">' + esc(formatBytes(k.size)) + '</td>' +
+        '<td data-label="' + esc(t('common.expiresAt')) + '" class="text-xs muted">' + esc(k.expires_at ? formatTime(k.expires_at) : t('common.never')) + '</td>' +
+        '<td data-label="' + esc(t('common.updatedAt')) + '" class="text-xs muted">' + esc(formatTime(k.updated_at)) + '</td>' +
+        '<td class="cell-actions-td"><div class="cell-actions">' +
+        '<button type="button" class="btn btn-sm" data-view-kv="' + esc(k.key) + '">' + esc(t('common.view')) + '</button>' +
+        (canWriteNs ? '<button type="button" class="btn btn-sm" data-incr-kv="' + esc(k.key) + '">' + esc(t('kv.incr')) + '</button>' : '') +
+        (canWriteNs ? '<button type="button" class="btn btn-danger btn-sm" data-del-kv="' + esc(k.key) + '">' + esc(t('common.delete')) + '</button>' : '') +
+        '</div></td></tr>';
+    }).join('');
+    return keyRows
+      ? '<div class="table-wrap"><table class="data-table stack-mobile"><thead><tr><th>' + esc(t('kv.key')) + '</th><th>' + esc(t('kv.size')) + '</th><th>' + esc(t('common.expiresAt')) + '</th><th>' + esc(t('common.updatedAt')) + '</th><th class="th-actions">' + esc(t('common.actions')) + '</th></tr></thead><tbody>' + keyRows + '</tbody></table></div>'
+      : '<div class="empty-state">' + esc(t('kv.noKeys')) + '</div>';
+  }
+
+  function bindKvTableEvents(scopeEl, canWriteNs) {
+    if (!scopeEl) return;
+    scopeEl.querySelectorAll('[data-view-kv]').forEach(function (btn) {
+      btn.addEventListener('click', async function () {
+        var key = btn.getAttribute('data-view-kv');
+        try {
+          var item = await api('/_api/v1/kv/' + enc(state.selectedKvNs) + '/' + enc(key));
+          openKvValueModal(key, item, canWriteNs);
+        } catch (e) { toast(e.message, 'error'); }
+      });
+    });
+    scopeEl.querySelectorAll('[data-incr-kv]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        openKvIncrModal(btn.getAttribute('data-incr-kv'));
+      });
+    });
+    scopeEl.querySelectorAll('[data-del-kv]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var key = btn.getAttribute('data-del-kv');
+        confirmAction(t('kv.deleteConfirm', { key: key }), async function () {
+          try {
+            await api('/_api/v1/kv/' + enc(state.selectedKvNs) + '/' + enc(key), { method: 'DELETE' });
+            toast(t('kv.deleted'), 'success');
+            await loadKvKeys();
+            renderKvTablePartial();
+          } catch (e) { toast(e.message, 'error'); }
+        });
+      });
+    });
+  }
+
+  function renderKvTablePartial() {
+    var slot = $('kv-table-slot');
+    if (!slot) return renderKv(false);
+    var nsMeta = state.kvNamespaces.find(function (n) { return n.name === state.selectedKvNs; });
+    var canWriteNs = !isReadonly() && (isAdmin() || (nsMeta && canWriteResource(nsMeta.project_id)));
+    slot.innerHTML = buildKvTableHtml(canWriteNs);
+    bindKvTableEvents(slot, canWriteNs);
+  }
+
+  function updateKvNamespaceInPlace(updatedNs) {
+    if (!updatedNs) return;
+    var idx = state.kvNamespaces.findIndex(function (n) { return n.name === updatedNs.name; });
+    if (idx >= 0) state.kvNamespaces[idx] = updatedNs;
+    if (state.selectedKvNs === updatedNs.name) {
+      var metaSlot = $('kv-meta-slot');
+      if (metaSlot) metaSlot.innerHTML = buildKvMetaHtml(updatedNs);
+    }
+    var sel = $('kv-switcher');
+    if (sel) {
+      for (var i = 0; i < sel.options.length; i++) {
+        if (sel.options[i].value === updatedNs.name) {
+          sel.options[i].textContent = updatedNs.name + (updatedNs.project_id ? ' · ' + projectNameById(updatedNs.project_id) : '');
+          break;
+        }
+      }
+    }
+  }
+
   async function renderKv(fetchData) {
     var root = $('view-root');
     var isCurrent = beginViewRender('kv');
     if (fetchData) {
-      root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
+      showViewLoadingIfNeeded(root, 'kv');
       try {
         var res = await Promise.all([api('/_api/v1/kv'), api('/_api/v1/apps')]);
         if (!isCurrent()) return;
@@ -1864,7 +2095,10 @@
           if (!isCurrent()) return;
         }
       } catch (e) {
-        if (isCurrent()) root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+        if (isCurrent()) {
+          root.removeAttribute('data-view-key');
+          root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+        }
         return;
       }
     }
@@ -1872,38 +2106,17 @@
 
     var nsMeta = state.kvNamespaces.find(function (n) { return n.name === state.selectedKvNs; });
     var canWriteNs = !isReadonly() && (isAdmin() || (nsMeta && canWriteResource(nsMeta.project_id)));
-
-    var nsMenu = state.kvNamespaces.length
-      ? groupedMenu(state.kvNamespaces, function (n) {
-          return '<button type="button" class="list-menu-item' + (n.name === state.selectedKvNs ? ' active' : '') + '" data-select-ns="' + esc(n.name) + '">' +
-            '<span class="truncate">' + esc(n.name) + '</span>' +
-            (n.project_id ? '<span class="badge badge-neutral text-xs">' + esc(projectNameById(n.project_id)) + '</span>' : '') +
-            '</button>';
-        })
-      : '<div class="empty-state" style="padding:20px 10px;">' + esc(t('kv.noNamespaces')) + '</div>';
-
-    var keyRows = state.kvKeys.map(function (k) {
-      return '<tr>' +
-        '<td data-label="' + esc(t('kv.key')) + '" class="mono text-strong break-all">' + esc(k.key) + '</td>' +
-        '<td data-label="' + esc(t('kv.size')) + '">' + esc(formatBytes(k.size)) + '</td>' +
-        '<td data-label="' + esc(t('common.expiresAt')) + '" class="text-xs muted">' + esc(k.expires_at ? formatTime(k.expires_at) : t('common.never')) + '</td>' +
-        '<td data-label="' + esc(t('common.updatedAt')) + '" class="text-xs muted">' + esc(formatTime(k.updated_at)) + '</td>' +
-        '<td class="cell-actions-td"><div class="cell-actions">' +
-        '<button type="button" class="btn btn-sm" data-view-kv="' + esc(k.key) + '">' + esc(t('common.view')) + '</button>' +
-        (canWriteNs ? '<button type="button" class="btn btn-sm" data-incr-kv="' + esc(k.key) + '">' + esc(t('kv.incr')) + '</button>' : '') +
-        (canWriteNs ? '<button type="button" class="btn btn-danger btn-sm" data-del-kv="' + esc(k.key) + '">' + esc(t('common.delete')) + '</button>' : '') +
-        '</div></td></tr>';
-    }).join('');
+    var createKvBtnHtml = isAdmin() ? '<button type="button" class="btn btn-primary btn-sm" id="new-kv-ns-btn">+ ' + esc(t('kv.newNamespace')) + '</button>' : '';
+    var manualFormHtml = '<form id="kv-manual-form" class="resource-inline-form">' +
+      '<input type="text" id="kv-manual-ns" placeholder="' + esc(t('kv.manualNamespace')) + '">' +
+      '<button type="submit" class="btn btn-sm">' + esc(t('kv.openNamespace')) + '</button></form>';
 
     var rightHtml = !state.selectedKvNs
       ? '<div class="panel"><div class="empty-state">' + esc(t('kv.selectNamespace')) + '</div></div>'
       : '<div class="panel">' +
         '<div class="panel-header"><div class="toolbar">' +
         '<div><h3 class="panel-title mono">' + esc(state.selectedKvNs) + '</h3>' +
-        (nsMeta ? '<div class="muted text-xs">TTL: ' + esc(nsMeta.default_ttl_secs || 604800) + 's' +
-          (nsMeta.max_keys ? ' · Max Keys: ' + esc(nsMeta.max_keys) : '') +
-          (nsMeta.max_value_bytes ? ' · Max Value: ' + esc(formatBytes(nsMeta.max_value_bytes)) : '') +
-          (nsMeta.description ? ' · ' + esc(nsMeta.description) : '') + '</div>' : '') +
+        '<div id="kv-meta-slot" class="muted text-xs">' + buildKvMetaHtml(nsMeta) + '</div>' +
         '</div>' +
         '<div class="row">' +
         '<input type="search" id="kv-prefix-input" style="width:190px;" value="' + esc(state.kvPrefix) + '" placeholder="' + esc(t('kv.prefixPlaceholder')) + '">' +
@@ -1912,50 +2125,58 @@
         (canWriteNs && nsMeta ? '<button type="button" class="btn btn-sm" id="kv-edit-ns-btn">' + esc(t('common.editConfig')) + '</button>' : '') +
         (canWriteNs && nsMeta ? '<button type="button" class="btn btn-danger btn-sm" id="kv-del-ns-btn">' + esc(t('kv.deleteNamespace')) + '</button>' : '') +
         '</div></div></div>' +
-        (keyRows
-          ? '<div class="table-wrap"><table class="data-table stack-mobile"><thead><tr><th>' + esc(t('kv.key')) + '</th><th>' + esc(t('kv.size')) + '</th><th>' + esc(t('common.expiresAt')) + '</th><th>' + esc(t('common.updatedAt')) + '</th><th class="th-actions">' + esc(t('common.actions')) + '</th></tr></thead><tbody>' + keyRows + '</tbody></table></div>'
-          : '<div class="empty-state">' + esc(t('kv.noKeys')) + '</div>') +
+        '<div id="kv-table-slot">' + buildKvTableHtml(canWriteNs) + '</div>' +
         '</div>';
 
-    root.innerHTML =
-      renderSectionTabs(
-        'data',
-        isAdmin() ? '<button type="button" class="btn btn-primary btn-sm" id="new-kv-ns-btn">+ ' + esc(t('kv.newNamespace')) + '</button>' : ''
-      ) +
-      '<div class="split-layout">' +
-      '<div class="panel"><div class="panel-header"><h3 class="panel-title">' + esc(t('kv.namespaces')) + '</h3></div>' +
-      '<div class="panel-body" style="padding:10px 10px 4px;"><form id="kv-manual-form" class="input-group">' +
-      '<input type="text" id="kv-manual-ns" placeholder="' + esc(t('kv.manualNamespace')) + '">' +
-      '<button type="submit" class="btn btn-sm">' + esc(t('kv.openNamespace')) + '</button></form></div>' +
-      '<div class="list-menu">' + nsMenu + '</div></div>' +
-      rightHtml + '</div>';
+    var snap = captureUiSnapshot(root);
+    if (state.kvNamespaces.length === 0 && !state.selectedKvNs) {
+      root.innerHTML = renderResourceEmpty(t('kv.noNamespaces'), createKvBtnHtml, manualFormHtml);
+    } else {
+      var extraOpt = (state.selectedKvNs && !nsMeta)
+        ? { value: state.selectedKvNs, label: state.selectedKvNs }
+        : null;
+      root.innerHTML =
+        renderResourceBar({
+          selectId: 'kv-switcher',
+          items: state.kvNamespaces,
+          selectedValue: state.selectedKvNs,
+          valueFn: function (n) { return n.name; },
+          labelFn: function (n) { return n.name + (n.project_id ? ' · ' + projectNameById(n.project_id) : ''); },
+          extraOption: extraOpt,
+          extraLeftHtml: manualFormHtml,
+          actionHtml: createKvBtnHtml
+        }) +
+        rightHtml;
+    }
 
     if ($('new-kv-ns-btn')) $('new-kv-ns-btn').addEventListener('click', openCreateKvNamespaceModal);
-    $('kv-manual-form').addEventListener('submit', async function (ev) {
-      ev.preventDefault();
-      var ns = $('kv-manual-ns').value.trim();
-      if (!ns) return;
-      state.selectedKvNs = ns;
-      try {
-        await loadKvKeys();
-        renderKv(false);
-      } catch (e) { toast(e.message, 'error'); }
-    });
-    root.querySelectorAll('[data-select-ns]').forEach(function (btn) {
-      btn.addEventListener('click', async function () {
-        state.selectedKvNs = btn.getAttribute('data-select-ns');
+    if ($('kv-manual-form')) {
+      $('kv-manual-form').addEventListener('submit', async function (ev) {
+        ev.preventDefault();
+        var ns = $('kv-manual-ns').value.trim();
+        if (!ns) return;
+        state.selectedKvNs = ns;
         try {
           await loadKvKeys();
           renderKv(false);
         } catch (e) { toast(e.message, 'error'); }
       });
-    });
+    }
+    if ($('kv-switcher')) {
+      $('kv-switcher').addEventListener('change', async function (ev) {
+        state.selectedKvNs = ev.target.value;
+        try {
+          await loadKvKeys();
+          renderKv(false);
+        } catch (e) { toast(e.message, 'error'); }
+      });
+    }
     if ($('kv-filter-btn')) {
       var runKvFilter = async function () {
         state.kvPrefix = $('kv-prefix-input').value.trim();
         try {
           await loadKvKeys();
-          renderKv(false);
+          renderKvTablePartial();
         } catch (e) { toast(e.message, 'error'); }
       };
       $('kv-filter-btn').addEventListener('click', runKvFilter);
@@ -1976,7 +2197,8 @@
     }
     if ($('kv-edit-ns-btn') && nsMeta) {
       $('kv-edit-ns-btn').addEventListener('click', function () {
-        openEditKvNamespaceModal(nsMeta);
+        var latest = state.kvNamespaces.find(function (n) { return n.name === state.selectedKvNs; }) || nsMeta;
+        openEditKvNamespaceModal(latest);
       });
     }
     if ($('kv-del-ns-btn') && nsMeta) {
@@ -1993,33 +2215,9 @@
         });
       });
     }
-    root.querySelectorAll('[data-view-kv]').forEach(function (btn) {
-      btn.addEventListener('click', async function () {
-        var key = btn.getAttribute('data-view-kv');
-        try {
-          var item = await api('/_api/v1/kv/' + enc(state.selectedKvNs) + '/' + enc(key));
-          openKvValueModal(key, item, canWriteNs);
-        } catch (e) { toast(e.message, 'error'); }
-      });
-    });
-    root.querySelectorAll('[data-incr-kv]').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        openKvIncrModal(btn.getAttribute('data-incr-kv'));
-      });
-    });
-    root.querySelectorAll('[data-del-kv]').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        var key = btn.getAttribute('data-del-kv');
-        confirmAction(t('kv.deleteConfirm', { key: key }), async function () {
-          try {
-            await api('/_api/v1/kv/' + enc(state.selectedKvNs) + '/' + enc(key), { method: 'DELETE' });
-            toast(t('kv.deleted'), 'success');
-            await loadKvKeys();
-            renderKv(false);
-          } catch (e) { toast(e.message, 'error'); }
-        });
-      });
-    });
+    bindKvTableEvents($('kv-table-slot'), canWriteNs);
+    markViewRendered(root, 'kv');
+    restoreUiSnapshot(root, snap);
   }
 
   async function loadKvKeys() {
@@ -2132,7 +2330,7 @@
           var maxValRaw = $('ekns-max-val').value.trim();
           var maxKeysRaw = $('ekns-max-keys').value.trim();
           try {
-            await api('/_api/v1/kv/' + enc(nsMeta.name), {
+            var updated = await api('/_api/v1/kv/' + enc(nsMeta.name), {
               method: 'PATCH',
               json: {
                 group: $('resource-group').value.trim(),
@@ -2145,7 +2343,7 @@
             });
             closeModal();
             toast(t('kv.namespaceUpdated'), 'success');
-            renderKv(true);
+            updateKvNamespaceInPlace(updated);
           } catch (e) { toast(e.message, 'error'); }
         });
       }
@@ -2215,7 +2413,7 @@
             closeModal();
             toast(t('kv.saved'), 'success');
             await loadKvKeys();
-            renderKv(false);
+            renderKvTablePartial();
           } catch (e) { toast(e.message, 'error'); }
         });
       }
@@ -2250,7 +2448,7 @@
             closeModal();
             toast(t('kv.incrDone', { val: res.value }), 'success');
             await loadKvKeys();
-            renderKv(false);
+            renderKvTablePartial();
           } catch (e) { toast(e.message, 'error'); }
         });
       }
@@ -2259,12 +2457,115 @@
 
   // --- 5. Queues ---
 
+  function buildQueueStatsHtml(st) {
+    return '<div class="stats-grid">' +
+      '<div class="stat-card"><span class="stat-label">' + esc(t('queues.statsPending')) + '</span><span class="stat-value">' + esc(st.pending) + '</span></div>' +
+      '<div class="stat-card"><span class="stat-label">' + esc(t('queues.statsRunning')) + '</span><span class="stat-value">' + esc(st.running) + '</span></div>' +
+      '<div class="stat-card"><span class="stat-label">' + esc(t('queues.statsDead')) + '</span><span class="stat-value" style="color:' + (st.dead > 0 ? 'var(--danger)' : 'inherit') + ';">' + esc(st.dead) + '</span></div>' +
+      '</div>';
+  }
+
+  function buildQueueBadgesHtml(qCfg) {
+    return (qCfg.ephemeral ? '<span class="badge badge-info">' + esc(t('queues.ephemeralBadge')) + '</span>' : '') +
+      (qCfg.max_pending_jobs ? '<span class="badge badge-neutral text-xs">max:' + esc(qCfg.max_pending_jobs) + '</span>' : '');
+  }
+
+  function buildQueueReplayAllHtml(qCfg, canWriteQ, st) {
+    return (canWriteQ && st.dead > 0)
+      ? '<button type="button" class="btn btn-sm" id="q-replay-all-btn">' + esc(t('queues.replayAll')) + '</button>'
+      : '';
+  }
+
+  function buildQueueJobsHtml(canWriteQ) {
+    var jobs = state.queueJobs || [];
+    var jobRows = jobs.map(function (j) {
+      var decoded = decodePayloadBytes(j.payload);
+      return '<tr>' +
+        '<td data-label="' + esc(t('queues.jobId')) + '" class="mono">#' + esc(j.id) + '</td>' +
+        '<td data-label="' + esc(t('queues.payload')) + '"><pre class="code-block" style="max-height:90px;">' + esc(decoded) + '</pre></td>' +
+        '<td data-label="' + esc(t('queues.attempts')) + '">' + esc(j.attempts + ' / ' + j.max_attempts) + '</td>' +
+        '<td data-label="' + esc(t('queues.lastError')) + '" class="text-xs muted break-all">' + esc(j.last_error || '-') + '</td>' +
+        '<td data-label="' + esc(t('queues.runAt')) + '" class="text-xs muted">' + esc(formatTime(j.run_at)) + '</td>' +
+        '<td class="cell-actions-td"><div class="cell-actions">' +
+        (canWriteQ && state.queueInspectStatus === 'dead'
+          ? '<button type="button" class="btn btn-sm" data-replay-job="' + esc(j.id) + '">' + esc(t('queues.replaySelected')) + '</button>'
+          : '') +
+        '</div></td></tr>';
+    }).join('');
+    return jobRows
+      ? '<div class="table-wrap"><table class="data-table stack-mobile"><thead><tr><th>' + esc(t('queues.jobId')) + '</th><th>' + esc(t('queues.payload')) + '</th><th>' + esc(t('queues.attempts')) + '</th><th>' + esc(t('queues.lastError')) + '</th><th>' + esc(t('queues.runAt')) + '</th><th class="th-actions">' + esc(t('common.actions')) + '</th></tr></thead><tbody>' + jobRows + '</tbody></table></div>'
+      : '<div class="empty-state">' + esc(t('queues.noJobs')) + '</div>';
+  }
+
+  function bindQueueReplayEvents(qCfg, canWriteQ) {
+    if ($('q-replay-all-btn')) {
+      $('q-replay-all-btn').addEventListener('click', async function () {
+        try {
+          var res = await api('/_api/v1/queues/' + enc(qCfg.name) + '/dlq/replay', { method: 'POST', json: {} });
+          toast(t('queues.replayed', { count: res.replayed }), 'success');
+          await loadSelectedQueue();
+          renderQueueDetailPartial();
+        } catch (e) { toast(e.message, 'error'); }
+      });
+    }
+    var jobsSlot = $('queue-jobs-slot');
+    if (jobsSlot) {
+      jobsSlot.querySelectorAll('[data-replay-job]').forEach(function (btn) {
+        btn.addEventListener('click', async function () {
+          var jobId = Number(btn.getAttribute('data-replay-job'));
+          try {
+            var res = await api('/_api/v1/queues/' + enc(qCfg.name) + '/dlq/replay', {
+              method: 'POST',
+              json: { job_ids: [jobId] }
+            });
+            toast(t('queues.replayed', { count: res.replayed }), 'success');
+            await loadSelectedQueue();
+            renderQueueDetailPartial();
+          } catch (e) { toast(e.message, 'error'); }
+        });
+      });
+    }
+  }
+
+  function renderQueueDetailPartial() {
+    var statsSlot = $('queue-stats-slot');
+    var jobsSlot = $('queue-jobs-slot');
+    var qCfg = state.queues.find(function (q) { return q.name === state.selectedQueue; });
+    if (!statsSlot || !jobsSlot || !qCfg) return renderQueues(false);
+    var canWriteQ = canWriteResource(qCfg.project_id);
+    var st = state.queueStats || { pending: 0, running: 0, dead: 0 };
+    statsSlot.innerHTML = buildQueueStatsHtml(st);
+    var replaySlot = $('queue-replay-all-slot');
+    if (replaySlot) replaySlot.innerHTML = buildQueueReplayAllHtml(qCfg, canWriteQ, st);
+    jobsSlot.innerHTML = buildQueueJobsHtml(canWriteQ);
+    bindQueueReplayEvents(qCfg, canWriteQ);
+  }
+
+  function updateQueueInPlace(updatedQ) {
+    if (!updatedQ) return;
+    var idx = state.queues.findIndex(function (q) { return q.name === updatedQ.name; });
+    if (idx >= 0) state.queues[idx] = updatedQ;
+    if (state.selectedQueue === updatedQ.name) {
+      var badgesEl = $('queue-header-badges');
+      if (badgesEl) badgesEl.innerHTML = buildQueueBadgesHtml(updatedQ);
+    }
+    var sel = $('queue-switcher');
+    if (sel) {
+      for (var i = 0; i < sel.options.length; i++) {
+        if (sel.options[i].value === updatedQ.name) {
+          sel.options[i].textContent = updatedQ.name + (updatedQ.project_id ? ' · ' + projectNameById(updatedQ.project_id) : '');
+          break;
+        }
+      }
+    }
+  }
+
   async function renderQueues(fetchData) {
     var root = $('view-root');
     var isCurrent = beginViewRender('queues');
     if (state.currentRoute !== 'queues') return;
     if (fetchData) {
-      root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
+      showViewLoadingIfNeeded(root, 'queues');
       try {
         var res = await Promise.all([api('/_api/v1/queues'), api('/_api/v1/apps')]);
         if (!isCurrent()) return;
@@ -2278,7 +2579,10 @@
           if (!isCurrent()) return;
         }
       } catch (e) {
-        if (isCurrent()) root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+        if (isCurrent()) {
+          root.removeAttribute('data-view-key');
+          root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+        }
         return;
       }
     }
@@ -2286,50 +2590,21 @@
 
     var qCfg = state.queues.find(function (q) { return q.name === state.selectedQueue; });
     var canWriteQ = qCfg && canWriteResource(qCfg.project_id);
-
-    var qMenu = state.queues.length
-      ? groupedMenu(state.queues, function (q) {
-          return '<button type="button" class="list-menu-item' + (q.name === state.selectedQueue ? ' active' : '') + '" data-select-queue="' + esc(q.name) + '">' +
-            '<span class="truncate">' + esc(q.name) + '</span>' +
-            '<span class="row gap-xs" style="flex-wrap:nowrap;">' +
-            (q.ephemeral ? '<span class="badge badge-info text-xs">' + esc(t('queues.ephemeralBadge')) + '</span>' : '') +
-            '<span class="badge badge-neutral text-xs">c:' + esc(q.max_concurrency) + '</span></span></button>';
-        })
-      : '<div class="empty-state" style="padding:20px 10px;">' + esc(t('queues.empty')) + '</div>';
+    var createQBtnHtml = isAdmin() ? '<button type="button" class="btn btn-primary btn-sm" id="new-queue-btn">+ ' + esc(t('queues.new')) + '</button>' : '';
 
     var detailHtml = '';
     if (!qCfg) {
       detailHtml = '<div class="panel"><div class="empty-state">' + esc(t('queues.selectQueue')) + '</div></div>';
     } else {
       var st = state.queueStats || { pending: 0, running: 0, dead: 0 };
-      var jobs = state.queueJobs || [];
-      var jobRows = jobs.map(function (j) {
-        var decoded = decodePayloadBytes(j.payload);
-        return '<tr>' +
-          '<td data-label="' + esc(t('queues.jobId')) + '" class="mono">#' + esc(j.id) + '</td>' +
-          '<td data-label="' + esc(t('queues.payload')) + '"><pre class="code-block" style="max-height:90px;">' + esc(decoded) + '</pre></td>' +
-          '<td data-label="' + esc(t('queues.attempts')) + '">' + esc(j.attempts + ' / ' + j.max_attempts) + '</td>' +
-          '<td data-label="' + esc(t('queues.lastError')) + '" class="text-xs muted break-all">' + esc(j.last_error || '-') + '</td>' +
-          '<td data-label="' + esc(t('queues.runAt')) + '" class="text-xs muted">' + esc(formatTime(j.run_at)) + '</td>' +
-          '<td class="cell-actions-td"><div class="cell-actions">' +
-          (canWriteQ && state.queueInspectStatus === 'dead'
-            ? '<button type="button" class="btn btn-sm" data-replay-job="' + esc(j.id) + '">' + esc(t('queues.replaySelected')) + '</button>'
-            : '') +
-          '</div></td></tr>';
-      }).join('');
 
       detailHtml =
         '<div class="stack gap-md">' +
-        '<div class="stats-grid">' +
-        '<div class="stat-card"><span class="stat-label">' + esc(t('queues.statsPending')) + '</span><span class="stat-value">' + esc(st.pending) + '</span></div>' +
-        '<div class="stat-card"><span class="stat-label">' + esc(t('queues.statsRunning')) + '</span><span class="stat-value">' + esc(st.running) + '</span></div>' +
-        '<div class="stat-card"><span class="stat-label">' + esc(t('queues.statsDead')) + '</span><span class="stat-value" style="color:' + (st.dead > 0 ? 'var(--danger)' : 'inherit') + ';">' + esc(st.dead) + '</span></div>' +
-        '</div>' +
+        '<div id="queue-stats-slot">' + buildQueueStatsHtml(st) + '</div>' +
         '<div class="panel"><div class="panel-header"><div class="toolbar">' +
         '<div class="row">' +
         '<h3 class="panel-title mono">' + esc(qCfg.name) + '</h3>' +
-        (qCfg.ephemeral ? '<span class="badge badge-info">' + esc(t('queues.ephemeralBadge')) + '</span>' : '') +
-        (qCfg.max_pending_jobs ? '<span class="badge badge-neutral text-xs">max:' + esc(qCfg.max_pending_jobs) + '</span>' : '') +
+        '<span id="queue-header-badges" class="row gap-xs">' + buildQueueBadgesHtml(qCfg) + '</span>' +
         '<select id="queue-inspect-status" style="width:auto;min-width:150px;">' +
         '<option value="dead"' + (state.queueInspectStatus === 'dead' ? ' selected' : '') + '>' + esc(t('queues.statusDead')) + '</option>' +
         '<option value="pending"' + (state.queueInspectStatus === 'pending' ? ' selected' : '') + '>' + esc(t('queues.statusPending')) + '</option>' +
@@ -2340,56 +2615,56 @@
           ? '<div class="row">' +
             '<button type="button" class="btn btn-primary btn-sm" id="q-enqueue-btn">' + esc(t('queues.enqueue')) + '</button>' +
             '<button type="button" class="btn btn-sm" id="q-edit-btn">' + esc(t('queues.editConfig')) + '</button>' +
-            (st.dead > 0 ? '<button type="button" class="btn btn-sm" id="q-replay-all-btn">' + esc(t('queues.replayAll')) + '</button>' : '') +
+            '<span id="queue-replay-all-slot">' + buildQueueReplayAllHtml(qCfg, canWriteQ, st) + '</span>' +
             '<button type="button" class="btn btn-danger btn-sm" id="q-purge-btn">' + esc(t('queues.purge')) + '</button>' +
             '<button type="button" class="btn btn-danger btn-sm" id="q-delete-btn">' + esc(t('queues.deleteQueue')) + '</button>' +
             '</div>'
           : '') +
         '</div></div>' +
-        (jobRows
-          ? '<div class="table-wrap"><table class="data-table stack-mobile"><thead><tr><th>' + esc(t('queues.jobId')) + '</th><th>' + esc(t('queues.payload')) + '</th><th>' + esc(t('queues.attempts')) + '</th><th>' + esc(t('queues.lastError')) + '</th><th>' + esc(t('queues.runAt')) + '</th><th class="th-actions">' + esc(t('common.actions')) + '</th></tr></thead><tbody>' + jobRows + '</tbody></table></div>'
-          : '<div class="empty-state">' + esc(t('queues.noJobs')) + '</div>') +
+        '<div id="queue-jobs-slot">' + buildQueueJobsHtml(canWriteQ) + '</div>' +
         '</div></div>';
     }
 
-    root.innerHTML =
-      renderSectionTabs(
-        'data',
-        isAdmin() ? '<button type="button" class="btn btn-primary btn-sm" id="new-queue-btn">+ ' + esc(t('queues.new')) + '</button>' : ''
-      ) +
-      '<div class="split-layout">' +
-      '<div class="panel"><div class="panel-header"><h3 class="panel-title">' + esc(t('nav.queues')) + '</h3></div><div class="list-menu">' + qMenu + '</div></div>' +
-      detailHtml + '</div>';
+    var snap = captureUiSnapshot(root);
+    if (state.queues.length === 0) {
+      root.innerHTML = renderResourceEmpty(t('queues.empty'), createQBtnHtml);
+    } else {
+      root.innerHTML =
+        renderResourceBar({
+          selectId: 'queue-switcher',
+          items: state.queues,
+          selectedValue: state.selectedQueue,
+          valueFn: function (q) { return q.name; },
+          labelFn: function (q) { return q.name + (q.project_id ? ' · ' + projectNameById(q.project_id) : ''); },
+          actionHtml: createQBtnHtml
+        }) +
+        detailHtml;
+    }
 
     if ($('new-queue-btn')) $('new-queue-btn').addEventListener('click', openCreateQueueModal);
-    root.querySelectorAll('[data-select-queue]').forEach(function (btn) {
-      btn.addEventListener('click', async function () {
-        state.selectedQueue = btn.getAttribute('data-select-queue');
+    if ($('queue-switcher')) {
+      $('queue-switcher').addEventListener('change', async function (ev) {
+        state.selectedQueue = ev.target.value;
         try {
           await loadSelectedQueue();
           renderQueues(false);
         } catch (e) { toast(e.message, 'error'); }
       });
-    });
+    }
     if ($('queue-inspect-status')) {
       $('queue-inspect-status').addEventListener('change', async function (e) {
         state.queueInspectStatus = e.target.value;
         try {
           await loadSelectedQueue();
-          renderQueues(false);
+          renderQueueDetailPartial();
         } catch (err) { toast(err.message, 'error'); }
       });
     }
     if ($('q-enqueue-btn')) $('q-enqueue-btn').addEventListener('click', function () { openEnqueueModal(qCfg.name); });
-    if ($('q-edit-btn')) $('q-edit-btn').addEventListener('click', function () { openEditQueueModal(qCfg); });
-    if ($('q-replay-all-btn')) {
-      $('q-replay-all-btn').addEventListener('click', async function () {
-        try {
-          var res = await api('/_api/v1/queues/' + enc(qCfg.name) + '/dlq/replay', { method: 'POST', json: {} });
-          toast(t('queues.replayed', { count: res.replayed }), 'success');
-          await loadSelectedQueue();
-          renderQueues(false);
-        } catch (e) { toast(e.message, 'error'); }
+    if ($('q-edit-btn')) {
+      $('q-edit-btn').addEventListener('click', function () {
+        var latest = state.queues.find(function (q) { return q.name === state.selectedQueue; }) || qCfg;
+        openEditQueueModal(latest);
       });
     }
     if ($('q-purge-btn')) {
@@ -2399,7 +2674,7 @@
             var res = await api('/_api/v1/queues/' + enc(qCfg.name) + '/purge', { method: 'POST' });
             toast(t('queues.purged', { count: res.purged }), 'success');
             await loadSelectedQueue();
-            renderQueues(false);
+            renderQueueDetailPartial();
           } catch (e) { toast(e.message, 'error'); }
         });
       });
@@ -2419,20 +2694,9 @@
         });
       });
     }
-    root.querySelectorAll('[data-replay-job]').forEach(function (btn) {
-      btn.addEventListener('click', async function () {
-        var jobId = Number(btn.getAttribute('data-replay-job'));
-        try {
-          var res = await api('/_api/v1/queues/' + enc(qCfg.name) + '/dlq/replay', {
-            method: 'POST',
-            json: { job_ids: [jobId] }
-          });
-          toast(t('queues.replayed', { count: res.replayed }), 'success');
-          await loadSelectedQueue();
-          renderQueues(false);
-        } catch (e) { toast(e.message, 'error'); }
-      });
-    });
+    if (qCfg) bindQueueReplayEvents(qCfg, canWriteQ);
+    markViewRendered(root, 'queues');
+    restoreUiSnapshot(root, snap);
   }
 
   function openEditQueueModal(qCfg) {
@@ -2503,10 +2767,10 @@
             body.max_pending_jobs = Number(maxPendRaw);
           }
           try {
-            await api('/_api/v1/queues/' + enc(qCfg.name), { method: 'PATCH', json: body });
+            var updated = await api('/_api/v1/queues/' + enc(qCfg.name), { method: 'PATCH', json: body });
             closeModal();
             toast(t('queues.updated'), 'success');
-            renderQueues(true);
+            updateQueueInPlace(updated);
           } catch (e) { toast(e.message, 'error'); }
         });
       }
@@ -2635,7 +2899,7 @@
             closeModal();
             toast(t('queues.enqueued', { id: res.job_id }), 'success');
             await loadSelectedQueue();
-            renderQueues(false);
+            renderQueueDetailPartial();
           } catch (e) { toast(e.message, 'error'); }
         });
       }
@@ -2644,11 +2908,272 @@
 
   // --- 6. Blobs / Object Storage ---
 
+  function resetBlobBrowserState() {
+    state.blobDir = '';
+    state.blobSearch = '';
+    state.blobFolders = [];
+    state.blobObjects = [];
+    state.blobTruncated = false;
+  }
+
+  function parentBlobDir(dir) {
+    if (!dir) return '';
+    var trimmed = dir.replace(/\/+$/, '');
+    var idx = trimmed.lastIndexOf('/');
+    return idx >= 0 ? trimmed.slice(0, idx + 1) : '';
+  }
+
+  async function navigateBlobDir(nextDir, clearSearch) {
+    state.blobDir = nextDir || '';
+    if (clearSearch) state.blobSearch = '';
+    try {
+      await loadBucketObjects();
+      renderBlobContentPartial();
+    } catch (e) { toast(e.message, 'error'); }
+  }
+
+  function buildBlobBadgeHtml(bCfg) {
+    return bCfg.public_read
+      ? '<span class="badge badge-success">' + esc(t('blobs.public')) + '</span>'
+      : '<span class="badge badge-neutral">' + esc(t('blobs.private')) + '</span>';
+  }
+
+  function buildBlobParts(bCfg, canWriteBkt) {
+    var folderIconSvg = '<svg class="blob-icon blob-icon-folder" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>';
+    var upIconSvg = '<svg class="blob-icon blob-icon-folder" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5v0a5.5 5.5 0 0 1-5.5 5.5H11"/></svg>';
+    var fileIconSvg = '<svg class="blob-icon blob-icon-file" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
+
+    var segs = state.blobDir ? state.blobDir.replace(/\/+$/, '').split('/').filter(Boolean) : [];
+    var crumbAcc = '';
+    var crumbsHtml =
+      '<button type="button" class="blob-crumb mono' + (segs.length === 0 ? ' blob-crumb-current' : '') + '" data-nav-dir="">' + esc(bCfg.name) + '</button>' +
+      segs.map(function (seg, idx) {
+        crumbAcc += seg + '/';
+        var isLast = idx === segs.length - 1;
+        return '<span class="blob-crumb-sep">/</span>' +
+          '<button type="button" class="blob-crumb mono' + (isLast ? ' blob-crumb-current' : '') + '" data-nav-dir="' + esc(crumbAcc) + '">' + esc(seg) + '</button>';
+      }).join('');
+
+    var pathbarLeftHtml =
+      '<button type="button" class="btn btn-sm" id="blob-up-btn"' + (state.blobDir ? '' : ' disabled') + ' title="' + esc(t('blobs.upLevel')) + '">↑</button>' +
+      '<div class="blob-breadcrumbs">' + crumbsHtml + '</div>' +
+      '<span class="blob-count-summary">' + esc(t('blobs.dirSummary', { folders: state.blobFolders.length, files: state.blobObjects.length })) + '</span>';
+
+    var parentDir = parentBlobDir(state.blobDir);
+    var parentRowHtml = (state.blobDir && !state.blobSearch)
+      ? '<tr class="blob-parent-row">' +
+        '<td data-label="' + esc(t('blobs.name')) + '"><div class="blob-name-cell">' + upIconSvg +
+        '<button type="button" class="blob-folder-link mono" data-nav-dir="' + esc(parentDir) + '">..</button></div></td>' +
+        '<td data-label="' + esc(t('kv.size')) + '" class="muted">-</td>' +
+        '<td data-label="' + esc(t('blobs.contentType')) + '" class="text-xs muted">' + esc(t('blobs.parentDir')) + '</td>' +
+        '<td data-label="' + esc(t('common.updatedAt')) + '" class="text-xs muted">-</td>' +
+        '<td class="cell-actions-td"><div class="cell-actions">' +
+        '<button type="button" class="btn btn-sm" data-nav-dir="' + esc(parentDir) + '">' + esc(t('blobs.upLevel')) + '</button>' +
+        '</div></td></tr>'
+      : '';
+
+    var folderRows = state.blobFolders.map(function (f) {
+      return '<tr>' +
+        '<td data-label="' + esc(t('blobs.name')) + '"><div class="blob-name-cell">' + folderIconSvg +
+        '<button type="button" class="blob-folder-link mono text-strong break-all" data-nav-dir="' + esc(f.prefix) + '">' + esc(f.name) + '/</button></div></td>' +
+        '<td data-label="' + esc(t('kv.size')) + '">' + esc(formatBytes(f.total_size)) + '</td>' +
+        '<td data-label="' + esc(t('blobs.contentType')) + '" class="text-xs muted">' + esc(t('blobs.folderMeta', { count: f.object_count })) + '</td>' +
+        '<td data-label="' + esc(t('common.updatedAt')) + '" class="text-xs muted">' + esc(formatTime(f.updated_at)) + '</td>' +
+        '<td class="cell-actions-td"><div class="cell-actions">' +
+        '<button type="button" class="btn btn-sm" data-nav-dir="' + esc(f.prefix) + '">' + esc(t('blobs.openFolder')) + '</button>' +
+        (canWriteBkt ? '<button type="button" class="btn btn-danger btn-sm" data-del-folder="' + esc(f.prefix) + '" data-folder-count="' + esc(f.object_count) + '">' + esc(t('common.delete')) + '</button>' : '') +
+        '</div></td></tr>';
+    }).join('');
+
+    var objRows = state.blobObjects.map(function (o) {
+      var displayName = state.blobDir && o.key.indexOf(state.blobDir) === 0
+        ? o.key.slice(state.blobDir.length)
+        : o.key;
+      return '<tr>' +
+        '<td data-label="' + esc(t('blobs.name')) + '"><div class="blob-name-cell">' + fileIconSvg +
+        '<span class="mono text-strong break-all" title="' + esc(o.key) + '">' + esc(displayName) + '</span></div></td>' +
+        '<td data-label="' + esc(t('kv.size')) + '">' + esc(formatBytes(o.size)) + '</td>' +
+        '<td data-label="' + esc(t('blobs.contentType')) + '" class="text-xs muted">' + esc(o.content_type) + '</td>' +
+        '<td data-label="' + esc(t('common.updatedAt')) + '" class="text-xs muted">' + esc(formatTime(o.updated_at)) + '</td>' +
+        '<td class="cell-actions-td"><div class="cell-actions">' +
+        '<button type="button" class="btn btn-sm" data-dl-obj="' + esc(o.key) + '">' + esc(t('common.download')) + '</button>' +
+        '<button type="button" class="btn btn-sm" data-presign-obj="' + esc(o.key) + '">' + esc(t('blobs.presign')) + '</button>' +
+        (canWriteBkt ? '<button type="button" class="btn btn-danger btn-sm" data-del-obj="' + esc(o.key) + '">' + esc(t('common.delete')) + '</button>' : '') +
+        '</div></td></tr>';
+    }).join('');
+
+    var pathDisplay = '/' + (state.blobDir || '');
+    var searchBannerHtml = state.blobSearch
+      ? '<div class="blob-search-banner">' +
+        '<span>' + esc(t('blobs.searchingIn', { query: state.blobSearch, path: pathDisplay })) + '</span>' +
+        '<button type="button" class="btn btn-sm" id="blob-clear-search-btn">' + esc(t('blobs.clearSearch')) + '</button>' +
+        '</div>'
+      : '';
+
+    var truncatedBannerHtml = state.blobTruncated
+      ? '<div class="alert alert-warn" style="margin:0;border-radius:0;border-left:none;border-right:none;border-top:none;">' +
+        esc(t('blobs.truncatedNotice')) + '</div>'
+      : '';
+
+    var hasEntries = Boolean(folderRows || objRows);
+    var tableHtml = (parentRowHtml || hasEntries)
+      ? '<div class="table-wrap"><table class="data-table stack-mobile"><thead><tr><th>' + esc(t('blobs.name')) + '</th><th>' + esc(t('kv.size')) + '</th><th>' + esc(t('blobs.contentType')) + '</th><th>' + esc(t('common.updatedAt')) + '</th><th class="th-actions">' + esc(t('common.actions')) + '</th></tr></thead><tbody>' + parentRowHtml + folderRows + objRows + '</tbody></table></div>'
+      : '';
+
+    var emptyHtml = '';
+    if (!hasEntries) {
+      if (state.blobSearch) {
+        emptyHtml =
+          '<div class="empty-state stack gap-sm" style="align-items:center;">' +
+          '<div>' + esc(t('blobs.noSearchResults')) + '</div>' +
+          '<div><button type="button" class="btn btn-sm" id="blob-empty-clear-search">' + esc(t('blobs.clearSearch')) + '</button></div>' +
+          '</div>';
+      } else if (canWriteBkt) {
+        emptyHtml =
+          '<div class="empty-state stack gap-sm" style="align-items:center;">' +
+          '<div>' + esc(t('blobs.emptyDirHint')) + '</div>' +
+          (state.blobDir ? '<div class="text-xs muted">' + esc(t('blobs.virtualDirHint')) + '</div>' : '') +
+          '<div class="row" style="justify-content:center;margin-top:4px;">' +
+          '<button type="button" class="btn btn-primary btn-sm" id="blob-empty-upload-files">' + esc(t('blobs.uploadFiles')) + '</button>' +
+          '<button type="button" class="btn btn-sm" id="blob-empty-upload-dir">' + esc(t('blobs.uploadFolder')) + '</button>' +
+          '</div></div>';
+      } else {
+        emptyHtml = '<div class="empty-state">' + esc(t('blobs.noObjects')) + '</div>';
+      }
+    }
+
+    return {
+      pathbarLeftHtml: pathbarLeftHtml,
+      bannersHtml: searchBannerHtml + truncatedBannerHtml,
+      tableSlotHtml: tableHtml + emptyHtml,
+      dropOverlayText: t('blobs.dropOverlayHint', { target: pathDisplay })
+    };
+  }
+
+  function bindBlobContentSlotEvents(bCfg, canWriteBkt) {
+    var pathLeft = $('blob-pathbar-left');
+    var bannersSlot = $('blob-banners-slot');
+    var tableSlot = $('blob-browser-table-slot');
+
+    if ($('blob-up-btn')) {
+      $('blob-up-btn').addEventListener('click', function () {
+        if (state.blobDir) navigateBlobDir(parentBlobDir(state.blobDir), true);
+      });
+    }
+    [pathLeft, tableSlot].forEach(function (container) {
+      if (!container) return;
+      container.querySelectorAll('[data-nav-dir]').forEach(function (el) {
+        el.addEventListener('click', function () {
+          navigateBlobDir(el.getAttribute('data-nav-dir') || '', true);
+        });
+      });
+    });
+    if ($('blob-clear-search-btn')) {
+      $('blob-clear-search-btn').addEventListener('click', function () {
+        navigateBlobDir(state.blobDir, true);
+      });
+    }
+    if ($('blob-empty-clear-search')) {
+      $('blob-empty-clear-search').addEventListener('click', function () {
+        navigateBlobDir(state.blobDir, true);
+      });
+    }
+    if (canWriteBkt) {
+      if ($('blob-empty-upload-files')) {
+        $('blob-empty-upload-files').addEventListener('click', function () {
+          if ($('blob-file-input')) $('blob-file-input').click();
+        });
+      }
+      if ($('blob-empty-upload-dir')) {
+        $('blob-empty-upload-dir').addEventListener('click', function () {
+          if ($('blob-dir-input')) $('blob-dir-input').click();
+        });
+      }
+    }
+    if (!tableSlot) return;
+    tableSlot.querySelectorAll('[data-dl-obj]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        downloadBlobObject(bCfg.name, btn.getAttribute('data-dl-obj'));
+      });
+    });
+    tableSlot.querySelectorAll('[data-presign-obj]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        openPresignModal(bCfg.name, btn.getAttribute('data-presign-obj'), canWriteBkt);
+      });
+    });
+    tableSlot.querySelectorAll('[data-del-obj]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var key = btn.getAttribute('data-del-obj');
+        confirmAction(t('blobs.deleteConfirm', { key: key }), async function () {
+          try {
+            await api('/_blob/' + enc(bCfg.name) + '/' + encPath(key), { method: 'DELETE' });
+            toast(t('blobs.deleted'), 'success');
+            await loadBucketObjects();
+            renderBlobContentPartial();
+          } catch (e) { toast(e.message, 'error'); }
+        });
+      });
+    });
+    tableSlot.querySelectorAll('[data-del-folder]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var prefix = btn.getAttribute('data-del-folder');
+        var count = btn.getAttribute('data-folder-count') || '0';
+        confirmAction(t('blobs.deleteFolderConfirm', { path: prefix, count: count }), async function () {
+          try {
+            var res = await api('/_api/v1/buckets/' + enc(bCfg.name) + '/prefix?prefix=' + enc(prefix), { method: 'DELETE' });
+            toast(t('blobs.folderDeleted', { count: (res && res.deleted) !== undefined ? res.deleted : count }), 'success');
+            await loadBucketObjects();
+            renderBlobContentPartial();
+          } catch (e) { toast(e.message, 'error'); }
+        });
+      });
+    });
+  }
+
+  function renderBlobContentPartial() {
+    var pathLeft = $('blob-pathbar-left');
+    var bannersSlot = $('blob-banners-slot');
+    var tableSlot = $('blob-browser-table-slot');
+    var bCfg = state.buckets.find(function (b) { return b.name === state.selectedBucket; });
+    if (!pathLeft || !bannersSlot || !tableSlot || !bCfg) {
+      return renderBlobs(false);
+    }
+    var canWriteBkt = canWriteResource(bCfg.project_id);
+    var parts = buildBlobParts(bCfg, canWriteBkt);
+    pathLeft.innerHTML = parts.pathbarLeftHtml;
+    bannersSlot.innerHTML = parts.bannersHtml;
+    tableSlot.innerHTML = parts.tableSlotHtml;
+    var overlay = $('blob-drop-overlay');
+    if (overlay) overlay.textContent = parts.dropOverlayText;
+    var searchInput = $('blob-search-input');
+    if (searchInput && searchInput.value !== state.blobSearch) searchInput.value = state.blobSearch;
+    bindBlobContentSlotEvents(bCfg, canWriteBkt);
+  }
+
+  function updateBlobBucketInPlace(updatedBucket) {
+    if (!updatedBucket) return;
+    var idx = state.buckets.findIndex(function (b) { return b.name === updatedBucket.name; });
+    if (idx >= 0) state.buckets[idx] = updatedBucket;
+    if (state.selectedBucket === updatedBucket.name) {
+      var badgeEl = $('blob-header-badge');
+      if (badgeEl) badgeEl.innerHTML = buildBlobBadgeHtml(updatedBucket);
+    }
+    var sel = $('blob-switcher');
+    if (sel) {
+      for (var i = 0; i < sel.options.length; i++) {
+        if (sel.options[i].value === updatedBucket.name) {
+          sel.options[i].textContent = updatedBucket.name + (updatedBucket.public_read ? ' (' + t('blobs.public') + ')' : '');
+          break;
+        }
+      }
+    }
+  }
+
   async function renderBlobs(fetchData) {
     var root = $('view-root');
     var isCurrent = beginViewRender('blobs');
     if (fetchData) {
-      root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
+      showViewLoadingIfNeeded(root, 'blobs');
       try {
         var res = await Promise.all([api('/_api/v1/buckets'), api('/_api/v1/apps')]);
         if (!isCurrent()) return;
@@ -2656,13 +3181,20 @@
         state.projects = res[1] || [];
         if (!state.selectedBucket && state.buckets.length) {
           state.selectedBucket = state.buckets[0].name;
+          resetBlobBrowserState();
+        } else if (state.selectedBucket && !state.buckets.some(function (b) { return b.name === state.selectedBucket; })) {
+          state.selectedBucket = state.buckets.length ? state.buckets[0].name : '';
+          resetBlobBrowserState();
         }
         if (state.selectedBucket) {
           await loadBucketObjects();
           if (!isCurrent()) return;
         }
       } catch (e) {
-        if (isCurrent()) root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+        if (isCurrent()) {
+          root.removeAttribute('data-view-key');
+          root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+        }
         return;
       }
     }
@@ -2670,117 +3202,124 @@
 
     var bCfg = state.buckets.find(function (b) { return b.name === state.selectedBucket; });
     var canWriteBkt = bCfg && canWriteResource(bCfg.project_id);
-
-    var bMenu = state.buckets.length
-      ? groupedMenu(state.buckets, function (b) {
-          var badge = b.public_read
-            ? '<span class="badge badge-success">' + esc(t('blobs.public')) + '</span>'
-            : '<span class="badge badge-neutral">' + esc(t('blobs.private')) + '</span>';
-          return '<button type="button" class="list-menu-item' + (b.name === state.selectedBucket ? ' active' : '') + '" data-select-bucket="' + esc(b.name) + '">' +
-            '<span class="truncate">' + esc(b.name) + '</span>' + badge + '</button>';
-        })
-      : '<div class="empty-state" style="padding:20px 10px;">' + esc(t('blobs.noBuckets')) + '</div>';
+    var createBktBtnHtml = isAdmin() ? '<button type="button" class="btn btn-primary btn-sm" id="new-bucket-btn">+ ' + esc(t('blobs.newBucket')) + '</button>' : '';
 
     var rightHtml = '';
     if (!bCfg) {
       rightHtml = '<div class="panel"><div class="empty-state">' + esc(t('blobs.selectBucket')) + '</div></div>';
     } else {
-      var objRows = state.blobObjects.map(function (o) {
-        return '<tr>' +
-          '<td data-label="' + esc(t('blobs.objectKey')) + '" class="mono text-strong break-all">' + esc(o.key) + '</td>' +
-          '<td data-label="' + esc(t('kv.size')) + '">' + esc(formatBytes(o.size)) + '</td>' +
-          '<td data-label="' + esc(t('blobs.contentType')) + '" class="text-xs muted">' + esc(o.content_type) + '</td>' +
-          '<td data-label="' + esc(t('common.updatedAt')) + '" class="text-xs muted">' + esc(formatTime(o.updated_at)) + '</td>' +
-          '<td class="cell-actions-td"><div class="cell-actions">' +
-          '<button type="button" class="btn btn-sm" data-dl-obj="' + esc(o.key) + '">' + esc(t('common.download')) + '</button>' +
-          '<button type="button" class="btn btn-sm" data-presign-obj="' + esc(o.key) + '">' + esc(t('blobs.presign')) + '</button>' +
-          (canWriteBkt ? '<button type="button" class="btn btn-danger btn-sm" data-del-obj="' + esc(o.key) + '">' + esc(t('common.delete')) + '</button>' : '') +
-          '</div></td></tr>';
-      }).join('');
+      var parts = buildBlobParts(bCfg, canWriteBkt);
+
+      var uploadProgressHtml = canWriteBkt
+        ? '<div id="blob-upload-progress" class="blob-upload-progress hidden">' +
+          '<div class="blob-progress-head">' +
+          '<span id="blob-progress-title" class="text-strong"></span>' +
+          '<span id="blob-progress-stats" class="mono text-xs muted"></span>' +
+          '</div>' +
+          '<div class="blob-progress-bar"><div id="blob-progress-fill" class="blob-progress-fill"></div></div>' +
+          '<div id="blob-progress-file" class="mono text-xs muted truncate"></div>' +
+          '</div>'
+        : '';
 
       rightHtml =
         '<div class="stack gap-md">' +
-        '<div class="panel"><div class="panel-header"><div class="toolbar">' +
+        '<div class="panel"><div class="panel-header"><div class="toolbar" style="width:100%;">' +
         '<div class="row"><h3 class="panel-title mono">' + esc(bCfg.name) + '</h3>' +
-        (bCfg.public_read
-          ? '<span class="badge badge-success">' + esc(t('blobs.public')) + '</span>'
-          : '<span class="badge badge-neutral">' + esc(t('blobs.private')) + '</span>') +
+        '<span id="blob-header-badge">' + buildBlobBadgeHtml(bCfg) + '</span>' +
         '</div>' +
         '<div class="row">' +
-        '<input type="search" id="blob-prefix-input" style="width:180px;" value="' + esc(state.blobPrefix) + '" placeholder="' + esc(t('blobs.prefixPlaceholder')) + '">' +
+        '<input type="search" id="blob-search-input" style="width:220px;" value="' + esc(state.blobSearch) + '" placeholder="' + esc(t('blobs.searchPlaceholder')) + '">' +
         '<button type="button" class="btn btn-sm" id="blob-filter-btn">' + esc(t('common.filter')) + '</button>' +
         (canWriteBkt ? '<button type="button" class="btn btn-sm" id="blob-edit-bkt-btn">' + esc(t('common.editConfig')) + '</button>' : '') +
         (isAdmin() ? '<button type="button" class="btn btn-sm" id="blob-toggle-pub">' + esc(t('blobs.togglePublic')) + '</button>' : '') +
         (canWriteBkt ? '<button type="button" class="btn btn-danger btn-sm" id="blob-del-bkt-btn">' + esc(t('blobs.deleteBucket')) + '</button>' : '') +
         '</div></div></div>' +
+        '<div class="blob-pathbar">' +
+        '<div id="blob-pathbar-left" class="blob-breadcrumbs-wrap">' + parts.pathbarLeftHtml + '</div>' +
         (canWriteBkt
-          ? '<div class="panel-body stack gap-sm">' +
-            '<div class="field" style="max-width:320px;"><label>' + esc(t('blobs.uploadPrefixLabel')) + '</label>' +
-            '<input type="text" id="blob-upload-prefix" placeholder="' + esc(t('blobs.uploadPrefixPlaceholder')) + '"></div>' +
-            '<div id="blob-dropzone" class="dropzone">' +
+          ? '<div class="blob-actions-bar">' +
+            '<button type="button" class="btn btn-primary btn-sm" id="blob-upload-files-btn">' + esc(t('blobs.uploadFiles')) + '</button>' +
+            '<button type="button" class="btn btn-sm" id="blob-upload-dir-btn">' + esc(t('blobs.uploadFolder')) + '</button>' +
+            '<button type="button" class="btn btn-sm" id="blob-new-folder-btn">+ ' + esc(t('blobs.newFolder')) + '</button>' +
             '<input type="file" id="blob-file-input" multiple class="hidden">' +
-            '<div id="blob-dropzone-label">' + esc(t('blobs.uploadDropHint')) + '</div></div></div>'
+            '<input type="file" id="blob-dir-input" webkitdirectory directory multiple class="hidden">' +
+            '</div>'
           : '') +
-        (objRows
-          ? '<div class="table-wrap"><table class="data-table stack-mobile"><thead><tr><th>' + esc(t('blobs.objectKey')) + '</th><th>' + esc(t('kv.size')) + '</th><th>' + esc(t('blobs.contentType')) + '</th><th>' + esc(t('common.updatedAt')) + '</th><th class="th-actions">' + esc(t('common.actions')) + '</th></tr></thead><tbody>' + objRows + '</tbody></table></div>'
-          : '<div class="empty-state">' + esc(t('blobs.noObjects')) + '</div>') +
-        '</div></div>';
+        '</div>' +
+        '<div id="blob-banners-slot">' + parts.bannersHtml + '</div>' +
+        uploadProgressHtml +
+        '<div id="blob-browser-body" class="blob-browser-body">' +
+        (canWriteBkt ? '<div id="blob-drop-overlay" class="blob-drop-overlay">' + esc(parts.dropOverlayText) + '</div>' : '') +
+        '<div id="blob-browser-table-slot">' + parts.tableSlotHtml + '</div>' +
+        '</div></div></div>';
     }
 
-    root.innerHTML =
-      renderSectionTabs(
-        'data',
-        isAdmin() ? '<button type="button" class="btn btn-primary btn-sm" id="new-bucket-btn">+ ' + esc(t('blobs.newBucket')) + '</button>' : ''
-      ) +
-      '<div class="split-layout">' +
-      '<div class="panel"><div class="panel-header"><h3 class="panel-title">' + esc(t('blobs.buckets')) + '</h3></div><div class="list-menu">' + bMenu + '</div></div>' +
-      rightHtml + '</div>';
+    var snap = captureUiSnapshot(root);
+    if (state.buckets.length === 0) {
+      root.innerHTML = renderResourceEmpty(t('blobs.noBuckets'), createBktBtnHtml);
+    } else {
+      root.innerHTML =
+        renderResourceBar({
+          selectId: 'blob-switcher',
+          items: state.buckets,
+          selectedValue: state.selectedBucket,
+          valueFn: function (b) { return b.name; },
+          labelFn: function (b) { return b.name + (b.public_read ? ' (' + t('blobs.public') + ')' : ''); },
+          actionHtml: createBktBtnHtml
+        }) +
+        rightHtml;
+    }
 
     if ($('new-bucket-btn')) $('new-bucket-btn').addEventListener('click', openCreateBucketModal);
-    root.querySelectorAll('[data-select-bucket]').forEach(function (btn) {
-      btn.addEventListener('click', async function () {
-        state.selectedBucket = btn.getAttribute('data-select-bucket');
+    if ($('blob-switcher')) {
+      $('blob-switcher').addEventListener('change', async function (ev) {
+        state.selectedBucket = ev.target.value;
+        resetBlobBrowserState();
         try {
           await loadBucketObjects();
           renderBlobs(false);
         } catch (e) { toast(e.message, 'error'); }
       });
-    });
+    }
 
     if ($('blob-filter-btn')) {
-      var runBlobFilter = async function () {
-        state.blobPrefix = $('blob-prefix-input').value.trim();
+      var runBlobSearch = async function () {
+        state.blobSearch = $('blob-search-input').value.trim();
         try {
           await loadBucketObjects();
-          renderBlobs(false);
+          renderBlobContentPartial();
         } catch (e) { toast(e.message, 'error'); }
       };
-      $('blob-filter-btn').addEventListener('click', runBlobFilter);
-      if ($('blob-prefix-input')) {
-        $('blob-prefix-input').addEventListener('keydown', function (ev) {
+      $('blob-filter-btn').addEventListener('click', runBlobSearch);
+      if ($('blob-search-input')) {
+        $('blob-search-input').addEventListener('keydown', function (ev) {
           if (ev.key === 'Enter') {
             ev.preventDefault();
-            runBlobFilter();
+            runBlobSearch();
           }
         });
-        $('blob-prefix-input').addEventListener('search', runBlobFilter);
+        $('blob-search-input').addEventListener('search', runBlobSearch);
       }
     }
+
     if ($('blob-toggle-pub')) {
       $('blob-toggle-pub').addEventListener('click', async function () {
+        var curBkt = state.buckets.find(function (b) { return b.name === state.selectedBucket; }) || bCfg;
+        if (!curBkt) return;
         try {
-          await api('/_api/v1/buckets/' + enc(bCfg.name), {
+          var updated = await api('/_api/v1/buckets/' + enc(curBkt.name), {
             method: 'PATCH',
-            json: { public_read: !bCfg.public_read }
+            json: { public_read: !curBkt.public_read }
           });
           toast(t('blobs.bucketUpdated'), 'success');
-          renderBlobs(true);
+          updateBlobBucketInPlace(updated || Object.assign({}, curBkt, { public_read: !curBkt.public_read }));
         } catch (e) { toast(e.message, 'error'); }
       });
     }
     if ($('blob-edit-bkt-btn') && bCfg) {
       $('blob-edit-bkt-btn').addEventListener('click', function () {
-        openEditBucketModal(bCfg);
+        var curBkt = state.buckets.find(function (b) { return b.name === state.selectedBucket; }) || bCfg;
+        openEditBucketModal(curBkt);
       });
     }
     if ($('blob-del-bkt-btn') && bCfg) {
@@ -2790,85 +3329,248 @@
           try {
             await api('/_api/v1/buckets/' + enc(bName), { method: 'DELETE' });
             state.selectedBucket = '';
-            state.blobObjects = [];
+            resetBlobBrowserState();
             toast(t('blobs.bucketDeleted'), 'success');
             renderBlobs(true);
           } catch (e) { toast(e.message, 'error'); }
         });
       });
     }
-    if ($('blob-dropzone')) {
-      var dz = $('blob-dropzone');
+
+    if (canWriteBkt && bCfg) {
       var fi = $('blob-file-input');
-      dz.addEventListener('click', function () { fi.click(); });
-      fi.addEventListener('change', function () {
-        if (fi.files && fi.files.length) uploadBlobFiles(bCfg.name, fi.files);
-      });
-      dz.addEventListener('dragover', function (e) { e.preventDefault(); dz.classList.add('dragover'); });
-      dz.addEventListener('dragleave', function () { dz.classList.remove('dragover'); });
-      dz.addEventListener('drop', function (e) {
-        e.preventDefault();
-        dz.classList.remove('dragover');
-        if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
-          uploadBlobFiles(bCfg.name, e.dataTransfer.files);
-        }
-      });
+      var di = $('blob-dir-input');
+      var triggerFilePicker = function () { if (fi) fi.click(); };
+      var triggerDirPicker = function () { if (di) di.click(); };
+      if ($('blob-upload-files-btn')) $('blob-upload-files-btn').addEventListener('click', triggerFilePicker);
+      if ($('blob-upload-dir-btn')) $('blob-upload-dir-btn').addEventListener('click', triggerDirPicker);
+      if ($('blob-new-folder-btn')) $('blob-new-folder-btn').addEventListener('click', openNewFolderModal);
+
+      if (fi) {
+        fi.addEventListener('change', function () {
+          var files = fi.files ? Array.from(fi.files) : [];
+          fi.value = '';
+          if (files.length) {
+            uploadBlobEntries(bCfg.name, files.map(function (f) {
+              return { file: f, relPath: f.name };
+            }));
+          }
+        });
+      }
+      if (di) {
+        di.addEventListener('change', function () {
+          var files = di.files ? Array.from(di.files) : [];
+          di.value = '';
+          if (files.length) {
+            uploadBlobEntries(bCfg.name, files.map(function (f) {
+              return { file: f, relPath: f.webkitRelativePath || f.name };
+            }));
+          }
+        });
+      }
+
+      var browserBody = $('blob-browser-body');
+      if (browserBody) {
+        var dragDepth = 0;
+        var isFileDrag = function (e) {
+          var dt = e.dataTransfer;
+          if (!dt || !dt.types) return true;
+          return Array.from(dt.types).indexOf('Files') !== -1;
+        };
+        browserBody.addEventListener('dragenter', function (e) {
+          if (!isFileDrag(e)) return;
+          e.preventDefault();
+          dragDepth += 1;
+          browserBody.classList.add('dragover');
+        });
+        browserBody.addEventListener('dragover', function (e) {
+          if (!isFileDrag(e)) return;
+          e.preventDefault();
+          if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+        });
+        browserBody.addEventListener('dragleave', function () {
+          if (dragDepth === 0) return;
+          dragDepth = Math.max(0, dragDepth - 1);
+          if (dragDepth === 0) browserBody.classList.remove('dragover');
+        });
+        browserBody.addEventListener('drop', async function (e) {
+          if (!isFileDrag(e)) return;
+          e.preventDefault();
+          dragDepth = 0;
+          browserBody.classList.remove('dragover');
+          try {
+            var entries = await collectDroppedEntries(e.dataTransfer);
+            if (entries.length) {
+              uploadBlobEntries(bCfg.name, entries);
+            }
+          } catch (err) {
+            toast(err.message || String(err), 'error');
+          }
+        });
+      }
     }
 
-    root.querySelectorAll('[data-dl-obj]').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        downloadBlobObject(bCfg.name, btn.getAttribute('data-dl-obj'));
-      });
-    });
-    root.querySelectorAll('[data-presign-obj]').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        openPresignModal(bCfg.name, btn.getAttribute('data-presign-obj'), canWriteBkt);
-      });
-    });
-    root.querySelectorAll('[data-del-obj]').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        var key = btn.getAttribute('data-del-obj');
-        confirmAction(t('blobs.deleteConfirm', { key: key }), async function () {
-          try {
-            await api('/_blob/' + enc(bCfg.name) + '/' + encPath(key), { method: 'DELETE' });
-            toast(t('blobs.deleted'), 'success');
-            await loadBucketObjects();
-            renderBlobs(false);
-          } catch (e) { toast(e.message, 'error'); }
-        });
-      });
-    });
+    if (bCfg) bindBlobContentSlotEvents(bCfg, canWriteBkt);
+    markViewRendered(root, 'blobs');
+    restoreUiSnapshot(root, snap);
   }
 
   async function loadBucketObjects() {
-    var qs = '?limit=200' + (state.blobPrefix ? '&prefix=' + enc(state.blobPrefix) : '');
-    state.blobObjects = (await api('/_blob/' + enc(state.selectedBucket) + qs)) || [];
+    var params = [];
+    if (state.blobDir) params.push('prefix=' + enc(state.blobDir));
+    if (state.blobSearch) params.push('search=' + enc(state.blobSearch));
+    var qs = params.length ? '?' + params.join('&') : '';
+    var res = await api('/_api/v1/buckets/' + enc(state.selectedBucket) + '/browse' + qs);
+    state.blobDir = (res && res.prefix) || '';
+    state.blobFolders = (res && res.folders) || [];
+    state.blobObjects = (res && res.objects) || [];
+    state.blobTruncated = Boolean(res && res.truncated);
   }
 
-  async function uploadBlobFiles(bucket, fileList) {
-    var prefix = ($('blob-upload-prefix') ? $('blob-upload-prefix').value : '').trim().replace(/^\/+|\/+$/g, '');
-    var labelEl = $('blob-dropzone-label');
-    var total = fileList.length;
+  async function collectDroppedEntries(dataTransfer) {
+    var out = [];
+    var items = dataTransfer && dataTransfer.items ? Array.from(dataTransfer.items) : [];
+    var rootEntries = [];
+    for (var i = 0; i < items.length; i++) {
+      if (typeof items[i].webkitGetAsEntry === 'function') {
+        var entry = items[i].webkitGetAsEntry();
+        if (entry) rootEntries.push(entry);
+      }
+    }
+    if (rootEntries.length > 0) {
+      var readAllDirectoryEntries = async function (dirReader) {
+        var all = [];
+        while (true) {
+          var batch = await new Promise(function (resolve, reject) {
+            dirReader.readEntries(resolve, reject);
+          });
+          if (!batch || batch.length === 0) break;
+          for (var j = 0; j < batch.length; j++) all.push(batch[j]);
+        }
+        return all;
+      };
+      var walkEntry = async function (entry) {
+        if (entry.isFile) {
+          var file = await new Promise(function (resolve, reject) {
+            entry.file(resolve, reject);
+          });
+          var relPath = (entry.fullPath || entry.name || '').replace(/^\/+/, '');
+          out.push({ file: file, relPath: relPath || file.name });
+        } else if (entry.isDirectory) {
+          var children = await readAllDirectoryEntries(entry.createReader());
+          for (var k = 0; k < children.length; k++) {
+            await walkEntry(children[k]);
+          }
+        }
+      };
+      for (var r = 0; r < rootEntries.length; r++) {
+        await walkEntry(rootEntries[r]);
+      }
+      return out;
+    }
+    var files = dataTransfer && dataTransfer.files ? Array.from(dataTransfer.files) : [];
+    return files.map(function (f) {
+      return { file: f, relPath: f.webkitRelativePath || f.name };
+    });
+  }
+
+  async function uploadBlobEntries(bucket, entries) {
+    var valid = [];
+    for (var i = 0; i < entries.length; i++) {
+      var item = entries[i];
+      if (!item || !item.file) continue;
+      var rawRel = String(item.relPath || item.file.name || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+      var segs = rawRel.split('/').filter(function (s) { return s.length > 0; });
+      if (!segs.length || segs.some(function (s) { return s === '.' || s === '..' || s.indexOf('\0') >= 0; })) {
+        continue;
+      }
+      valid.push({ file: item.file, relPath: segs.join('/') });
+    }
+    if (!valid.length) return;
+
+    var baseDir = state.blobDir || '';
+    var progressBox = $('blob-upload-progress');
+    var titleEl = $('blob-progress-title');
+    var statsEl = $('blob-progress-stats');
+    var fillEl = $('blob-progress-fill');
+    var fileEl = $('blob-progress-file');
+    var total = valid.length;
     var done = 0;
-    try {
-      for (var i = 0; i < total; i++) {
-        var file = fileList[i];
-        var key = prefix ? prefix + '/' + file.name : file.name;
-        if (labelEl) labelEl.textContent = t('blobs.uploading', { done: done, total: total });
+    var succeeded = 0;
+    var failed = 0;
+    var firstErr = '';
+
+    if (progressBox) progressBox.classList.remove('hidden');
+    if (titleEl) titleEl.textContent = t('blobs.uploadToTarget', { target: '/' + baseDir });
+
+    for (var j = 0; j < total; j++) {
+      var entry = valid[j];
+      var key = baseDir + entry.relPath;
+      var pct = Math.round((done / total) * 100);
+      if (statsEl) statsEl.textContent = done + ' / ' + total + ' (' + pct + '%)';
+      if (fillEl) fillEl.style.width = pct + '%';
+      if (fileEl) fileEl.textContent = key;
+
+      try {
         await api('/_blob/' + enc(bucket) + '/' + encPath(key), {
           method: 'PUT',
-          headers: { 'Content-Type': file.type || 'application/octet-stream' },
-          body: file
+          headers: entry.file.type ? { 'Content-Type': entry.file.type } : {},
+          body: entry.file
         });
-        done += 1;
+        succeeded += 1;
+      } catch (e) {
+        failed += 1;
+        if (!firstErr) firstErr = e.message || String(e);
       }
-      toast(t('blobs.uploaded', { count: done }), 'success');
-      await loadBucketObjects();
-      renderBlobs(false);
-    } catch (e) {
-      toast(e.message, 'error');
-      if (labelEl) labelEl.textContent = t('blobs.uploadDropHint');
+      done += 1;
     }
+
+    if (statsEl) statsEl.textContent = done + ' / ' + total + ' (100%)';
+    if (fillEl) fillEl.style.width = '100%';
+    if (progressBox) progressBox.classList.add('hidden');
+
+    if (failed === 0) {
+      toast(t('blobs.uploaded', { count: succeeded }), 'success');
+    } else {
+      toast(t('blobs.uploadPartialFailed', { ok: succeeded, fail: failed, err: firstErr }), 'error');
+    }
+
+    if (state.currentRoute === 'blobs' && state.selectedBucket === bucket) {
+      try {
+        await loadBucketObjects();
+        renderBlobContentPartial();
+      } catch (e) { toast(e.message, 'error'); }
+    }
+  }
+
+  function openNewFolderModal() {
+    openModal({
+      title: t('blobs.newFolderTitle'),
+      body:
+        '<form id="new-folder-form" class="stack gap-sm">' +
+        '<div class="field"><label>' + esc(t('blobs.newFolderLabel')) + '</label>' +
+        '<input type="text" id="nf-name" required placeholder="' + esc(t('blobs.newFolderPlaceholder')) + '"></div>' +
+        '<div class="text-xs muted">' + esc(t('blobs.newFolderHint')) + '</div>' +
+        '</form>',
+      footer:
+        '<button type="button" class="btn" id="nf-cancel">' + esc(t('common.cancel')) + '</button>' +
+        '<button type="submit" form="new-folder-form" class="btn btn-primary">' + esc(t('common.create')) + '</button>',
+      onMount: function () {
+        $('nf-cancel').addEventListener('click', closeModal);
+        if ($('nf-name')) $('nf-name').focus();
+        withSubmitLock('new-folder-form', async function () {
+          var raw = $('nf-name').value.trim();
+          var clean = raw.replace(/^\/+|\/+$/g, '');
+          if (!clean || raw.indexOf('\0') >= 0 || raw.indexOf('\\') >= 0 ||
+              clean.split('/').some(function (s) { return !s || s === '.' || s === '..'; })) {
+            toast(t('blobs.invalidFolderName'), 'error');
+            return;
+          }
+          closeModal();
+          await navigateBlobDir((state.blobDir || '') + clean + '/', true);
+        });
+      }
+    });
   }
 
   async function downloadBlobObject(bucket, key) {
@@ -2942,6 +3644,7 @@
             });
             closeModal();
             state.selectedBucket = name;
+            resetBlobBrowserState();
             toast(t('blobs.bucketCreated'), 'success');
             renderBlobs(true);
           } catch (e) { toast(e.message, 'error'); }
@@ -2988,10 +3691,10 @@
           };
           if ($('eb-pub')) body.public_read = $('eb-pub').checked;
           try {
-            await api('/_api/v1/buckets/' + enc(bCfg.name), { method: 'PATCH', json: body });
+            var updated = await api('/_api/v1/buckets/' + enc(bCfg.name), { method: 'PATCH', json: body });
             closeModal();
             toast(t('blobs.bucketUpdated'), 'success');
-            renderBlobs(true);
+            updateBlobBucketInPlace(updated);
           } catch (e) { toast(e.message, 'error'); }
         });
       }
@@ -3041,11 +3744,73 @@
 
   // --- 7. Databases (Turso User DBs) ---
 
+  function buildDbMetaHtml(dbMeta) {
+    if (!dbMeta) return '';
+    return esc(dbMeta.id) +
+      (dbMeta.read_only ? ' · Read-Only' : '') +
+      (dbMeta.max_rows ? ' · Max Rows: ' + esc(dbMeta.max_rows) : '') +
+      (dbMeta.max_size_mb ? ' · Max Size: ' + esc(dbMeta.max_size_mb) + ' MiB' : '') +
+      (dbMeta.description ? ' · ' + esc(dbMeta.description) : '');
+  }
+
+  function buildDbResultHtml() {
+    if (!state.dbResult) return '';
+    if (state.dbResult.type === 'execute') {
+      return '<div class="alert alert-info">' + esc(t('dbs.rowsAffected', { count: state.dbResult.rows_affected })) + '</div>';
+    }
+    var cols = state.dbResult.columns || [];
+    var rows = state.dbResult.rows || [];
+    var thead = '<tr>' + cols.map(function (c) { return '<th>' + esc(c) + '</th>'; }).join('') + '</tr>';
+    var tbody = rows.map(function (r) {
+      return '<tr>' + r.map(function (cell) {
+        var txt = cell === null ? 'NULL' : (typeof cell === 'object' ? JSON.stringify(cell) : String(cell));
+        return '<td class="mono text-xs">' + esc(txt) + '</td>';
+      }).join('') + '</tr>';
+    }).join('');
+    return '<div class="muted text-xs">' + esc(t('dbs.rowsReturned', { count: rows.length })) + '</div>' +
+      (rows.length
+        ? '<div class="table-wrap"><table class="data-table"><thead>' + thead + '</thead><tbody>' + tbody + '</tbody></table></div>'
+        : '<div class="empty-state">' + esc(t('dbs.noRows')) + '</div>');
+  }
+
+  function renderDbResultPartial() {
+    var slot = $('db-result-slot');
+    if (!slot) return renderDbs(false);
+    slot.innerHTML = buildDbResultHtml();
+  }
+
+  function renderDbSchemaPartial() {
+    var slot = $('db-schema-slot');
+    if (!slot) return renderDbs(false);
+    slot.innerHTML = state.dbSchema
+      ? '<pre class="code-block">' + esc(state.dbSchema) + '</pre>'
+      : '<div class="empty-state">' + esc(t('dbs.emptySchema')) + '</div>';
+  }
+
+  function updateDbInPlace(updatedDb) {
+    if (!updatedDb) return;
+    var idx = state.dbs.findIndex(function (d) { return d.id === updatedDb.id; });
+    if (idx >= 0) state.dbs[idx] = updatedDb;
+    if (state.selectedDbId === updatedDb.id) {
+      var metaSlot = $('db-header-meta');
+      if (metaSlot) metaSlot.innerHTML = buildDbMetaHtml(updatedDb);
+    }
+    var sel = $('db-switcher');
+    if (sel) {
+      for (var i = 0; i < sel.options.length; i++) {
+        if (sel.options[i].value === updatedDb.id) {
+          sel.options[i].textContent = updatedDb.name + (updatedDb.project_id ? ' · ' + projectNameById(updatedDb.project_id) : '');
+          break;
+        }
+      }
+    }
+  }
+
   async function renderDbs(fetchData) {
     var root = $('view-root');
     var isCurrent = beginViewRender('dbs');
     if (fetchData) {
-      root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
+      showViewLoadingIfNeeded(root, 'dbs');
       try {
         var res = await Promise.all([api('/_api/v1/dbs'), api('/_api/v1/apps')]);
         if (!isCurrent()) return;
@@ -3059,7 +3824,10 @@
           if (!isCurrent()) return;
         }
       } catch (e) {
-        if (isCurrent()) root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+        if (isCurrent()) {
+          root.removeAttribute('data-view-key');
+          root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+        }
         return;
       }
     }
@@ -3067,15 +3835,7 @@
 
     var dbMeta = state.dbs.find(function (d) { return d.id === state.selectedDbId; });
     var canWriteDb = dbMeta && canWriteResource(dbMeta.project_id);
-
-    var dbMenu = state.dbs.length
-      ? groupedMenu(state.dbs, function (d) {
-          return '<button type="button" class="list-menu-item' + (d.id === state.selectedDbId ? ' active' : '') + '" data-select-db="' + esc(d.id) + '">' +
-            '<span class="truncate">' + esc(d.name) + '</span>' +
-            (d.project_id ? '<span class="badge badge-neutral text-xs">' + esc(projectNameById(d.project_id)) + '</span>' : '') +
-            '</button>';
-        })
-      : '<div class="empty-state" style="padding:20px 10px;">' + esc(t('dbs.noDbs')) + '</div>';
+    var createDbBtnHtml = isAdmin() ? '<button type="button" class="btn btn-primary btn-sm" id="new-db-btn">+ ' + esc(t('dbs.newDb')) + '</button>' : '';
 
     var rightHtml = '';
     if (!dbMeta) {
@@ -3095,40 +3855,16 @@
         bodyHtml =
           '<div class="panel"><div class="panel-header"><h3 class="panel-title mono">' + esc(dbMeta.name) + '</h3>' +
           '<button type="button" class="btn btn-sm" id="db-reload-schema">' + esc(t('dbs.reloadSchema')) + '</button></div>' +
-          '<div class="panel-body">' +
+          '<div id="db-schema-slot" class="panel-body">' +
           (state.dbSchema
             ? '<pre class="code-block">' + esc(state.dbSchema) + '</pre>'
             : '<div class="empty-state">' + esc(t('dbs.emptySchema')) + '</div>') +
           '</div></div>';
       } else {
-        var resultHtml = '';
-        if (state.dbResult) {
-          if (state.dbResult.type === 'execute') {
-            resultHtml = '<div class="alert alert-info">' + esc(t('dbs.rowsAffected', { count: state.dbResult.rows_affected })) + '</div>';
-          } else {
-            var cols = state.dbResult.columns || [];
-            var rows = state.dbResult.rows || [];
-            var thead = '<tr>' + cols.map(function (c) { return '<th>' + esc(c) + '</th>'; }).join('') + '</tr>';
-            var tbody = rows.map(function (r) {
-              return '<tr>' + r.map(function (cell) {
-                var txt = cell === null ? 'NULL' : (typeof cell === 'object' ? JSON.stringify(cell) : String(cell));
-                return '<td class="mono text-xs">' + esc(txt) + '</td>';
-              }).join('') + '</tr>';
-            }).join('');
-            resultHtml =
-              '<div class="muted text-xs">' + esc(t('dbs.rowsReturned', { count: rows.length })) + '</div>' +
-              (rows.length
-                ? '<div class="table-wrap"><table class="data-table"><thead>' + thead + '</thead><tbody>' + tbody + '</tbody></table></div>'
-                : '<div class="empty-state">' + esc(t('dbs.noRows')) + '</div>');
-          }
-        }
         bodyHtml =
           '<div class="panel"><div class="panel-header"><div class="toolbar">' +
-          '<div><h3 class="panel-title mono">' + esc(dbMeta.name) + '</h3><div class="muted text-xs mono">' + esc(dbMeta.id) +
-          (dbMeta.read_only ? ' · Read-Only' : '') +
-          (dbMeta.max_rows ? ' · Max Rows: ' + esc(dbMeta.max_rows) : '') +
-          (dbMeta.max_size_mb ? ' · Max Size: ' + esc(dbMeta.max_size_mb) + ' MiB' : '') +
-          (dbMeta.description ? ' · ' + esc(dbMeta.description) : '') +
+          '<div><h3 class="panel-title mono">' + esc(dbMeta.name) + '</h3><div id="db-header-meta" class="muted text-xs mono">' +
+          buildDbMetaHtml(dbMeta) +
           '</div></div>' +
           '<div class="row">' +
           '<button type="button" class="btn btn-sm" id="db-sample-btn">' + esc(t('dbs.sampleSelect')) + '</button>' +
@@ -3144,32 +3880,39 @@
           '<button type="button" class="btn btn-primary" id="db-query-btn">' + esc(t('dbs.runQuery')) + '</button>' +
           (canWriteDb ? '<button type="button" class="btn" id="db-exec-btn">' + esc(t('dbs.runExecute')) + '</button>' : '') +
           '</div></div>' +
-          resultHtml +
+          '<div id="db-result-slot" class="stack gap-sm">' + buildDbResultHtml() + '</div>' +
           '</div></div>';
       }
       rightHtml = '<div class="stack gap-md">' + tabsHtml + bodyHtml + '</div>';
     }
 
-    root.innerHTML =
-      renderSectionTabs(
-        'data',
-        isAdmin() ? '<button type="button" class="btn btn-primary btn-sm" id="new-db-btn">+ ' + esc(t('dbs.newDb')) + '</button>' : ''
-      ) +
-      '<div class="split-layout">' +
-      '<div class="panel"><div class="panel-header"><h3 class="panel-title">' + esc(t('dbs.list')) + '</h3></div><div class="list-menu">' + dbMenu + '</div></div>' +
-      rightHtml + '</div>';
+    var snap = captureUiSnapshot(root);
+    if (state.dbs.length === 0) {
+      root.innerHTML = renderResourceEmpty(t('dbs.noDbs'), createDbBtnHtml);
+    } else {
+      root.innerHTML =
+        renderResourceBar({
+          selectId: 'db-switcher',
+          items: state.dbs,
+          selectedValue: state.selectedDbId,
+          valueFn: function (d) { return d.id; },
+          labelFn: function (d) { return d.name + (d.project_id ? ' · ' + projectNameById(d.project_id) : ''); },
+          actionHtml: createDbBtnHtml
+        }) +
+        rightHtml;
+    }
 
     if ($('new-db-btn')) $('new-db-btn').addEventListener('click', openCreateDbModal);
-    root.querySelectorAll('[data-select-db]').forEach(function (btn) {
-      btn.addEventListener('click', async function () {
-        state.selectedDbId = btn.getAttribute('data-select-db');
+    if ($('db-switcher')) {
+      $('db-switcher').addEventListener('change', async function (ev) {
+        state.selectedDbId = ev.target.value;
         state.dbResult = null;
         if (state.dbTab === 'schema') {
           try { await loadDbSchema(); } catch (e) { toast(e.message, 'error'); }
         }
         renderDbs(false);
       });
-    });
+    }
     root.querySelectorAll('[data-db-tab]').forEach(function (btn) {
       btn.addEventListener('click', async function () {
         state.dbTab = btn.getAttribute('data-db-tab');
@@ -3183,7 +3926,7 @@
       $('db-reload-schema').addEventListener('click', async function () {
         try {
           await loadDbSchema();
-          renderDbs(false);
+          renderDbSchemaPartial();
         } catch (e) { toast(e.message, 'error'); }
       });
     }
@@ -3209,7 +3952,12 @@
     }
     if ($('db-query-btn')) $('db-query-btn').addEventListener('click', function () { runDbQuery(dbMeta.id); });
     if ($('db-exec-btn')) $('db-exec-btn').addEventListener('click', function () { runDbExecute(dbMeta.id); });
-    if ($('db-edit-btn') && dbMeta) $('db-edit-btn').addEventListener('click', function () { openEditDbModal(dbMeta); });
+    if ($('db-edit-btn') && dbMeta) {
+      $('db-edit-btn').addEventListener('click', function () {
+        var latest = state.dbs.find(function (d) { return d.id === state.selectedDbId; }) || dbMeta;
+        openEditDbModal(latest);
+      });
+    }
     if ($('db-delete-btn') && dbMeta) {
       $('db-delete-btn').addEventListener('click', function () {
         var delId = dbMeta.id;
@@ -3229,6 +3977,8 @@
     if ($('db-fts-panel') && dbMeta) {
       renderDbFts(dbMeta, canWriteDb);
     }
+    markViewRendered(root, 'dbs');
+    restoreUiSnapshot(root, snap);
   }
 
   async function renderDbFts(db, canWrite) {
@@ -3351,7 +4101,7 @@
         json: { sql: sql, params: params }
       });
       state.dbResult = { type: 'query', columns: res.columns, rows: res.rows };
-      renderDbs(false);
+      renderDbResultPartial();
     } catch (e) { toast(e.message, 'error'); }
   }
 
@@ -3370,7 +4120,7 @@
         json: { statements: [{ sql: sql, params: params }] }
       });
       state.dbResult = { type: 'execute', rows_affected: res.rows_affected };
-      renderDbs(false);
+      renderDbResultPartial();
     } catch (e) { toast(e.message, 'error'); }
   }
 
@@ -3453,7 +4203,7 @@
           var maxRowsRaw = $('edb-max-rows').value.trim();
           var maxSizeRaw = $('edb-max-size').value.trim();
           try {
-            await api('/_api/v1/dbs/' + enc(dbMeta.id), {
+            var updated = await api('/_api/v1/dbs/' + enc(dbMeta.id), {
               method: 'PATCH',
               json: {
                 group: $('resource-group').value.trim(),
@@ -3466,7 +4216,7 @@
             });
             closeModal();
             toast(t('dbs.updated'), 'success');
-            renderDbs(true);
+            updateDbInPlace(updated);
           } catch (e) { toast(e.message, 'error'); }
         });
       }
@@ -3561,7 +4311,7 @@
     if (state.currentRoute !== 'search') return;
     var isCurrentSearch = beginViewRender('search');
     if (fetchData) {
-      root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
+      showViewLoadingIfNeeded(root, 'search');
     }
     try {
       var data = await Promise.all([api('/_api/v1/search'), api('/_api/v1/apps')]);
@@ -3585,16 +4335,7 @@
       var hasMoreDocs = docs.length > 100;
       docs = docs.slice(0, 100);
       var writable = selected && canWriteResource(selected.project_id);
-      var idxMenu = searchState.indexes.length
-        ? groupedMenu(searchState.indexes, function (item) {
-            return '<button type="button" class="list-menu-item' + (item.id === searchState.selected ? ' active' : '') + '" data-select-search-idx="' + esc(item.id) + '">' +
-              '<span class="truncate">' + esc(item.name) + '</span>' +
-              '<span class="row gap-xs" style="flex-wrap:nowrap;">' +
-              (item.project_id ? '<span class="badge badge-neutral text-xs">' + esc(projectNameById(item.project_id)) + '</span>' : '') +
-              '<span class="badge badge-neutral text-xs mono">' + esc(item.doc_count || 0) + '</span>' +
-              '</span></button>';
-          })
-        : '<div class="empty-state" style="padding:20px 10px;">' + esc(t('search.noIndexes')) + '</div>';
+      var createSearchBtnHtml = !isReadonly() ? '<button type="button" class="btn btn-primary btn-sm" id="search-create-index">+ ' + esc(t('search.newIndex')) + '</button>' : '';
 
       var facetEntries = (searchState.result && searchState.result.facets) ? Object.keys(searchState.result.facets) : [];
       var facetsHtml = facetEntries.length ? '<div class="row gap-xs">' + facetEntries.map(function (field) {
@@ -3678,25 +4419,31 @@
           tabBodyHtml +
           '</div></div>';
 
-      root.innerHTML =
-        renderSectionTabs(
-          'data',
-          !isReadonly() ? '<button type="button" class="btn btn-primary btn-sm" id="search-create-index">+ ' + esc(t('search.newIndex')) + '</button>' : ''
-        ) +
-        '<div class="split-layout">' +
-        '<div class="panel"><div class="panel-header"><h3 class="panel-title">' + esc(t('search.indexes')) + '</h3></div>' +
-        '<div class="list-menu">' + idxMenu + '</div></div>' +
-        detailHtml + '</div>';
+      var snap = captureUiSnapshot(root);
+      if (searchState.indexes.length === 0) {
+        root.innerHTML = renderResourceEmpty(t('search.noIndexes'), createSearchBtnHtml);
+      } else {
+        root.innerHTML =
+          renderResourceBar({
+            selectId: 'search-switcher',
+            items: searchState.indexes,
+            selectedValue: searchState.selected,
+            valueFn: function (item) { return item.id; },
+            labelFn: function (item) { return item.name + ' (' + (item.doc_count || 0) + ')'; },
+            actionHtml: createSearchBtnHtml
+          }) +
+          detailHtml;
+      }
 
-      root.querySelectorAll('[data-select-search-idx]').forEach(function (btn) {
-        btn.addEventListener('click', function () {
-          searchState.selected = btn.getAttribute('data-select-search-idx');
+      if ($('search-switcher')) {
+        $('search-switcher').addEventListener('change', function (ev) {
+          searchState.selected = ev.target.value;
           searchState.offset = 0;
           searchState.facets = {};
           searchState.result = null;
           renderSearch(false);
         });
-      });
+      }
       root.querySelectorAll('[data-search-tab]').forEach(function (btn) {
         btn.addEventListener('click', function () {
           searchState.tab = btn.getAttribute('data-search-tab') || 'playground';
@@ -3886,15 +4633,20 @@
           } catch (e) { toast(e.message, 'error'); }
         });
       });
+      markViewRendered(root, 'search');
+      restoreUiSnapshot(root, snap);
     } catch (e) {
-      if (isCurrentSearch()) root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+      if (isCurrentSearch()) {
+        root.removeAttribute('data-view-key');
+        root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+      }
     }
   }
 
   async function renderRuntime() {
     var root = $('view-root');
     var isCurrent = beginViewRender('apps');
-    root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
+    showViewLoadingIfNeeded(root, 'runtime');
     try {
       await ensureRuntimeComponent();
       if (!isCurrent()) return;
@@ -3903,7 +4655,10 @@
       state.projects = res[0] || [];
       state.routes = res[1] || [];
     } catch (e) {
-      if (isCurrent()) root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+      if (isCurrent()) {
+        root.removeAttribute('data-view-key');
+        root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+      }
       return;
     }
     if (!isCurrent()) return;
@@ -3916,12 +4671,13 @@
     rp.routes = state.routes;
     rp.addEventListener('fp-create-runtime', openCreateRuntimeModal);
     root.appendChild(rp);
+    markViewRendered(root, 'runtime');
   }
 
   async function renderOps(fetchData) {
     var root = $('view-root');
     var isCurrent = beginViewRender('ops');
-    root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
+    showViewLoadingIfNeeded(root, 'ops');
     try {
       await ensureOpsComponent();
       if (!isCurrent()) return;
@@ -3933,7 +4689,10 @@
         } catch (_) {}
       }
     } catch (e) {
-      if (isCurrent()) root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+      if (isCurrent()) {
+        root.removeAttribute('data-view-key');
+        root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+      }
       return;
     }
     if (!isCurrent()) return;
@@ -3943,17 +4702,21 @@
     ops.scope = getScope();
     ops.projects = state.projects;
     root.querySelector('.subnav-content').appendChild(ops);
+    markViewRendered(root, 'ops');
   }
 
   async function renderUpdates() {
     var root = $('view-root');
     var isCurrent = beginViewRender('updates');
-    root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
+    showViewLoadingIfNeeded(root, 'updates');
     try {
       await ensureUpdateComponent();
       if (!isCurrent()) return;
     } catch (e) {
-      if (isCurrent()) root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+      if (isCurrent()) {
+        root.removeAttribute('data-view-key');
+        root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+      }
       return;
     }
     if (!isCurrent()) return;
@@ -3962,17 +4725,21 @@
     upd.token = state.token || readStoredToken();
     upd.scope = getScope();
     root.querySelector('.subnav-content').appendChild(upd);
+    markViewRendered(root, 'updates');
   }
 
   async function renderAi() {
     var root = $('view-root');
     var isCurrent = beginViewRender('ai');
-    root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
+    showViewLoadingIfNeeded(root, 'ai');
     try {
       await ensureAiComponent();
       if (!isCurrent()) return;
     } catch (e) {
-      if (isCurrent()) root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+      if (isCurrent()) {
+        root.removeAttribute('data-view-key');
+        root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+      }
       return;
     }
     if (!isCurrent()) return;
@@ -3981,17 +4748,21 @@
     panel.token = state.token || readStoredToken();
     panel.scope = getScope();
     root.appendChild(panel);
+    markViewRendered(root, 'ai');
   }
 
   async function renderSettings() {
     var root = $('view-root');
     var isCurrent = beginViewRender('settings');
-    root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
+    showViewLoadingIfNeeded(root, 'settings');
     try {
       await ensureSettingsComponent();
       if (!isCurrent()) return;
     } catch (e) {
-      if (isCurrent()) root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+      if (isCurrent()) {
+        root.removeAttribute('data-view-key');
+        root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+      }
       return;
     }
     if (!isCurrent()) return;
@@ -4000,27 +4771,12 @@
     panel.token = state.token || readStoredToken();
     panel.scope = getScope();
     root.querySelector('.subnav-content').appendChild(panel);
+    markViewRendered(root, 'settings');
   }
 
   // --- 8. Tokens (Admin Only) ---
 
-  async function renderTokens(fetchData) {
-    var root = $('view-root');
-    var isCurrent = beginViewRender('tokens');
-    if (fetchData) {
-      root.innerHTML = '<div class="panel"><div class="empty-state">' + esc(t('common.loading')) + '</div></div>';
-      try {
-        var res = await Promise.all([api('/_api/v1/tokens'), api('/_api/v1/apps')]);
-        if (!isCurrent()) return;
-        state.tokens = res[0] || [];
-        state.projects = res[1] || [];
-      } catch (e) {
-        if (isCurrent()) root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
-        return;
-      }
-    }
-    if (!isCurrent()) return;
-
+  function buildTokensTableHtml() {
     var rows = state.tokens.map(function (tok) {
       var scopeStr = typeof tok.scope === 'string'
         ? tok.scope
@@ -4035,32 +4791,70 @@
         '<button type="button" class="btn btn-danger btn-sm" data-revoke-tok="' + esc(tok.id) + '" data-tok-name="' + esc(tok.name) + '">' + esc(t('tokens.revoke')) + '</button>' +
         '</div></td></tr>';
     }).join('');
+    return rows
+      ? '<div class="table-wrap"><table class="data-table stack-mobile"><thead><tr><th>' + esc(t('common.name')) + '</th><th>' + esc(t('tokens.scope')) + '</th><th>' + esc(t('common.expiresAt')) + '</th><th>' + esc(t('tokens.lastUsed')) + '</th><th>' + esc(t('common.createdAt')) + '</th><th class="th-actions">' + esc(t('common.actions')) + '</th></tr></thead><tbody>' + rows + '</tbody></table></div>'
+      : '<div class="empty-state">' + esc(t('tokens.empty')) + '</div>';
+  }
 
-    root.innerHTML =
-      renderSectionTabs(
-        'settings',
-        '<button type="button" class="btn btn-primary btn-sm" id="new-token-btn">+ ' + esc(t('tokens.new')) + '</button>'
-      ) +
-      '<div class="panel">' +
-      (rows
-        ? '<div class="table-wrap"><table class="data-table stack-mobile"><thead><tr><th>' + esc(t('common.name')) + '</th><th>' + esc(t('tokens.scope')) + '</th><th>' + esc(t('common.expiresAt')) + '</th><th>' + esc(t('tokens.lastUsed')) + '</th><th>' + esc(t('common.createdAt')) + '</th><th class="th-actions">' + esc(t('common.actions')) + '</th></tr></thead><tbody>' + rows + '</tbody></table></div>'
-        : '<div class="empty-state">' + esc(t('tokens.empty')) + '</div>') +
-      '</div>';
-
-    $('new-token-btn').addEventListener('click', openCreateTokenModal);
-    root.querySelectorAll('[data-revoke-tok]').forEach(function (btn) {
+  function bindTokensTableEvents(scopeEl) {
+    if (!scopeEl) return;
+    scopeEl.querySelectorAll('[data-revoke-tok]').forEach(function (btn) {
       btn.addEventListener('click', function () {
         var id = btn.getAttribute('data-revoke-tok');
         var name = btn.getAttribute('data-tok-name');
         confirmAction(t('tokens.revokeConfirm', { name: name }), async function () {
           try {
             await api('/_api/v1/tokens/' + enc(id), { method: 'DELETE' });
+            state.tokens = state.tokens.filter(function (tok) { return tok.id !== id; });
             toast(t('tokens.revoked'), 'success');
-            renderTokens(true);
+            renderTokensTablePartial();
           } catch (e) { toast(e.message, 'error'); }
         });
       });
     });
+  }
+
+  function renderTokensTablePartial() {
+    var slot = $('tokens-table-slot');
+    if (!slot) return renderTokens(false);
+    slot.innerHTML = buildTokensTableHtml();
+    bindTokensTableEvents(slot);
+  }
+
+  async function renderTokens(fetchData) {
+    var root = $('view-root');
+    var isCurrent = beginViewRender('tokens');
+    if (fetchData) {
+      showViewLoadingIfNeeded(root, 'tokens');
+      try {
+        var res = await Promise.all([api('/_api/v1/tokens'), api('/_api/v1/apps')]);
+        if (!isCurrent()) return;
+        state.tokens = res[0] || [];
+        state.projects = res[1] || [];
+      } catch (e) {
+        if (isCurrent()) {
+          root.removeAttribute('data-view-key');
+          root.innerHTML = '<div class="alert alert-error">' + esc(e.message) + '</div>';
+        }
+        return;
+      }
+    }
+    if (!isCurrent()) return;
+
+    var snap = captureUiSnapshot(root);
+    root.innerHTML =
+      renderSectionTabs(
+        'settings',
+        '<button type="button" class="btn btn-primary btn-sm" id="new-token-btn">+ ' + esc(t('tokens.new')) + '</button>'
+      ) +
+      '<div id="tokens-table-slot" class="panel">' +
+      buildTokensTableHtml() +
+      '</div>';
+
+    $('new-token-btn').addEventListener('click', openCreateTokenModal);
+    bindTokensTableEvents($('tokens-table-slot'));
+    markViewRendered(root, 'tokens');
+    restoreUiSnapshot(root, snap);
   }
 
   function openCreateTokenModal() {
@@ -4099,7 +4893,8 @@
               }
             });
             openTokenSecretModal(res.token);
-            renderTokens(true);
+            state.tokens = (await api('/_api/v1/tokens')) || [];
+            renderTokensTablePartial();
           } catch (e) { toast(e.message, 'error'); }
         });
       }
@@ -4304,6 +5099,7 @@
     root.innerHTML =
       renderSectionTabs('ops') +
       tabsHtml + bodyHtml;
+    markViewRendered(root, 'logs');
 
     updateSseBadge();
 
@@ -4419,7 +5215,7 @@
     if ($('refresh-btn')) {
       $('refresh-btn').addEventListener('click', function () { renderCurrentRoute(true); });
     }
-    if ($('open-drawer-btn')) $('open-drawer-btn').addEventListener('click', openDrawer);
+    if ($('open-drawer-btn')) $('open-drawer-btn').addEventListener('click', toggleSidebar);
     if ($('mobile-more-btn')) $('mobile-more-btn').addEventListener('click', openDrawer);
     if ($('close-drawer-btn')) $('close-drawer-btn').addEventListener('click', closeDrawer);
     if ($('drawer-backdrop')) $('drawer-backdrop').addEventListener('click', closeDrawer);
@@ -4429,6 +5225,13 @@
       if (ev.key === 'Escape') {
         closeModal();
         closeDrawer();
+      } else if ((ev.ctrlKey || ev.metaKey) && !ev.shiftKey && !ev.altKey && (ev.key === 'b' || ev.key === 'B')) {
+        var tag = ev.target && ev.target.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (ev.target && ev.target.isContentEditable)) return;
+        if (state.status) {
+          ev.preventDefault();
+          toggleSidebar();
+        }
       }
     });
 
@@ -4522,6 +5325,11 @@
       }
     }
     applyStaticI18n();
+    try {
+      if (localStorage.getItem(SIDEBAR_STORAGE) === '1') {
+        applySidebarCollapsed(true);
+      }
+    } catch (_) {}
 
     var savedToken = readStoredToken();
     if (savedToken) {
