@@ -96,11 +96,36 @@ settingsSheet.replaceSync(`
     grid-template-columns: repeat(auto-fit, minmax(175px, 1fr));
     gap: 12px;
   }
+  .endpoint-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 12px;
+  }
   .info-card {
     background: var(--surface-subtle);
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
     padding: 10px 12px;
+    min-width: 0;
+    overflow: hidden;
+  }
+  .endpoint-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-top: 6px;
+    min-width: 0;
+  }
+  .endpoint-url {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    word-break: break-all;
+    line-height: 1.4;
+  }
+  .endpoint-row .btn {
+    flex-shrink: 0;
   }
   .info-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
   .info-val { font-size: 14px; font-weight: 600; margin-top: 3px; word-break: break-all; }
@@ -1139,8 +1164,8 @@ class FpPlatformSettings extends HTMLElement {
             ` : ''}
             <div class="info-card">
               <div class="info-label">${esc(this.t('settings.aiProxyEndpoint'))}</div>
-              <div class="row-between" style="margin-top:4px;">
-                <span class="mono text-xs">${esc(aiProxyUrl)}</span>
+              <div class="endpoint-row">
+                <span class="mono text-xs endpoint-url">${esc(aiProxyUrl)}</span>
                 <button type="button" class="btn btn-sm" data-copy-val="${esc(aiProxyUrl)}">${esc(this.t('common.copy'))}</button>
               </div>
             </div>
@@ -1153,25 +1178,25 @@ class FpPlatformSettings extends HTMLElement {
           <h3 class="panel-title">${esc(this.t('settings.mcpTitle'))}</h3>
         </div>
         <div class="panel-body stack gap-sm">
-          <div class="info-grid">
+          <div class="endpoint-grid">
             <div class="info-card">
               <div class="info-label">MCP HTTP</div>
-              <div class="row-between" style="margin-top:4px;">
-                <span class="mono text-xs">${esc(mcpUrl)}</span>
+              <div class="endpoint-row">
+                <span class="mono text-xs endpoint-url">${esc(mcpUrl)}</span>
                 <button type="button" class="btn btn-sm" data-copy-val="${esc(mcpUrl)}">${esc(this.t('common.copy'))}</button>
               </div>
             </div>
             <div class="info-card">
               <div class="info-label">OpenAPI 3.1</div>
-              <div class="row-between" style="margin-top:4px;">
-                <span class="mono text-xs">${esc(openapiUrl)}</span>
+              <div class="endpoint-row">
+                <span class="mono text-xs endpoint-url">${esc(openapiUrl)}</span>
                 <button type="button" class="btn btn-sm" data-copy-val="${esc(openapiUrl)}">${esc(this.t('common.copy'))}</button>
               </div>
             </div>
             <div class="info-card">
               <div class="info-label">llms.txt</div>
-              <div class="row-between" style="margin-top:4px;">
-                <span class="mono text-xs">${esc(llmsUrl)}</span>
+              <div class="endpoint-row">
+                <span class="mono text-xs endpoint-url">${esc(llmsUrl)}</span>
                 <button type="button" class="btn btn-sm" data-copy-val="${esc(llmsUrl)}">${esc(this.t('common.copy'))}</button>
               </div>
             </div>
